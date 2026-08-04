@@ -13,6 +13,7 @@ import 'package:pkmproject/services/ble_relay_service.dart';
 import 'package:pkmproject/services/database_helper.dart';
 import 'package:pkmproject/services/demo_seed_service.dart';
 import 'package:pkmproject/services/experiment_logger.dart';
+import 'package:pkmproject/services/native_bridge_service.dart';
 import 'package:pkmproject/services/workmanager_service.dart';
 import 'package:pkmproject/sync_service.dart';
 import 'package:pkmproject/utils/navigator_key.dart';
@@ -153,7 +154,7 @@ class MyApp extends StatelessWidget {
 void backgroundServiceMain() {
   WidgetsFlutterBinding.ensureInitialized();
 
-  const backgroundChannel = MethodChannel('com.example.pkmproject/mesh');
+  const backgroundChannel = MethodChannel('id.ac.usu.resqmesh/mesh');
   final lastProcessedPayloads = <String, int>{};
   BleAdvertiserService().claimSchedulerOwnership();
 
@@ -168,6 +169,7 @@ void backgroundServiceMain() {
     SyncService().startSyncListener();
     await BleRelayService().start();
     await BleRelayService().recoverPersistedRelayState();
+    await _drainNativeBleInbox();
   });
 
   backgroundChannel.setMethodCallHandler((call) async {
@@ -177,7 +179,7 @@ void backgroundServiceMain() {
         break;
       case "connectivityChanged":
         debugPrint("[backgroundServiceMain] Connectivity changed");
-        await SyncService().initiateFullSync();
+        await WorkManagerService.registerSyncTask();
         break;
       case "recoverPersistedRelayState":
         debugPrint("[backgroundServiceMain] Recovering persisted relay state");
@@ -193,20 +195,36 @@ void backgroundServiceMain() {
         final args = Map<String, dynamic>.from(call.arguments as Map);
         final payloadBase64 = args['payload'] as String?;
         final rssi = args['rssi'] as int?;
+        final inboxId = args['inbox_id'] as String?;
         if (payloadBase64 == null || payloadBase64.isEmpty) return;
 
         final now = DateTime.now().millisecondsSinceEpoch;
         final last = lastProcessedPayloads[payloadBase64] ?? 0;
-        if (now - last < 5000) return;
+        if (now - last < 5000) {
+          if (inboxId != null) {
+            await NativeBridgeService.acknowledgeBleInboxItem(inboxId);
+          }
+          return;
+        }
         lastProcessedPayloads[payloadBase64] = now;
         if (lastProcessedPayloads.length > 50) {
           lastProcessedPayloads.clear();
         }
 
-        await BleRelayService().processIncomingBase64(
-          payloadBase64,
-          rssi: rssi,
-        );
+        try {
+          await BleRelayService().processIncomingBase64(
+            payloadBase64,
+            rssi: rssi,
+          );
+          if (inboxId != null) {
+            await NativeBridgeService.acknowledgeBleInboxItem(inboxId);
+          }
+        } catch (_) {
+          if (inboxId != null) {
+            await NativeBridgeService.failBleInboxItem(inboxId);
+          }
+          rethrow;
+        }
         break;
       default:
         debugPrint("[backgroundServiceMain] Unknown method: ${call.method}");
@@ -214,4 +232,22 @@ void backgroundServiceMain() {
   });
 
   debugPrint("[backgroundServiceMain] BLE-only background service ready");
+}
+
+Future<void> _drainNativeBleInbox() async {
+  final pending = await NativeBridgeService.getPendingBleInbox();
+  for (final item in pending) {
+    final id = item['id'] as String?;
+    final payloadBase64 = item['payload_base64'] as String?;
+    final rssi = item['rssi'] as int?;
+    if (id == null || payloadBase64 == null || payloadBase64.isEmpty) {
+      continue;
+    }
+    try {
+      await BleRelayService().processIncomingBase64(payloadBase64, rssi: rssi);
+      await NativeBridgeService.acknowledgeBleInboxItem(id);
+    } catch (_) {
+      await NativeBridgeService.failBleInboxItem(id);
+    }
+  }
 }

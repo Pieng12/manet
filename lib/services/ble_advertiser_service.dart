@@ -11,6 +11,7 @@ import 'package:pkmproject/services/background_service_manager.dart';
 import 'package:pkmproject/services/ble_protocol.dart';
 import 'package:pkmproject/services/database_helper.dart';
 import 'package:pkmproject/services/experiment_logger.dart';
+import 'package:pkmproject/services/native_bridge_service.dart';
 import 'package:pkmproject/services/relay_queue_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -23,7 +24,7 @@ class BleAdvertiserService {
   static const String kResqMeshServiceUuidString =
       "000021FE-0000-1000-8000-00805F9B34FB";
   static const MethodChannel _nativeChannel = MethodChannel(
-    'com.example.pkmproject/mesh',
+    'id.ac.usu.resqmesh/mesh',
   );
   static const String _pendingAckPrefsKey = 'pending_ble_ack_packets';
   static const bool _debugVisibleAdvertising = bool.fromEnvironment(
@@ -46,7 +47,12 @@ class BleAdvertiserService {
   Timer? _ackRestoreTimer;
   Timer? _slotTimer;
   bool _isSchedulerOwner = false;
+  bool _isSelecting = false;
+  Timer? _queueWakeTimer;
+  RelaySchedulerState _schedulerState = RelaySchedulerState.stopped;
   bool get isSchedulerOwner => _isSchedulerOwner;
+  RelaySchedulerState get schedulerState => _schedulerState;
+  String? get currentAdvertisedMessageId => _currentAdvertisedMessageId;
 
   void claimSchedulerOwnership() {
     _isSchedulerOwner = true;
@@ -54,6 +60,7 @@ class BleAdvertiserService {
 
   void releaseSchedulerOwnership() {
     _isSchedulerOwner = false;
+    _cancelQueueWakeTimer();
   }
 
   Future<bool> _requestPermissions() async {
@@ -96,6 +103,36 @@ class BleAdvertiserService {
     }
   }
 
+  Future<void> reconcileNativeAdvertisingState() async {
+    final nativeStatus = await nativeAdvertisingStatus();
+    final nativeActive = nativeStatus['active'] == true;
+    if (_isAdvertising == nativeActive) return;
+
+    await _experimentLogger.logEvent(
+      eventType: ExperimentEventTypes.bleStateReconciled,
+      deviceId: 'unknown',
+      messageId: _currentAdvertisedMessageId,
+      detail: {
+        'dart_active': _isAdvertising,
+        'native_active': nativeActive,
+        'native_state': nativeStatus['status'],
+        'scheduler_state': _schedulerState.name,
+      },
+    );
+
+    if (nativeActive) {
+      _isAdvertising = true;
+      _setSchedulerState(RelaySchedulerState.advertising);
+      _isAdvertisingController.add(_isAdvertising);
+      _startSlotTimer();
+      return;
+    }
+
+    _markAdvertisingInactive();
+    _setSchedulerState(RelaySchedulerState.failedRetryable);
+    await _scheduleNextQueueWake();
+  }
+
   void _startWatchdog() {
     _watchdogTimer?.cancel();
     _watchdogTimer = Timer.periodic(const Duration(seconds: 30), (_) async {
@@ -107,7 +144,7 @@ class BleAdvertiserService {
       final actualNative = await isNativeAdvertising();
       if (!actualNative) {
         print("[BleAdvertiserService] Watchdog restarting BLE advertising.");
-        await advertiseLatestOrStop(preemptCurrent: true);
+        await reconcileNativeAdvertisingState();
       }
     });
   }
@@ -130,6 +167,86 @@ class BleAdvertiserService {
     _slotTimer = null;
   }
 
+  void _setSchedulerState(RelaySchedulerState state) {
+    _schedulerState = state;
+  }
+
+  void _cancelQueueWakeTimer() {
+    if (_queueWakeTimer == null) return;
+    _queueWakeTimer?.cancel();
+    _queueWakeTimer = null;
+    _experimentLogger.logEvent(
+      eventType: ExperimentEventTypes.queueWakeCancelled,
+      deviceId: 'unknown',
+      detail: {'scheduler_state': _schedulerState.name},
+    );
+  }
+
+  Future<void> _publishPendingRelayWork() async {
+    await NativeBridgeService.setHasPendingRelayWork(
+      await _relayQueue.hasActiveItems(),
+    );
+  }
+
+  Future<void> _scheduleNextQueueWake() async {
+    _cancelQueueWakeTimer();
+    await _publishPendingRelayWork();
+    if (_isAdvertising) {
+      _setSchedulerState(RelaySchedulerState.advertising);
+      return;
+    }
+    final earliest = await _relayQueue.earliestNextEligibleAt();
+    if (earliest == null) {
+      _setSchedulerState(
+        _isAdvertising
+            ? RelaySchedulerState.advertising
+            : RelaySchedulerState.stopped,
+      );
+      await _experimentLogger.logEvent(
+        eventType: ExperimentEventTypes.queueEmpty,
+        deviceId: 'unknown',
+        detail: {'scheduler_state': _schedulerState.name},
+      );
+      return;
+    }
+
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final delayMs = earliest <= now ? 0 : earliest - now;
+    _setSchedulerState(RelaySchedulerState.waitingNextSlot);
+    if (delayMs > 0) {
+      await _experimentLogger.logEvent(
+        eventType: ExperimentEventTypes.waitingNextEligible,
+        deviceId: 'unknown',
+        detail: {
+          'next_eligible_at': earliest,
+          'delay_ms': delayMs,
+          'queue_size': await _relayQueue.queueSize(),
+        },
+      );
+    }
+    await _experimentLogger.logEvent(
+      eventType: earliest <= now
+          ? ExperimentEventTypes.queueWakeTriggered
+          : ExperimentEventTypes.queueWakeScheduled,
+      deviceId: 'unknown',
+      detail: {
+        'next_eligible_at': earliest,
+        'delay_ms': delayMs,
+        'scheduler_state': _schedulerState.name,
+        'queue_size': await _relayQueue.queueSize(),
+      },
+    );
+
+    _queueWakeTimer = Timer(Duration(milliseconds: delayMs), () async {
+      await _experimentLogger.logEvent(
+        eventType: ExperimentEventTypes.queueWakeTriggered,
+        deviceId: 'unknown',
+        detail: {'next_eligible_at': earliest},
+      );
+      await advertiseLatestOrStop(preemptCurrent: true);
+    });
+  }
+
   Future<void> startAdvertising({SOSMessage? sosMessage}) async {
     if (sosMessage != null) {
       await enqueueSosForAdvertising(sosMessage, preemptCurrent: true);
@@ -149,6 +266,7 @@ class BleAdvertiserService {
       priority: priority,
       nextEligibleAt: nextEligibleAt ?? 0,
     );
+    await _publishPendingRelayWork();
     await advertiseLatestOrStop(preemptCurrent: preemptCurrent);
   }
 
@@ -166,6 +284,7 @@ class BleAdvertiserService {
       hopCount: hopCount,
     );
     if (result.shouldRelay) {
+      await _publishPendingRelayWork();
       await advertiseLatestOrStop(
         preemptCurrent: true,
         ackSlotDuration: duration,
@@ -182,52 +301,67 @@ class BleAdvertiserService {
       return;
     }
 
-    _ackRestoreTimer?.cancel();
-    _stopSlotTimer();
+    if (_isSelecting) return;
+    _isSelecting = true;
+    _setSchedulerState(RelaySchedulerState.selecting);
 
-    final pendingAck = await _takePendingAck();
-    if (pendingAck != null) {
-      final packet = BlePacket.unpack(pendingAck);
-      if (packet != null && packet.isAck) {
-        await _relayQueue.enqueueAck(
-          messageId: RelayQueueService.ackMessageId(
-            senderCrc: packet.senderCrc,
-            ackTimestampMs: packet.timestampMs,
-            statusIndex: packet.status.index,
-          ),
-          payloadBase64: base64Encode(pendingAck),
-        );
+    try {
+      _cancelQueueWakeTimer();
+      _ackRestoreTimer?.cancel();
+      _stopSlotTimer();
+
+      final pendingAck = await _takePendingAck();
+      if (pendingAck != null) {
+        final packet = BlePacket.unpack(pendingAck);
+        if (packet != null && packet.isAck) {
+          await _relayQueue.enqueueAck(
+            messageId: RelayQueueService.ackMessageId(
+              senderCrc: packet.senderCrc,
+              ackTimestampMs: packet.timestampMs,
+              statusIndex: packet.status.index,
+            ),
+            payloadBase64: base64Encode(pendingAck),
+          );
+        }
       }
-    }
 
-    if (_isAdvertising) {
-      if (!preemptCurrent && await isNativeAdvertising()) {
-        _startSlotTimer();
+      if (_isAdvertising) {
+        if (!preemptCurrent && await isNativeAdvertising()) {
+          _setSchedulerState(RelaySchedulerState.advertising);
+          _startSlotTimer();
+          return;
+        }
+        await stopAdvertising();
+      }
+
+      if (!await _requestPermissions()) {
+        print(
+          "[BleAdvertiserService] BLE advertising permissions not granted.",
+        );
+        _setSchedulerState(RelaySchedulerState.failedPermission);
+        await _scheduleNextQueueWake();
         return;
       }
-      await stopAdvertising();
-    }
 
-    if (!await _requestPermissions()) {
-      print("[BleAdvertiserService] BLE advertising permissions not granted.");
-      return;
-    }
+      final queued = await _nextQueuedAdvertisement();
+      if (queued?.payload != null) {
+        await _startQueuedAck(
+          queued!,
+          duration: ackSlotDuration ?? _relayQueue.slotDurationForMode(),
+        );
+        return;
+      }
 
-    final queued = await _nextQueuedAdvertisement();
-    if (queued?.payload != null) {
-      await _startQueuedAck(
-        queued!,
-        duration: ackSlotDuration ?? _relayQueue.slotDurationForMode(),
-      );
-      return;
+      final message = queued?.message;
+      if (message == null) {
+        await stopAdvertising();
+        await _scheduleNextQueueWake();
+        return;
+      }
+      await _startQueuedSos(queued!);
+    } finally {
+      _isSelecting = false;
     }
-
-    final message = queued?.message;
-    if (message == null) {
-      await stopAdvertising();
-      return;
-    }
-    await _startQueuedSos(queued!);
   }
 
   Future<void> flushPendingAck() => advertiseLatestOrStop();
@@ -241,6 +375,7 @@ class BleAdvertiserService {
 
   Future<void> stopAdvertising() async {
     _ackRestoreTimer?.cancel();
+    _cancelQueueWakeTimer();
     _stopSlotTimer();
     _stopWatchdog();
 
@@ -266,6 +401,7 @@ class BleAdvertiserService {
       if (item.isAck) {
         if (item.payloadBase64 == null) {
           await _relayQueue.removeItem(item);
+          await _scheduleNextQueueWake();
           continue;
         }
         await _logSchedulerSelection(item);
@@ -278,6 +414,7 @@ class BleAdvertiserService {
           message.localState == 'acked' ||
           message.localState == 'synced') {
         await _relayQueue.removeItem(item);
+        await _scheduleNextQueueWake();
         continue;
       }
       await _logSchedulerSelection(item);
@@ -332,6 +469,7 @@ class BleAdvertiserService {
     try {
       if (await _startNativePayload(payload)) {
         _isAdvertising = true;
+        _setSchedulerState(RelaySchedulerState.advertising);
         _isAdvertisingController.add(_isAdvertising);
         _startWatchdog();
         final succeededAt = DateTime.now().millisecondsSinceEpoch;
@@ -357,6 +495,7 @@ class BleAdvertiserService {
           payloadHash: payloadHash,
         );
         _startSlotTimer();
+        await _scheduleNextQueueWake();
         print(
           "[BleAdvertiserService] Started native BLE SOS advertising (${payload.length} bytes).",
         );
@@ -378,6 +517,8 @@ class BleAdvertiserService {
       hopCount: message.hopCount,
       payloadHash: payloadHash,
     );
+    _setSchedulerState(RelaySchedulerState.failedRetryable);
+    await _scheduleNextQueueWake();
     _markAdvertisingInactive();
   }
 
@@ -405,6 +546,7 @@ class BleAdvertiserService {
     try {
       if (await _startNativePayload(payload)) {
         _isAdvertising = true;
+        _setSchedulerState(RelaySchedulerState.advertising);
         _currentAdvertisedMessageId = null;
         _isAdvertisingController.add(_isAdvertising);
         _startWatchdog();
@@ -433,6 +575,7 @@ class BleAdvertiserService {
         _ackRestoreTimer = Timer(duration, () {
           advertiseLatestOrStop(preemptCurrent: true);
         });
+        await _scheduleNextQueueWake();
         return;
       }
     } catch (e) {
@@ -452,6 +595,8 @@ class BleAdvertiserService {
       detail: {'kind': 'ack'},
     );
     await _persistPendingAck(payload);
+    _setSchedulerState(RelaySchedulerState.failedRetryable);
+    await _scheduleNextQueueWake();
   }
 
   void _markAdvertisingInactive() {

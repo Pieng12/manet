@@ -352,11 +352,13 @@ class _HomeScreenState extends State<HomeScreen>
   Future<void> _toggleBleRelay() async {
     try {
       if (_isBleScanningRunning || _isBleAdvertisingRunning) {
+        await NativeBridgeService.setRelayModeEnabled(false);
         await NativeBridgeService.stopBleWakeUpScan();
         await BackgroundServiceManager.stopBackgroundService();
         _log('BLE relay stopped.');
         if (mounted) ResqFeedback.info(context, 'Relay BLE dihentikan.');
       } else {
+        await NativeBridgeService.setRelayModeEnabled(true);
         await BackgroundServiceManager.startBackgroundService();
         await BackgroundServiceManager.requestSchedulerTick();
         _log('BLE relay started.');

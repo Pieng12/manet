@@ -5,7 +5,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:workmanager/workmanager.dart';
 
 class WorkManagerService {
-  static const String syncTaskName = 'syncSOSMessages';
+  static const String gatewaySyncWorkName = 'resqmeshGatewaySync';
+  static const String syncTaskName = gatewaySyncWorkName;
 
   static Future<void> initialize() async {
     if (SyncService.offlineOnly) {
@@ -27,11 +28,13 @@ class WorkManagerService {
 
     try {
       await Workmanager().registerOneOffTask(
-        syncTaskName,
-        syncTaskName,
-        existingWorkPolicy: ExistingWorkPolicy.replace,
+        gatewaySyncWorkName,
+        gatewaySyncWorkName,
+        existingWorkPolicy: ExistingWorkPolicy.keep,
         constraints: Constraints(networkType: NetworkType.connected),
         initialDelay: const Duration(seconds: 5),
+        backoffPolicy: BackoffPolicy.exponential,
+        backoffPolicyDelay: const Duration(minutes: 1),
       );
 
       try {
@@ -49,7 +52,7 @@ class WorkManagerService {
 
   static Future<void> cancelSyncTask() async {
     try {
-      await Workmanager().cancelByUniqueName(syncTaskName);
+      await Workmanager().cancelByUniqueName(gatewaySyncWorkName);
       try {
         final prefs = await SharedPreferences.getInstance();
         await prefs.setBool('pending_sync', false);

@@ -124,3 +124,28 @@ Timestamp BLE memakai presisi satu detik. Gunakan timestamp canonical dari
 payload/identity saat menghitung duplicate, ACK tombstone, dan recovery queue.
 Mode `basic` memakai slot aktual 2 detik, sedangkan `controlled` memakai slot
 default 5 detik plus adaptive backoff.
+
+## Catatan P5 untuk Uji Perangkat Fisik
+
+Build resmi penelitian menargetkan minimum Android 8/API 26 karena scan
+background memakai BLE PendingIntent. Jalankan matrix berikut sebelum mencatat
+hasil:
+
+```bash
+flutter clean
+flutter pub get
+dart format --output=none --set-exit-if-changed .
+flutter analyze
+flutter test
+flutter build apk --debug --dart-define=RESQMESH_MODE=offline --dart-define=RESQMESH_FORWARDING_MODE=controlled --dart-define=RESQMESH_BLE_DEBUG_VISIBLE=true
+flutter build apk --debug --dart-define=RESQMESH_MODE=offline --dart-define=RESQMESH_FORWARDING_MODE=basic --dart-define=RESQMESH_BLE_DEBUG_VISIBLE=true
+flutter build apk --debug --dart-define=RESQMESH_MODE=gateway --dart-define=RESQMESH_FORWARDING_MODE=controlled --dart-define=RESQMESH_API_BASE_URL=https://example.com/api
+flutter build apk --release --dart-define=RESQMESH_MODE=offline --dart-define=RESQMESH_FORWARDING_MODE=controlled
+```
+
+Event P5 yang perlu diperhatikan: `QUEUE_WAKE_SCHEDULED`,
+`QUEUE_WAKE_TRIGGERED`, `WAITING_NEXT_ELIGIBLE`, `NATIVE_INBOX_STORED`,
+`NATIVE_INBOX_PROCESSED`, `FGS_START_REJECTED`, `FGS_STARTED`, `FGS_STOPPED`,
+`BLE_STATE_RECONCILED`, `BLE_SCAN_FAILED`, `BLUETOOTH_DISABLED`,
+`BLUETOOTH_REENABLED`, `BOOT_RECOVERY_STARTED`, dan
+`BOOT_RECOVERY_COMPLETED`.

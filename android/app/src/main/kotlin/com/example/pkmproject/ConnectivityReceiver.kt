@@ -1,4 +1,4 @@
-package com.example.pkmproject
+package id.ac.usu.resqmesh
 
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -18,7 +18,7 @@ class ConnectivityReceiver : BroadcastReceiver() {
     private val tag = "ConnectivityReceiver"
 
     companion object {
-        const val CONNECTIVITY_CHANNEL = "com.example.pkmproject/mesh"
+        const val CONNECTIVITY_CHANNEL = "id.ac.usu.resqmesh/mesh"
         var flutterEngine: FlutterEngine? = null
         private var receiverInstance: ConnectivityReceiver? = null
         private var isRegistered = false

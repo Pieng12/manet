@@ -26,12 +26,17 @@ ditafsirkan melebihi kemampuan implementasi saat ini.
 - Background BLE tidak seragam antar perangkat Android.
 - Doze, battery optimization, dan vendor task killer dapat menunda atau
   menghentikan scan/service.
+- Android 12+ membatasi start foreground service dari receiver background.
+  Native inbox mengurangi risiko packet hilang, tetapi worker recovery tetap
+  mengikuti kebijakan OS/vendor.
 - Recovery setelah app removed, Doze, atau reboot harus divalidasi pada
   perangkat fisik.
 - Recovery queue SOS/ACK bersifat persisten di SQLite, tetapi keberhasilan
   restart service tetap bergantung pada kebijakan background vendor.
 - Battery optimization exemption membutuhkan persetujuan user dan tidak
   menjamin service selalu aktif.
+- BLE foreground service P5 hanya memakai tipe `connectedDevice`; internet sync
+  berjalan melalui WorkManager dan dapat tertunda sampai jaringan tersedia.
 
 ## Kompatibilitas Perangkat
 
@@ -69,3 +74,5 @@ ditafsirkan melebihi kemampuan implementasi saat ini.
 - Belum mengimplementasikan multi-packet BLE payload.
 - Belum menargetkan iOS/web/desktop untuk background BLE.
 - Belum mengoptimalkan konsumsi baterai lintas vendor secara menyeluruh.
+- Belum ada hasil matrix perangkat fisik Android 8, 10, 12, 13, 14, 15, dan 16
+  di repository; klaim stabilitas harus menunggu uji fisik.

@@ -102,10 +102,42 @@ adb reboot
 Expected:
 
 - `BootReceiver` memulai `MeshBackgroundService`.
+- Service memakai foreground service type `connectedDevice`, bukan `dataSync`.
 - `recoverPersistedRelayState` berjalan.
 - Queue persisten dipulihkan tanpa menghapus SOS aktif karena lifetime/max hop.
 - SOS aktif dan ACK anti-message yang belum terminal kembali masuk rotasi
   advertising.
+- Jika OS menolak start foreground service, `NativeBleInboxWorker` menjadwalkan
+  recovery dan payload native inbox tetap pending.
+
+## Native Inbox
+
+1. Jalankan perangkat penerima, lalu hentikan aplikasi sebelum Flutter siap.
+2. Kirim payload BLE valid dari perangkat kedua.
+3. Buka aplikasi/service kembali.
+
+Expected:
+
+- `BleWakeUpReceiver` menyimpan payload sebelum mencoba service.
+- `getPendingBleInbox` mengembalikan item pending.
+- Dart memproses payload dan memanggil `acknowledgeBleInboxItem`.
+- Jika processing gagal, `failBleInboxItem` menaikkan `attempt_count` dan item
+  tetap dapat di-retry.
+- Duplicate payload dengan sender/timestamp/status sama tidak membuat record
+  pending identik tanpa batas.
+
+## Queue Wake Backoff
+
+1. Buat beberapa SOS/ACK sampai scheduler masuk backoff.
+2. Pastikan native advertiser boleh inactive saat menunggu.
+3. Tunggu melewati `earliestNextEligibleAt`.
+
+Expected:
+
+- Log mencatat `WAITING_NEXT_ELIGIBLE` dan `QUEUE_WAKE_SCHEDULED`.
+- Saat waktunya tiba, log mencatat `QUEUE_WAKE_TRIGGERED`.
+- Service tidak berhenti hanya karena advertiser inactive selama relay mode atau
+  queue pending masih ada.
 
 ## Battery Optimization
 
@@ -114,7 +146,7 @@ Expected:
 3. Verifikasi status:
 
 ```bash
-adb shell dumpsys deviceidle whitelist | findstr /i "pkmproject"
+adb shell dumpsys deviceidle whitelist | findstr /i "id.ac.usu.resqmesh"
 ```
 
 Expected:

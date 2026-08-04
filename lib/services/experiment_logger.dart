@@ -40,6 +40,29 @@ class ExperimentEventTypes {
   static const serviceStarted = 'SERVICE_STARTED';
   static const serviceStopped = 'SERVICE_STOPPED';
   static const relayStateRecovered = 'RELAY_STATE_RECOVERED';
+  static const queueWakeScheduled = 'QUEUE_WAKE_SCHEDULED';
+  static const queueWakeTriggered = 'QUEUE_WAKE_TRIGGERED';
+  static const queueWakeCancelled = 'QUEUE_WAKE_CANCELLED';
+  static const queueEmpty = 'QUEUE_EMPTY';
+  static const waitingNextEligible = 'WAITING_NEXT_ELIGIBLE';
+  static const nativeInboxStored = 'NATIVE_INBOX_STORED';
+  static const nativeInboxProcessed = 'NATIVE_INBOX_PROCESSED';
+  static const nativeInboxFailed = 'NATIVE_INBOX_FAILED';
+  static const fgsStartRejected = 'FGS_START_REJECTED';
+  static const fgsStarted = 'FGS_STARTED';
+  static const fgsStopped = 'FGS_STOPPED';
+  static const fgsKeptAlivePendingQueue = 'FGS_KEPT_ALIVE_PENDING_QUEUE';
+  static const bleCapabilityCheck = 'BLE_CAPABILITY_CHECK';
+  static const bleStateReconciled = 'BLE_STATE_RECONCILED';
+  static const bleAdvertiserCallbackStale = 'BLE_ADVERTISER_CALLBACK_STALE';
+  static const bleScanFailed = 'BLE_SCAN_FAILED';
+  static const bleScanRestarted = 'BLE_SCAN_RESTARTED';
+  static const bluetoothDisabled = 'BLUETOOTH_DISABLED';
+  static const bluetoothReenabled = 'BLUETOOTH_REENABLED';
+  static const bootRecoveryStarted = 'BOOT_RECOVERY_STARTED';
+  static const bootRecoveryDeferred = 'BOOT_RECOVERY_DEFERRED';
+  static const bootRecoveryFailed = 'BOOT_RECOVERY_FAILED';
+  static const bootRecoveryCompleted = 'BOOT_RECOVERY_COMPLETED';
 }
 
 class ExperimentLogger {

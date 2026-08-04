@@ -1,4 +1,4 @@
-package com.example.pkmproject
+package id.ac.usu.resqmesh
 
 import android.bluetooth.BluetoothAdapter
 import android.content.BroadcastReceiver
@@ -13,7 +13,10 @@ import io.flutter.plugin.common.MethodChannel
 
 class MainActivity : FlutterActivity() {
     companion object {
-        const val MESH_CHANNEL = "com.example.pkmproject/mesh"
+        const val MESH_CHANNEL = "id.ac.usu.resqmesh/mesh"
+        private const val SERVICE_PREFS = "resqmesh_service_state"
+        private const val KEY_RELAY_MODE_ENABLED = "relay_mode_enabled"
+        private const val KEY_HAS_PENDING_RELAY_WORK = "has_pending_relay_work"
     }
 
     private var bleStateReceiverRegistered = false
@@ -60,6 +63,38 @@ class MainActivity : FlutterActivity() {
                     }
                     "isIgnoringBatteryOptimizations" -> {
                         result.success(NativeBatteryOptimization.isIgnoring(this))
+                    }
+                    "setRelayModeEnabled" -> {
+                        servicePrefs().edit()
+                            .putBoolean(KEY_RELAY_MODE_ENABLED, call.argument<Boolean>("enabled") != false)
+                            .apply()
+                        result.success(true)
+                    }
+                    "setHasPendingRelayWork" -> {
+                        servicePrefs().edit()
+                            .putBoolean(KEY_HAS_PENDING_RELAY_WORK, call.argument<Boolean>("hasPending") == true)
+                            .apply()
+                        result.success(true)
+                    }
+                    "hasPendingRelayWork" -> {
+                        result.success(
+                            servicePrefs().getBoolean(KEY_HAS_PENDING_RELAY_WORK, false) ||
+                                NativeBleInbox.pendingCount(this) > 0
+                        )
+                    }
+                    "getPendingBleInbox" -> {
+                        result.success(NativeBleInbox.pending(this))
+                    }
+                    "acknowledgeBleInboxItem" -> {
+                        val id = call.argument<String>("id")
+                        result.success(id != null && NativeBleInbox.acknowledge(this, id))
+                    }
+                    "failBleInboxItem" -> {
+                        val id = call.argument<String>("id")
+                        result.success(id != null && NativeBleInbox.fail(this, id))
+                    }
+                    "getBleCapabilities" -> {
+                        result.success(bleCapabilities())
                     }
                     "startBleWakeUpScan" -> {
                         val scanAllAdvertisements =
@@ -161,6 +196,40 @@ class MainActivity : FlutterActivity() {
         } catch (e: Exception) {
             Log.e("MainActivity", "Failed to register BLE receiver: ${e.message}", e)
         }
+    }
+
+    private fun servicePrefs() = getSharedPreferences(SERVICE_PREFS, Context.MODE_PRIVATE)
+
+    private fun bleCapabilities(): Map<String, Any?> {
+        val adapter = (getSystemService(Context.BLUETOOTH_SERVICE) as android.bluetooth.BluetoothManager).adapter
+        val scanStatus = NativeBleManager.statusMap(this)
+        val advertiseStatus = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            NativeBleAdvertiser.statusMap()
+        } else {
+            mapOf("status" to "unsupported", "active" to false, "errorCode" to "SDK_UNSUPPORTED")
+        }
+        return mapOf(
+            "sdkInt" to Build.VERSION.SDK_INT,
+            "deviceManufacturer" to Build.MANUFACTURER,
+            "deviceModel" to Build.MODEL,
+            "bluetoothEnabled" to (adapter?.isEnabled == true),
+            "bleSupported" to packageManager.hasSystemFeature(
+                android.content.pm.PackageManager.FEATURE_BLUETOOTH_LE
+            ),
+            "scannerAvailable" to scanStatus["scannerAvailable"],
+            "advertiserAvailable" to (adapter?.bluetoothLeAdvertiser != null),
+            "multipleAdvertisementSupported" to (adapter?.isMultipleAdvertisementSupported == true),
+            "scanPermission" to NativeBlePermissions.hasScanPermission(this),
+            "advertisePermission" to NativeBlePermissions.hasAdvertisePermission(this),
+            "connectPermission" to NativeBlePermissions.hasConnectPermission(this),
+            "nativeScanActive" to scanStatus["nativeScanActive"],
+            "nativeAdvertisingActive" to advertiseStatus["active"],
+            "nativeAdvertisingStatus" to advertiseStatus["status"],
+            "lastErrorCode" to (advertiseStatus["errorCode"] ?: scanStatus["lastScanErrorCode"]),
+            "foregroundServiceActive" to MeshBackgroundService.serviceStarted,
+            "pendingNativeInbox" to NativeBleInbox.pendingCount(this),
+            "relayModeEnabled" to servicePrefs().getBoolean(KEY_RELAY_MODE_ENABLED, true)
+        )
     }
 
     private fun unregisterBleStateReceiver() {

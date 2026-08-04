@@ -63,15 +63,25 @@ andal dikerjakan di sisi Android:
 - `NativeBleManager.kt`: menjalankan BLE scan dengan manufacturer filter default
   dan PendingIntent.
 - `BleWakeUpReceiver.kt`: menerima hasil scan, mengekstrak payload 17 byte,
-  menyertakan RSSI, lalu membangunkan service.
+  menyertakan RSSI, menyimpan payload ke native inbox, lalu membangunkan service
+  bila diizinkan OS.
 - `MeshBackgroundService.kt`: menjaga scan/advertising dan menghubungkan event
   native ke Dart background isolate.
 - `BootReceiver.kt`: memulihkan service setelah boot.
 - `NativeBatteryOptimization.kt`: membuka request battery optimization exemption.
+- `NativeBleInbox.kt`: persistent inbox native untuk packet pending saat Flutter
+  engine belum siap.
+- `NativeBleInboxWorker.kt`: fallback WorkManager untuk recovery inbox Android
+  12+ ketika foreground service start dari receiver ditolak.
 
 Fallback sukses palsu untuk advertising tidak digunakan. Jika native advertising
 tidak tersedia atau gagal, compatibility state harus menandai perangkat tidak
 kompatibel sebagai relay aktif.
+
+Foreground service BLE memakai tipe `connectedDevice` saja. Internet sync tidak
+dikerjakan sebagai beban panjang di service BLE; gateway upload/download
+dijadwalkan melalui WorkManager unique work `resqmeshGatewaySync` dengan
+constraint network dan exponential backoff.
 
 ## Format Payload BLE 17 Byte
 
@@ -144,6 +154,17 @@ Basic flooding disediakan sebagai pembanding eksperimen dan memakai interval
 tetap pendek plus jitter, bukan adaptive exponential backoff.
 ACK tetap prioritas tinggi, tetapi scheduler membatasi slot ACK beruntun agar
 SOS eligible mendapat giliran setelah batas fairness.
+
+Jika tidak ada item eligible tetapi queue belum kosong, scheduler tidak berhenti
+permanen. `RelayQueueService.earliestNextEligibleAt()` mengambil waktu minimum
+`next_eligible_at` dari queue aktif, lalu `BleAdvertiserService` memasang wake
+timer. State scheduler yang dilaporkan adalah `stopped`, `selecting`,
+`advertising`, `waitingNextSlot`, `failedRetryable`, `failedPermission`, atau
+`failedUnsupported`.
+
+Advertiser native memakai generation ID agar callback lama setelah timeout atau
+restart tidak merusak state advertiser baru. Dart melakukan reconciliation jika
+state native dan state Dart berbeda.
 
 ## Gateway dan ACK
 
@@ -227,6 +248,15 @@ ResQMesh memulihkan scan, advertising, dan queue saat:
 - perangkat reboot;
 - service restart;
 - user mengubah battery optimization.
+- Bluetooth dimatikan lalu dinyalakan lagi.
+- native inbox masih memiliki packet pending.
+
+Pada Android 8-11, receiver boleh meminta service sesuai batas OS bila permission
+tersedia. Pada Android 12+, receiver menyimpan payload dulu ke native inbox dan
+tidak mengandalkan start foreground service langsung saat service belum aktif;
+fallback recovery dijadwalkan melalui WorkManager. Saat service dan background
+Dart siap, pending inbox dibaca, diproses satu per satu, lalu native item
+ditandai `processed` atau `failed`.
 
 Checklist pengujian ada di
 [`docs/background_recovery_test_plan.md`](docs/background_recovery_test_plan.md).
@@ -257,10 +287,21 @@ Permission utama:
 
 - `INTERNET` untuk gateway.
 - `ACCESS_FINE_LOCATION` untuk lokasi SOS dan BLE scan pada banyak versi Android.
+- `ACCESS_BACKGROUND_LOCATION` dengan `maxSdkVersion=30` untuk Android 10-11.
 - `BLUETOOTH_SCAN` dan `BLUETOOTH_ADVERTISE` untuk Android 12+.
-- `FOREGROUND_SERVICE` dan tipe foreground service terkait.
+- `FOREGROUND_SERVICE` dan `FOREGROUND_SERVICE_CONNECTED_DEVICE`.
 - `POST_NOTIFICATIONS` untuk Android 13+.
 - `RECEIVE_BOOT_COMPLETED` untuk recovery setelah reboot.
+
+Minimum resmi P5 adalah Android 8/API 26 karena background scanner memakai BLE
+PendingIntent. Perangkat Android 5-7 tidak diklaim didukung tanpa fallback
+`ScanCallback` khusus.
+
+Relay Monitor menampilkan Device Diagnostics: SDK, model, Bluetooth enabled,
+scanner/advertiser availability, multiple advertising support, permission
+status, foreground service, scan/advertiser native state, scheduler state,
+current packet, queue SOS/ACK, pending native inbox, earliest next eligible
+time, dan error native terakhir.
 
 ## Pengujian Developer
 

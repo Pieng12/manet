@@ -338,7 +338,7 @@ class _SosMapViewState extends State<SosMapView> with TickerProviderStateMixin {
                 urlTemplate:
                     'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
                 subdomains: const ['a', 'b', 'c'],
-                userAgentPackageName: 'com.example.pkmproject',
+                userAgentPackageName: 'id.ac.usu.resqmesh',
                 tileProvider: tileProvider, // Use offline caching tile provider
               ),
               // Current Location Marker Layer (Bottom)

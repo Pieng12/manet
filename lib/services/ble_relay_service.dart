@@ -478,9 +478,9 @@ class BleRelayService {
       );
       if (!hasInternet) return;
 
-      await SyncService().initiateFullSync();
+      await WorkManagerService.registerSyncTask();
     } catch (e) {
-      _log('Gateway sync skipped/failed: $e');
+      _log('Gateway sync scheduling skipped/failed: $e');
     }
   }
 

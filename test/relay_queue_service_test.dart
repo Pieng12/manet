@@ -1081,4 +1081,24 @@ void main() {
     expect(restored, isNotNull);
     expect(restored!.messageId, sos.id);
   });
+
+  test('earliestNextEligibleAt ignores disabled queue items', () async {
+    final early = message('wake-early');
+    final later = message('wake-later');
+    final disabled = message('wake-disabled');
+    await insertMessage(early);
+    await insertMessage(later);
+    await insertMessage(disabled);
+    await queue.enqueueSos(early, nextEligibleAt: now + 3000);
+    await queue.enqueueSos(later, nextEligibleAt: now + 9000);
+    await queue.enqueueSos(disabled, nextEligibleAt: now + 1000);
+    await db.update(
+      'relay_queue',
+      {'queue_state': 'disabled'},
+      where: 'message_id = ?',
+      whereArgs: [disabled.id],
+    );
+
+    expect(await queue.earliestNextEligibleAt(), now + 3000);
+  });
 }

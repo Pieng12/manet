@@ -44,6 +44,10 @@ class _MeshMonitorScreenState extends State<MeshMonitorScreen>
   String _experimentSessionId = '-';
   int _experimentEventCount = 0;
   int _relayQueueSize = 0;
+  int _sosQueueSize = 0;
+  int _ackQueueSize = 0;
+  int? _earliestNextEligibleAt;
+  Map<String, dynamic> _bleCapabilities = const {};
 
   @override
   void initState() {
@@ -80,11 +84,20 @@ class _MeshMonitorScreenState extends State<MeshMonitorScreen>
       sessionId: session?.sessionId,
     );
     final queueSize = await _relayQueueService.queueSize();
+    final sosQueueSize = await _relayQueueService.queueSizeByType('sos');
+    final ackQueueSize = await _relayQueueService.queueSizeByType('ack');
+    final earliestNextEligibleAt = await _relayQueueService
+        .earliestNextEligibleAt();
+    final bleCapabilities = await NativeBridgeService.getBleCapabilities();
     if (!mounted) return;
     setState(() {
       _experimentSessionId = session?.sessionId ?? '-';
       _experimentEventCount = eventCount;
       _relayQueueSize = queueSize;
+      _sosQueueSize = sosQueueSize;
+      _ackQueueSize = ackQueueSize;
+      _earliestNextEligibleAt = earliestNextEligibleAt;
+      _bleCapabilities = bleCapabilities;
     });
   }
 
@@ -289,6 +302,18 @@ class _MeshMonitorScreenState extends State<MeshMonitorScreen>
               : ResqColors.danger,
         ),
         _statusCard(
+          'Scheduler',
+          _bleAdvertiserService.schedulerState.name,
+          Icons.timer_outlined,
+          ResqColors.signal,
+        ),
+        _statusCard(
+          'Current Packet',
+          _bleAdvertiserService.currentAdvertisedMessageId ?? '-',
+          Icons.cell_tower,
+          ResqColors.ember,
+        ),
+        _statusCard(
           'Gateway Sync',
           SyncService.offlineOnly ? 'Offline test mode' : 'Opportunistic',
           SyncService.offlineOnly ? Icons.cloud_off : Icons.cloud_sync,
@@ -302,10 +327,21 @@ class _MeshMonitorScreenState extends State<MeshMonitorScreen>
         ),
         _statusCard(
           'Relay Queue',
-          _relayQueueSize.toString(),
+          'total=$_relayQueueSize sos=$_sosQueueSize ack=$_ackQueueSize',
           Icons.queue,
           ResqColors.ember,
         ),
+        _statusCard(
+          'Earliest Next Eligible',
+          _earliestNextEligibleAt == null
+              ? '-'
+              : DateTime.fromMillisecondsSinceEpoch(
+                  _earliestNextEligibleAt!,
+                ).toIso8601String(),
+          Icons.schedule,
+          ResqColors.signal,
+        ),
+        _buildDiagnosticsCard(),
         _statusCard(
           'Experiment Events',
           _experimentEventCount.toString(),
@@ -359,6 +395,63 @@ class _MeshMonitorScreenState extends State<MeshMonitorScreen>
         leading: Icon(icon, color: color),
         title: Text(title),
         subtitle: Text(value),
+      ),
+    );
+  }
+
+  Widget _buildDiagnosticsCard() {
+    final entries = <String, String>{
+      'Android SDK': '${_bleCapabilities['sdkInt'] ?? '-'}',
+      'Device':
+          '${_bleCapabilities['deviceManufacturer'] ?? '-'} ${_bleCapabilities['deviceModel'] ?? ''}',
+      'Bluetooth Enabled': '${_bleCapabilities['bluetoothEnabled'] ?? '-'}',
+      'BLE Scanner': '${_bleCapabilities['scannerAvailable'] ?? '-'}',
+      'BLE Advertiser': '${_bleCapabilities['advertiserAvailable'] ?? '-'}',
+      'Multiple Adv':
+          '${_bleCapabilities['multipleAdvertisementSupported'] ?? '-'}',
+      'Scan Permission': '${_bleCapabilities['scanPermission'] ?? '-'}',
+      'Advertise Permission':
+          '${_bleCapabilities['advertisePermission'] ?? '-'}',
+      'Connect Permission': '${_bleCapabilities['connectPermission'] ?? '-'}',
+      'Native Scan': '${_bleCapabilities['nativeScanActive'] ?? '-'}',
+      'Native Advertiser':
+          '${_bleCapabilities['nativeAdvertisingStatus'] ?? '-'}',
+      'Foreground Service':
+          '${_bleCapabilities['foregroundServiceActive'] ?? '-'}',
+      'Pending Inbox': '${_bleCapabilities['pendingNativeInbox'] ?? '-'}',
+      'Relay Mode': '${_bleCapabilities['relayModeEnabled'] ?? '-'}',
+      'Last Native Error': '${_bleCapabilities['lastErrorCode'] ?? '-'}',
+    };
+    return Card(
+      color: ResqColors.surfaceRaised,
+      margin: const EdgeInsets.only(bottom: 10),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: entries.entries.map((entry) {
+            return Padding(
+              padding: const EdgeInsets.symmetric(vertical: 3),
+              child: Row(
+                children: [
+                  SizedBox(
+                    width: 150,
+                    child: Text(
+                      entry.key,
+                      style: const TextStyle(color: ResqColors.muted),
+                    ),
+                  ),
+                  Expanded(
+                    child: Text(
+                      entry.value,
+                      style: const TextStyle(color: Colors.white),
+                    ),
+                  ),
+                ],
+              ),
+            );
+          }).toList(),
+        ),
       ),
     );
   }

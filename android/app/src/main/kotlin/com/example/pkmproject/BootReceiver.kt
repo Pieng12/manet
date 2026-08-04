@@ -1,4 +1,4 @@
-package com.example.pkmproject
+package id.ac.usu.resqmesh
 
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -17,8 +17,17 @@ class BootReceiver : BroadcastReceiver() {
             return
         }
 
+        val relayModeEnabled = appContext
+            .getSharedPreferences("resqmesh_service_state", Context.MODE_PRIVATE)
+            .getBoolean("relay_mode_enabled", true)
+        if (!relayModeEnabled) {
+            Log.i("BootReceiver", "Relay mode disabled. Boot recovery skipped.")
+            return
+        }
+
         if (!NativeBlePermissions.hasRequiredRuntimePermissions(appContext)) {
             Log.w("BootReceiver", "Permissions missing. Mesh service start deferred.")
+            NativeBleInboxWorker.enqueue(appContext)
             return
         }
 
@@ -32,7 +41,14 @@ class BootReceiver : BroadcastReceiver() {
                 appContext.startService(serviceIntent)
             }
             Log.d("BootReceiver", "Mesh background service started after boot")
+        } catch (e: SecurityException) {
+            NativeBleInboxWorker.enqueue(appContext)
+            Log.e("BootReceiver", "Boot recovery rejected by security policy", e)
+        } catch (e: IllegalStateException) {
+            NativeBleInboxWorker.enqueue(appContext)
+            Log.e("BootReceiver", "Boot recovery deferred by OS state", e)
         } catch (e: Exception) {
+            NativeBleInboxWorker.enqueue(appContext)
             Log.e("BootReceiver", "Error starting service: ${e.message}", e)
         }
     }

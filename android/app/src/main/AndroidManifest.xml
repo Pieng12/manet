@@ -1,5 +1,5 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="com.example.pkmproject">
+    package="id.ac.usu.resqmesh">
 
     <!-- Internet -->
     <uses-permission android:name="android.permission.INTERNET"/>
@@ -8,6 +8,9 @@
     <!-- Location is required for SOS position and BLE scans on Android 6-11. -->
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
+    <uses-permission
+        android:name="android.permission.ACCESS_BACKGROUND_LOCATION"
+        android:maxSdkVersion="30"/>
 
     <!-- Bluetooth legacy, normal permissions through Android 11. -->
     <uses-permission
@@ -26,7 +29,6 @@
     <!-- Foreground service -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE"/>
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
     <uses-permission android:name="android.permission.WAKE_LOCK"/>
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
 
@@ -63,7 +65,7 @@
             android:name=".MeshBackgroundService"
             android:enabled="true"
             android:exported="false"
-            android:foregroundServiceType="dataSync|connectedDevice"/>
+            android:foregroundServiceType="connectedDevice"/>
 
         <receiver
             android:name=".BootReceiver"
@@ -76,11 +78,7 @@
 
         <receiver
             android:name=".BleWakeUpReceiver"
-            android:exported="true">
-            <intent-filter>
-                <action android:name="com.example.pkmproject.BLE_WAKE_UP"/>
-            </intent-filter>
-        </receiver>
+            android:exported="false"/>
 
         <meta-data
             android:name="flutterEmbedding"

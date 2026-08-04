@@ -1,7 +1,8 @@
-package com.example.pkmproject
+package id.ac.usu.resqmesh
 
 import android.bluetooth.le.BluetoothLeScanner
 import android.bluetooth.le.ScanResult
+import android.app.ForegroundServiceStartNotAllowedException
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -39,9 +40,8 @@ class BleWakeUpReceiver : BroadcastReceiver() {
             } else {
                 scanRecord.bytes
             } ?: continue
-            val deviceAddress = safeDeviceAddress(scanResult)
             val hex = data.joinToString("") { String.format("%02X", it) }
-            val cacheKey = "${deviceAddress}_$hex"
+            val cacheKey = hex
             val currentTime = System.currentTimeMillis()
             val lastProcessed = lastProcessedPayloads[cacheKey] ?: 0L
 
@@ -58,7 +58,7 @@ class BleWakeUpReceiver : BroadcastReceiver() {
 
             val idLabel = if (id == -1) "raw" else "0x${String.format("%04X", id)}"
             Log.i(TAG, "ResQMesh BLE candidate. ID=$idLabel, RSSI=${scanResult.rssi}")
-            processPotentialPayload(context, data, deviceAddress, scanResult.rssi)
+            processPotentialPayload(context, data, safeDeviceAddress(scanResult), scanResult.rssi)
         }
     }
 
@@ -111,9 +111,23 @@ class BleWakeUpReceiver : BroadcastReceiver() {
             payload,
             android.util.Base64.NO_WRAP
         )
+        val inboxId = NativeBleInbox.store(context, payload, deviceAddress, rssi)
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && !MeshBackgroundService.serviceStarted) {
+            val pendingResult = goAsync()
+            try {
+                NativeBleInboxWorker.enqueue(context)
+                Log.i(TAG, "Stored BLE payload and deferred service start on Android 12+")
+            } finally {
+                pendingResult.finish()
+            }
+            return
+        }
+
         val serviceIntent = Intent(context, MeshBackgroundService::class.java).apply {
             action = NativeBleManager.BLE_WAKE_UP_ACTION
             putExtra("payload", payloadBase64)
+            putExtra("inbox_id", inboxId)
             putExtra("device_address", deviceAddress)
             putExtra("rssi", rssi)
         }
@@ -125,6 +139,15 @@ class BleWakeUpReceiver : BroadcastReceiver() {
                 context.startService(serviceIntent)
             }
             Log.i(TAG, "Wake-up service started for valid ResQMesh payload")
+        } catch (e: ForegroundServiceStartNotAllowedException) {
+            NativeBleInboxWorker.enqueue(context)
+            Log.e(TAG, "Foreground service start rejected; inbox worker scheduled", e)
+        } catch (e: SecurityException) {
+            NativeBleInboxWorker.enqueue(context)
+            Log.e(TAG, "Foreground service start security failure; inbox worker scheduled", e)
+        } catch (e: IllegalStateException) {
+            NativeBleInboxWorker.enqueue(context)
+            Log.e(TAG, "Foreground service start illegal state; inbox worker scheduled", e)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start wake-up service: ${e.message}", e)
         }

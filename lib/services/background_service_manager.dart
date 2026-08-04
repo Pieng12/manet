@@ -1,7 +1,7 @@
 import 'package:flutter/services.dart';
 
 class BackgroundServiceManager {
-  static const platform = MethodChannel('com.example.pkmproject/mesh');
+  static const platform = MethodChannel('id.ac.usu.resqmesh/mesh');
 
   static Future<void> startBackgroundService() async {
     try {

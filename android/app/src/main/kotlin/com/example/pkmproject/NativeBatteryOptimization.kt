@@ -1,4 +1,4 @@
-package com.example.pkmproject
+package id.ac.usu.resqmesh
 
 import android.content.Context
 import android.content.Intent

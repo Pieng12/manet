@@ -4,7 +4,7 @@ import 'package:permission_handler/permission_handler.dart';
 
 class AndroidPermissionService {
   static const MethodChannel _platform = MethodChannel(
-    'com.example.pkmproject/mesh',
+    'id.ac.usu.resqmesh/mesh',
   );
 
   static Future<int?> androidSdkInt() async {
@@ -25,6 +25,10 @@ class AndroidPermissionService {
     if (sdkInt == null) return const <Permission>[];
 
     final permissions = <Permission>[Permission.location];
+
+    if (sdkInt >= 29 && sdkInt <= 30) {
+      permissions.add(Permission.locationAlways);
+    }
 
     if (sdkInt >= 31) {
       permissions.addAll([
@@ -59,8 +63,26 @@ class AndroidPermissionService {
 
   static Future<Map<Permission, PermissionStatus>>
   requestCriticalPermissions() async {
+    final sdkInt = await androidSdkInt();
     final permissions = await criticalPermissions();
     if (permissions.isEmpty) return const <Permission, PermissionStatus>{};
-    return permissions.request();
+    final foregroundPermissions = sdkInt != null && sdkInt >= 29 && sdkInt <= 30
+        ? permissions
+              .where((permission) => permission != Permission.locationAlways)
+              .toList()
+        : permissions;
+    final result = <Permission, PermissionStatus>{};
+    result.addAll(await foregroundPermissions.request());
+
+    if (sdkInt != null && sdkInt >= 29 && sdkInt <= 30) {
+      final foregroundGranted =
+          result[Permission.location]?.isGranted == true ||
+          result[Permission.location]?.isLimited == true;
+      if (foregroundGranted) {
+        result[Permission.locationAlways] = await Permission.locationAlways
+            .request();
+      }
+    }
+    return result;
   }
 }

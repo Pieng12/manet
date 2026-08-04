@@ -16,7 +16,10 @@ sudah tersedia:
 - Persistent relay queue dengan prioritas ACK.
 - ACK gateway sebagai persistent anti-message.
 - Native Android BLE scan/advertising dengan manufacturer filter.
-- Background recovery setelah app removed, boot, dan service restart.
+- Background recovery setelah app removed, boot, service restart, Bluetooth
+  restart, dan reboot.
+- Native persistent inbox agar packet BLE tidak hilang saat Flutter belum siap.
+- Gateway sync melalui WorkManager unique work `resqmeshGatewaySync`.
 - Experiment session, event log, RSSI capture, dan export CSV/JSON.
 
 ## Arsitektur
@@ -29,12 +32,24 @@ Flutter UI
   -> BleAdvertiserService
   -> NativeBridgeService
   -> Android native BLE scanner/advertiser
-  -> SyncService bila RESQMESH_MODE=gateway
+  -> WorkManagerService -> SyncService bila RESQMESH_MODE=gateway
 ```
 
 Database lokal adalah sumber kebenaran untuk pesan, queue relay, ACK, dan log
 eksperimen. BLE hanya membawa packet ringkas; data lengkap tetap disimpan di
 perangkat dan dikirim ke server melalui gateway.
+
+## Arsitektur P5 Background
+
+P5 memisahkan lifecycle BLE dan internet sync. `MeshBackgroundService` hanya
+menangani BLE scan, BLE advertising, native inbox, recovery, dan wake scheduler.
+Upload/download gateway berjalan melalui WorkManager dengan constraint network,
+bukan sebagai pekerjaan panjang di foreground service BLE.
+
+Scheduler BLE dimiliki oleh background Dart isolate. UI isolate hanya mengirim
+command dan membaca state. Saat queue belum eligible, `RelayQueueService`
+menyediakan `earliestNextEligibleAt()` dan `BleAdvertiserService` memasang wake
+timer menuju `next_eligible_at`; jika queue kosong tidak ada timer dibuat.
 
 ## Alur SOS
 
@@ -144,10 +159,13 @@ identity, tombstone, dan recovery.
 
 ## Persyaratan Perangkat
 
+- Minimum resmi Android 8.0/API 26.
 - Android dengan BLE scanning.
 - Perangkat harus mendukung BLE advertising untuk menjadi relay aktif.
 - Android 12+ membutuhkan izin `BLUETOOTH_SCAN` dan `BLUETOOTH_ADVERTISE`.
-- Android 6-11 umumnya membutuhkan izin lokasi untuk scan BLE.
+- Android 10-11 membutuhkan background location untuk scan BLE background.
+- Android 13+ membutuhkan izin notifikasi.
+- BLE foreground service memakai tipe `connectedDevice` saja.
 - Background behavior bergantung pada vendor, Doze, dan battery optimization.
 
 Daftar kompatibilitas ada di
@@ -157,10 +175,11 @@ Daftar kompatibilitas ada di
 
 ```bash
 flutter pub get
-dart format .
+dart format --output=none --set-exit-if-changed .
 flutter analyze
 flutter test
-flutter build apk --debug
+flutter build apk --debug --dart-define=RESQMESH_MODE=offline --dart-define=RESQMESH_FORWARDING_MODE=controlled --dart-define=RESQMESH_BLE_DEBUG_VISIBLE=true
+flutter build apk --release --dart-define=RESQMESH_MODE=offline --dart-define=RESQMESH_FORWARDING_MODE=controlled
 ```
 
 ## Cara Memulai Sesi Eksperimen
@@ -198,4 +217,6 @@ Daftar lengkap ada di [`docs/known_limitations.md`](docs/known_limitations.md).
 Payload BLE saat ini ringkas dan tidak terenkripsi. Jangan menaruh credential,
 endpoint rahasia, atau data pribadi sensitif di payload BLE. Untuk produksi,
 tambahkan autentikasi payload, enkripsi atau signature ringkas, validasi server,
-dan manufacturer ID resmi.
+manufacturer ID resmi, identity aplikasi final, dan release signing dengan
+`android/key.properties` atau environment CI. Nilai `0xFFFF` tetap hanya untuk
+eksperimen.

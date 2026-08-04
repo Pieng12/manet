@@ -57,10 +57,30 @@ Gunakan nilai `Pass`, `Partial`, `Fail`, atau `N/A`.
 
 ## Catatan Android
 
+- Minimum resmi P5 adalah Android 8.0/API 26. Android 5-7 tidak diklaim
+  didukung tanpa implementasi fallback `ScanCallback`.
+- Android 10-11 membutuhkan request background location terpisah agar scan BLE
+  tetap dapat berjalan saat aplikasi tidak foreground.
 - Android 12+ membutuhkan `BLUETOOTH_SCAN` dan `BLUETOOTH_ADVERTISE`.
-- Android 6-11 umumnya membutuhkan lokasi aktif untuk BLE scan.
+- Android 12+ dapat menolak start foreground service dari receiver background;
+  payload harus tetap muncul di native inbox dan diproses saat service pulih.
+- Android 13+ membutuhkan notification permission.
+- Android 14+ harus memiliki permission Bluetooth runtime sebelum service
+  `connectedDevice` dimulai.
 - Beberapa vendor membatasi background service secara agresif.
 - Battery optimization exemption membantu recovery, tetapi tetap membutuhkan
   persetujuan user.
 - Hasil kompatibilitas emulator tidak cukup untuk menyatakan dukungan BLE
   advertising fisik.
+
+## Checklist Versi Android
+
+| Versi | Fokus uji |
+| --- | --- |
+| Android 8/API 26 | PendingIntent scan, foreground service BLE, reboot recovery. |
+| Android 10/API 29 | Foreground location lalu background location terpisah. |
+| Android 12/API 31 | Receiver tidak start FGS secara buta; native inbox fallback. |
+| Android 13/API 33 | Notification permission dan service notification terlihat. |
+| Android 14/API 34 | Prasyarat connected-device FGS dan permission Bluetooth runtime. |
+| Android 15/API 35 | Doze/app removed/vendor policy, queue wake setelah backoff. |
+| Android 16/API 36 | Regression target SDK 36, WorkManager gateway, diagnostics. |

@@ -11,6 +11,16 @@ import 'package:pkmproject/utils/protocol_timestamp.dart';
 import 'package:pkmproject/utils/sos_status_priority.dart';
 import 'package:sqflite/sqflite.dart';
 
+enum RelaySchedulerState {
+  stopped,
+  selecting,
+  advertising,
+  waitingNextSlot,
+  failedRetryable,
+  failedPermission,
+  failedUnsupported,
+}
+
 class RelayQueueService {
   RelayQueueService({
     Database? database,
@@ -439,6 +449,16 @@ class RelayQueueService {
     return selected;
   }
 
+  Future<int?> earliestNextEligibleAt() async {
+    final db = await _db;
+    final result = await db.rawQuery(
+      "SELECT MIN(next_eligible_at) AS next_at "
+      "FROM relay_queue WHERE queue_state != ?",
+      ['disabled'],
+    );
+    return result.first['next_at'] as int?;
+  }
+
   Future<RelayQueueItem?> _nextEligibleOfType(
     DatabaseExecutor db,
     int nowMs,
@@ -641,6 +661,8 @@ WHERE id = ?
     );
     return result.first['count'] as int? ?? 0;
   }
+
+  Future<bool> hasActiveItems() async => (await queueSize()) > 0;
 
   Future<int> queueSizeByType(String packetType) async {
     final db = await _db;
