@@ -66,6 +66,16 @@ const Map<String, String> relayQueueColumnDefinitions = {
   'payload_base64': 'TEXT NULL',
 };
 
+const String createAckTombstonesTableSql = '''
+CREATE TABLE ack_tombstones (
+  sender_crc INTEGER PRIMARY KEY,
+  ack_timestamp_ms INTEGER NOT NULL,
+  status INTEGER NOT NULL,
+  payload_base64 TEXT NULL,
+  updated_at INTEGER NOT NULL
+);
+''';
+
 const String createExperimentSessionsTableSql = '''
 CREATE TABLE experiment_sessions (
   session_id TEXT PRIMARY KEY,

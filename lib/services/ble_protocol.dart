@@ -113,6 +113,9 @@ class BlePacket {
     final hopCount = flags & hopMask;
 
     if (isAck) {
+      if (SOSMessageStatus.values[statusIndex] == SOSMessageStatus.active) {
+        return null;
+      }
       return BlePacket(
         kind: BlePacketKind.ack,
         senderCrc: senderCrc,

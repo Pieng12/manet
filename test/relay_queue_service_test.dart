@@ -7,6 +7,7 @@ import 'package:pkmproject/database_schema.dart';
 import 'package:pkmproject/models/forwarding_decision.dart';
 import 'package:pkmproject/models/sos_message.dart';
 import 'package:pkmproject/services/ble_protocol.dart';
+import 'package:pkmproject/services/database_helper.dart';
 import 'package:pkmproject/services/forwarding_policy.dart';
 import 'package:pkmproject/services/relay_queue_service.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
@@ -21,6 +22,7 @@ void main() {
     db = await databaseFactoryFfi.openDatabase(inMemoryDatabasePath);
     await db.execute(createSosMessagesTableSql);
     await db.execute(createRelayQueueTableSql);
+    await db.execute(createAckTombstonesTableSql);
     queue = RelayQueueService(database: db, random: Random(1));
     now = DateTime.utc(2026, 8, 4, 12).millisecondsSinceEpoch;
   });
@@ -29,16 +31,24 @@ void main() {
     await db.close();
   });
 
-  SOSMessage message(String id, {int offsetSeconds = 0, bool expired = false}) {
-    final createdAt = now + Duration(seconds: offsetSeconds).inMilliseconds;
+  SOSMessage message(
+    String id, {
+    int offsetSeconds = 0,
+    bool expired = false,
+    SOSMessageStatus status = SOSMessageStatus.active,
+    int? senderCrc,
+    int? updatedAt,
+  }) {
+    final createdAt =
+        updatedAt ?? now + Duration(seconds: offsetSeconds).inMilliseconds;
     return SOSMessage(
       id: id,
       senderId: 'device-$id',
-      senderCrc: id.hashCode,
+      senderCrc: senderCrc ?? id.hashCode,
       content: 'SOS',
       latitude: -6.2,
       longitude: 106.8,
-      status: SOSMessageStatus.active,
+      status: status,
       createdAt: createdAt,
       updatedAt: createdAt,
       expiresAt: expired
@@ -278,6 +288,70 @@ void main() {
     expect(await queue.queueSize(), 1);
   });
 
+  test('new ACK replaces older ACK for same sender', () async {
+    final oldPayload = BlePacket.packAck(senderCrc: 12345, ackTimestampMs: now);
+    final newPayload = BlePacket.packAck(
+      senderCrc: 12345,
+      ackTimestampMs: now + 1000,
+    );
+
+    await queue.enqueueAck(
+      messageId: 'ack-12345-old',
+      payloadBase64: base64Encode(oldPayload),
+    );
+    await queue.enqueueAck(
+      messageId: 'ack-12345-new',
+      payloadBase64: base64Encode(newPayload),
+    );
+
+    final rows = await db.query('relay_queue', where: "packet_type = 'ack'");
+    final tombstone = await db.query('ack_tombstones');
+
+    expect(rows, hasLength(1));
+    expect(rows.single['message_id'], 'ack-12345');
+    final packet = BlePacket.unpack(
+      base64Decode(rows.single['payload_base64'] as String),
+      referenceTime: DateTime.fromMillisecondsSinceEpoch(now + 1000),
+    );
+    expect(packet!.timestampMs, now + 1000);
+    expect(tombstone, hasLength(1));
+    expect(tombstone.single['ack_timestamp_ms'], now + 1000);
+  });
+
+  test('ACK with ACTIVE status is rejected', () async {
+    final activeAck = BlePacket.packAck(
+      senderCrc: 12345,
+      ackTimestampMs: now,
+      status: SOSMessageStatus.active,
+    );
+
+    final inserted = await queue.enqueueAck(
+      messageId: 'ack-active',
+      payloadBase64: base64Encode(activeAck),
+    );
+
+    expect(inserted, 0);
+    expect(await queue.queueSize(), 0);
+    expect(await db.query('ack_tombstones'), isEmpty);
+  });
+
+  test('queue ACK remains bounded per sender', () async {
+    for (var i = 0; i < 20; i++) {
+      final payload = BlePacket.packAck(
+        senderCrc: 54321,
+        ackTimestampMs: now + i * 1000,
+      );
+      await queue.enqueueAck(
+        messageId: 'ack-54321-$i',
+        payloadBase64: base64Encode(payload),
+      );
+    }
+
+    final rows = await db.query('relay_queue', where: "packet_type = 'ack'");
+    expect(rows, hasLength(1));
+    expect(rows.single['message_id'], 'ack-54321');
+  });
+
   test('old ACK item remains in persistent queue', () async {
     final oldAckTimestamp = now - MeshConfig.ackLifetime.inMilliseconds;
     final ackPayload = BlePacket.packAck(
@@ -307,6 +381,110 @@ void main() {
     expect(size, 1);
     expect(next, isNotNull);
   });
+
+  test('basic and controlled produce different schedules', () {
+    final basic = RelayQueueService(
+      database: db,
+      random: Random(1),
+      mode: ForwardingMode.basicFlooding,
+    );
+    final controlled = RelayQueueService(
+      database: db,
+      random: Random(1),
+      mode: ForwardingMode.controlledFlooding,
+    );
+
+    final basicNext = basic.sosCooldownEligibleAt(now, relayCount: 5);
+    final controlledNext = controlled.sosCooldownEligibleAt(now, relayCount: 5);
+
+    expect(basicNext, isNot(controlledNext));
+    expect(
+      basicNext,
+      lessThan(
+        now +
+            MeshConfig.adaptiveBackoffBase.inMilliseconds +
+            MeshConfig.relayJitterMax.inMilliseconds,
+      ),
+    );
+  });
+
+  test('ACK tombstone suppresses older SOS but not newer SOS', () async {
+    await DatabaseHelper.upsertAckTombstoneInDb(
+      db,
+      senderCrc: 12345,
+      ackTimestampMs: now,
+      status: SOSMessageStatus.resolved,
+    );
+
+    expect(
+      await DatabaseHelper.isSuppressedByAckTombstoneInDb(
+        db,
+        senderCrc: 12345,
+        sosTimestampMs: now - 1,
+      ),
+      true,
+    );
+    expect(
+      await DatabaseHelper.isSuppressedByAckTombstoneInDb(
+        db,
+        senderCrc: 12345,
+        sosTimestampMs: now + 1,
+      ),
+      false,
+    );
+  });
+
+  test('newer or terminal state resets relay metadata', () async {
+    final active = message('state-active', senderCrc: 777, updatedAt: now)
+      ..relayCount = 7
+      ..lastRelayedAt = now - const Duration(minutes: 1).inMilliseconds;
+    await insertMessage(active);
+    await queue.enqueueSos(active, nextEligibleAt: now + 60000);
+
+    final cancelled = message(
+      'state-cancelled',
+      senderCrc: 777,
+      updatedAt: now,
+      status: SOSMessageStatus.cancelled,
+    )..lastRelayedAt = now - const Duration(minutes: 1).inMilliseconds;
+
+    await DatabaseHelper.replaceWithLatestMessageInDb(db, cancelled);
+    await queue.enqueueSos(cancelled, priority: 50, nextEligibleAt: now);
+
+    final stored = SOSMessage.fromDbMap(
+      (await db.query('sos_messages')).single,
+    );
+    final queued = await queue.getItem(cancelled.id, 'sos');
+
+    expect(stored.status, SOSMessageStatus.cancelled);
+    expect(stored.relayCount, 0);
+    expect(stored.lastRelayedAt, 0);
+    expect(queued!.priority, 50);
+    expect(queued.nextEligibleAt, now);
+  });
+
+  test(
+    'ACTIVE does not replace terminal state at same timestamp in database',
+    () async {
+      final cancelled = message(
+        'terminal-state',
+        senderCrc: 888,
+        updatedAt: now,
+        status: SOSMessageStatus.cancelled,
+      );
+      await insertMessage(cancelled);
+
+      final active = message('active-state', senderCrc: 888, updatedAt: now);
+      await DatabaseHelper.replaceWithLatestMessageInDb(db, active);
+
+      final stored = SOSMessage.fromDbMap(
+        (await db.query('sos_messages')).single,
+      );
+
+      expect(stored.id, 'terminal-state');
+      expect(stored.status, SOSMessageStatus.cancelled);
+    },
+  );
 
   test('duplicate queue item is not inserted twice', () async {
     final sos = message('same');

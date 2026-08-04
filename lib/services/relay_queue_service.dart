@@ -13,13 +13,16 @@ class RelayQueueService {
     Database? database,
     DatabaseHelper? databaseHelper,
     Random? random,
+    ForwardingMode? mode,
   }) : _database = database,
        _databaseHelper = databaseHelper ?? DatabaseHelper(),
-       _random = random ?? Random();
+       _random = random ?? Random(),
+       _mode = mode ?? MeshConfig.forwardingMode;
 
   final Database? _database;
   final DatabaseHelper _databaseHelper;
   final Random _random;
+  final ForwardingMode _mode;
 
   static const String stateQueued = 'queued';
   static const String stateAdvertising = 'advertising';
@@ -27,7 +30,9 @@ class RelayQueueService {
   static const String stateFailed = 'failed';
 
   int sosCooldownEligibleAt(int nowMs, {int relayCount = 0}) {
-    final backoffMs = adaptiveBackoffForRelayCount(relayCount).inMilliseconds;
+    final backoffMs = _mode == ForwardingMode.basicFlooding
+        ? MeshConfig.basicFloodingInterval.inMilliseconds
+        : adaptiveBackoffForRelayCount(relayCount).inMilliseconds;
     final jitterRange =
         MeshConfig.relayJitterMax.inMilliseconds -
         MeshConfig.relayJitterMin.inMilliseconds;
@@ -52,7 +57,7 @@ class RelayQueueService {
     required int ackTimestampMs,
     required int statusIndex,
   }) {
-    return 'ack-$senderCrc-$ackTimestampMs-$statusIndex';
+    return 'ack-$senderCrc';
   }
 
   Future<Database> get _db async => _database ?? _databaseHelper.database;
@@ -80,10 +85,43 @@ class RelayQueueService {
     required String payloadBase64,
     int priority = 100,
     int? nextEligibleAt,
-  }) {
+  }) async {
+    final db = await _db;
+    BlePacket? packet;
+    try {
+      packet = BlePacket.unpack(base64Decode(payloadBase64));
+    } catch (_) {
+      packet = null;
+    }
+    if (packet == null ||
+        !packet.isAck ||
+        packet.status == SOSMessageStatus.active) {
+      return 0;
+    }
+
+    final stored = await DatabaseHelper.upsertAckTombstoneInDb(
+      db,
+      senderCrc: packet.senderCrc,
+      ackTimestampMs: packet.timestampMs,
+      status: packet.status,
+      payloadBase64: payloadBase64,
+    );
+    if (!stored) return 0;
+
+    final compactMessageId = ackMessageId(
+      senderCrc: packet.senderCrc,
+      ackTimestampMs: packet.timestampMs,
+      statusIndex: packet.status.index,
+    );
+    await db.delete(
+      'relay_queue',
+      where: "packet_type = 'ack' AND message_id LIKE ? AND message_id != ?",
+      whereArgs: ['ack-${packet.senderCrc}%', compactMessageId],
+    );
+
     return _upsert(
       RelayQueueItem(
-        messageId: messageId,
+        messageId: compactMessageId,
         packetType: 'ack',
         priority: priority,
         nextEligibleAt: nextEligibleAt ?? 0,
@@ -307,6 +345,17 @@ WHERE id = ?
     }
 
     final current = RelayQueueItem.fromDbMap(existing.first);
+    if (item.isAck) {
+      final currentAckTimestamp = _ackTimestampFromPayload(
+        current.payloadBase64,
+      );
+      final incomingAckTimestamp = _ackTimestampFromPayload(item.payloadBase64);
+      if (currentAckTimestamp != null &&
+          incomingAckTimestamp != null &&
+          currentAckTimestamp > incomingAckTimestamp) {
+        return 0;
+      }
+    }
     return db.update(
       'relay_queue',
       {
@@ -320,5 +369,16 @@ WHERE id = ?
       where: 'message_id = ? AND packet_type = ?',
       whereArgs: [item.messageId, item.packetType],
     );
+  }
+
+  int? _ackTimestampFromPayload(String? payloadBase64) {
+    if (payloadBase64 == null) return null;
+    try {
+      final packet = BlePacket.unpack(base64Decode(payloadBase64));
+      if (packet == null || !packet.isAck) return null;
+      return packet.timestampMs;
+    } catch (_) {
+      return null;
+    }
   }
 }

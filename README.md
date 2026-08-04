@@ -58,9 +58,10 @@ disaturasi pada 63 agar tidak overflow kembali ke 0.
 
 Mode forwarding:
 
-- `controlled` default: memakai dedup, fairness, adaptive backoff, cooldown, dan
-  jitter.
-- `basic`: pembanding eksperimen yang lebih agresif.
+- `controlled` default: scheduler `RelayQueueService` memakai dedup, fairness,
+  adaptive exponential backoff, cooldown, dan jitter.
+- `basic`: scheduler memakai interval pendek tetap plus jitter sebagai pembanding
+  eksperimen yang lebih agresif.
 
 ```bash
 flutter run --dart-define=RESQMESH_FORWARDING_MODE=controlled
@@ -109,9 +110,11 @@ Respons ACK server:
 }
 ```
 
-ACK valid disebarkan kembali lewat BLE sebagai persistent anti-message. ACK
-tidak memakai hard hop limit atau TTL 2 menit, tetap diprioritaskan di queue,
-dan menghentikan SOS hanya saat diterima oleh node pembawa SOS yang cocok.
+ACK valid disimpan sebagai tombstone persisten terbaru per `sender_crc` dan
+disebarkan kembali lewat BLE sebagai persistent anti-message. ACK tidak memakai
+hard hop limit atau TTL 2 menit, tetap diprioritaskan di queue, dikompaksi agar
+hanya ACK terbaru per sender yang aktif, dan menghentikan SOS saat
+`ack_timestamp >= sos_timestamp`. ACK dengan status `ACTIVE` ditolak.
 
 ## Format Payload 17 Byte
 

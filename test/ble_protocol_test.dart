@@ -231,6 +231,16 @@ void main() {
     expect(packet.hopCount, 0);
   });
 
+  test('rejects ACK with ACTIVE status', () {
+    final payload = BlePacket.packAck(
+      senderCrc: 12345,
+      ackTimestampMs: reference.millisecondsSinceEpoch,
+      status: SOSMessageStatus.active,
+    );
+
+    expect(BlePacket.unpack(payload, referenceTime: reference), isNull);
+  });
+
   test('ACK relay increments hop and continues beyond legacy max ACK hop', () {
     final ackTimestamp = reference.millisecondsSinceEpoch;
     final originPayload = BlePacket.packAck(
@@ -433,6 +443,11 @@ CREATE TABLE sos_messages (
       "SELECT name FROM sqlite_master WHERE type='table' AND name='relay_queue'",
     );
     expect(relayQueue, hasLength(1));
+
+    final ackTombstones = await db.rawQuery(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='ack_tombstones'",
+    );
+    expect(ackTombstones, hasLength(1));
 
     final experimentTables = await db.rawQuery(
       "SELECT name FROM sqlite_master WHERE type='table' "

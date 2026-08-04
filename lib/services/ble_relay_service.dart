@@ -166,6 +166,17 @@ class BleRelayService {
     SOSMessageStatus status = SOSMessageStatus.resolved,
     bool relayAck = true,
   }) async {
+    if (status == SOSMessageStatus.active) {
+      _log('Rejected ACTIVE ACK for sender CRC $senderCrc');
+      return false;
+    }
+
+    await _dbHelper.upsertAckTombstone(
+      senderCrc: senderCrc,
+      ackTimestampMs: ackTimestampMs,
+      status: status,
+    );
+
     final allMessages = await _dbHelper.getAllMessages();
     SOSMessage? latest;
     for (final message in allMessages) {
@@ -225,7 +236,44 @@ class BleRelayService {
     return localTimestampMs ~/ 1000 <= ackTimestampMs ~/ 1000;
   }
 
+  bool _isNewerState(SOSMessage incoming, SOSMessage? existing) {
+    if (existing == null) return true;
+    if (incoming.updatedAt > existing.updatedAt) return true;
+    if (incoming.updatedAt < existing.updatedAt) return false;
+    return _statusPriority(incoming.status) > _statusPriority(existing.status);
+  }
+
+  int _statusPriority(SOSMessageStatus status) {
+    return switch (status) {
+      SOSMessageStatus.active => 0,
+      SOSMessageStatus.cancelled => 1,
+      SOSMessageStatus.resolved => 1,
+    };
+  }
+
+  int _priorityForStatus(SOSMessageStatus status) {
+    return switch (status) {
+      SOSMessageStatus.active => 0,
+      SOSMessageStatus.cancelled => 50,
+      SOSMessageStatus.resolved => 50,
+    };
+  }
+
   Future<void> _processAck(BlePacket packet, {int? rssi}) async {
+    if (packet.status == SOSMessageStatus.active) {
+      await _experimentLogger.logEvent(
+        eventType: ExperimentEventTypes.bleRelayDropped,
+        deviceId: SyncService().deviceId,
+        senderCrc: packet.senderCrc,
+        hopCount: packet.hopCount,
+        rssi: rssi,
+        payloadHash: packet.identity,
+        detail: {'reason': 'ACK_ACTIVE_REJECTED'},
+      );
+      _log('ACK_ACTIVE_REJECTED ${packet.identity}');
+      return;
+    }
+
     await _experimentLogger.logEvent(
       eventType: ExperimentEventTypes.ackReceived,
       deviceId: SyncService().deviceId,
@@ -234,12 +282,9 @@ class BleRelayService {
       rssi: rssi,
       payloadHash: packet.identity,
     );
-    final ackQueueId = RelayQueueService.ackMessageId(
-      senderCrc: packet.senderCrc,
-      ackTimestampMs: packet.timestampMs,
-      statusIndex: packet.status.index,
+    final latestAckBefore = await _dbHelper.latestAckTimestampForSenderCrc(
+      packet.senderCrc,
     );
-    final alreadyQueued = await _relayQueue.getItem(ackQueueId, 'ack') != null;
 
     await applyAck(
       senderCrc: packet.senderCrc,
@@ -248,7 +293,7 @@ class BleRelayService {
       relayAck: false,
     );
 
-    if (alreadyQueued) {
+    if (latestAckBefore != null && latestAckBefore >= packet.timestampMs) {
       await _experimentLogger.logEvent(
         eventType: ExperimentEventTypes.blePacketDuplicate,
         deviceId: SyncService().deviceId,
@@ -287,6 +332,24 @@ class BleRelayService {
 
   Future<void> _processSos(BlePacket packet, {int? rssi}) async {
     final now = DateTime.now().millisecondsSinceEpoch;
+    final suppressedByAck = await _dbHelper.isSuppressedByAckTombstone(
+      senderCrc: packet.senderCrc,
+      sosTimestampMs: packet.timestampMs,
+    );
+    if (suppressedByAck) {
+      await _experimentLogger.logEvent(
+        eventType: ExperimentEventTypes.bleRelayDropped,
+        deviceId: SyncService().deviceId,
+        senderCrc: packet.senderCrc,
+        hopCount: packet.hopCount,
+        rssi: rssi,
+        payloadHash: packet.identity,
+        detail: {'reason': 'ACK_TOMBSTONE_SUPPRESSED'},
+      );
+      _log('ACK_TOMBSTONE_SUPPRESSED ${packet.identity}');
+      return;
+    }
+
     final message = messageFromSosPacket(packet, now);
     final existing = await _dbHelper.getLatestMessageForSender(
       senderId: message.senderId,
@@ -332,7 +395,12 @@ class BleRelayService {
         decision.reason == ForwardingDecisionReason.dropCooldown) {
       message.localState = 'queued';
     }
-    if (existing != null) {
+    final isNewerState = _isNewerState(message, existing);
+    final isPriorityStatus =
+        message.status == SOSMessageStatus.cancelled ||
+        message.status == SOSMessageStatus.resolved;
+
+    if (existing != null && !isNewerState) {
       message.relayCount = existing.relayCount;
       message.duplicateCount = existing.duplicateCount;
       message.lastRelayedAt = existing.lastRelayedAt;
@@ -391,10 +459,13 @@ class BleRelayService {
 
     await _relayQueue.enqueueSos(
       message,
-      nextEligibleAt: _relayQueue.sosCooldownEligibleAt(
-        now,
-        relayCount: message.relayCount,
-      ),
+      priority: _priorityForStatus(message.status),
+      nextEligibleAt: isNewerState || isPriorityStatus
+          ? now
+          : _relayQueue.sosCooldownEligibleAt(
+              now,
+              relayCount: message.relayCount,
+            ),
     );
     await _experimentLogger.logEvent(
       eventType: ExperimentEventTypes.bleRelayQueued,

@@ -24,10 +24,15 @@ class GatewayAck {
       );
     }
 
+    final status = _statusFrom(json['status']);
+    if (status == SOSMessageStatus.active) {
+      throw const FormatException('ACK status ACTIVE is invalid');
+    }
+
     return GatewayAck(
       senderCrc: senderCrc,
       ackTimestampMs: ackTimestamp,
-      status: _statusFrom(json['status']),
+      status: status,
       senderDeviceId: json['sender_device_id']?.toString(),
       localMessageId: json['local_message_id']?.toString(),
     );

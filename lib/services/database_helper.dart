@@ -8,7 +8,7 @@ import 'package:pkmproject/database_schema.dart'; // Import our SQL schema
 import 'package:pkmproject/models/sos_message.dart'; // Import the SOSMessage model
 
 class DatabaseHelper {
-  static const int databaseVersion = 6;
+  static const int databaseVersion = 7;
 
   static final DatabaseHelper _instance = DatabaseHelper._internal();
   static Database? _database;
@@ -67,6 +67,7 @@ class DatabaseHelper {
       onCreate: (db, version) async {
         await db.execute(createSosMessagesTableSql);
         await db.execute(createRelayQueueTableSql);
+        await db.execute(createAckTombstonesTableSql);
         await db.execute(createExperimentSessionsTableSql);
         await db.execute(createExperimentEventsTableSql);
         print("[DatabaseHelper] Table created in onCreate");
@@ -88,6 +89,7 @@ class DatabaseHelper {
         await ensureSosMessageColumns(db);
         await ensureRelayQueueTable(db);
         await ensureRelayQueueColumns(db);
+        await ensureAckTombstonesTable(db);
         await ensureExperimentTables(db);
       },
     );
@@ -118,6 +120,19 @@ class DatabaseHelper {
     if (oldVersion < 6) {
       await ensureRelayQueueTable(db);
       await ensureRelayQueueColumns(db);
+    }
+
+    if (oldVersion < 7) {
+      await ensureAckTombstonesTable(db);
+    }
+  }
+
+  static Future<void> ensureAckTombstonesTable(Database db) async {
+    final tables = await db.rawQuery(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='ack_tombstones'",
+    );
+    if (tables.isEmpty) {
+      await db.execute(createAckTombstonesTableSql);
     }
   }
 
@@ -281,6 +296,97 @@ class DatabaseHelper {
     return result;
   }
 
+  Future<bool> upsertAckTombstone({
+    required int senderCrc,
+    required int ackTimestampMs,
+    required SOSMessageStatus status,
+    String? payloadBase64,
+  }) async {
+    final db = await database;
+    return upsertAckTombstoneInDb(
+      db,
+      senderCrc: senderCrc,
+      ackTimestampMs: ackTimestampMs,
+      status: status,
+      payloadBase64: payloadBase64,
+    );
+  }
+
+  static Future<bool> upsertAckTombstoneInDb(
+    Database db, {
+    required int senderCrc,
+    required int ackTimestampMs,
+    required SOSMessageStatus status,
+    String? payloadBase64,
+  }) async {
+    if (status == SOSMessageStatus.active) return false;
+
+    final existing = await db.query(
+      'ack_tombstones',
+      where: 'sender_crc = ?',
+      whereArgs: [senderCrc],
+      limit: 1,
+    );
+
+    if (existing.isNotEmpty) {
+      final existingTimestamp = existing.first['ack_timestamp_ms'] as int? ?? 0;
+      if (existingTimestamp > ackTimestampMs) return false;
+    }
+
+    await db.insert('ack_tombstones', {
+      'sender_crc': senderCrc,
+      'ack_timestamp_ms': ackTimestampMs,
+      'status': status.index,
+      'payload_base64': payloadBase64,
+      'updated_at': DateTime.now().millisecondsSinceEpoch,
+    }, conflictAlgorithm: ConflictAlgorithm.replace);
+    return true;
+  }
+
+  Future<int?> latestAckTimestampForSenderCrc(int senderCrc) async {
+    final db = await database;
+    return latestAckTimestampForSenderCrcInDb(db, senderCrc);
+  }
+
+  static Future<int?> latestAckTimestampForSenderCrcInDb(
+    Database db,
+    int senderCrc,
+  ) async {
+    final rows = await db.query(
+      'ack_tombstones',
+      columns: ['ack_timestamp_ms'],
+      where: 'sender_crc = ?',
+      whereArgs: [senderCrc],
+      limit: 1,
+    );
+    if (rows.isEmpty) return null;
+    return rows.first['ack_timestamp_ms'] as int?;
+  }
+
+  Future<bool> isSuppressedByAckTombstone({
+    required int senderCrc,
+    required int sosTimestampMs,
+  }) async {
+    final db = await database;
+    return isSuppressedByAckTombstoneInDb(
+      db,
+      senderCrc: senderCrc,
+      sosTimestampMs: sosTimestampMs,
+    );
+  }
+
+  static Future<bool> isSuppressedByAckTombstoneInDb(
+    Database db, {
+    required int senderCrc,
+    required int sosTimestampMs,
+  }) async {
+    final ackTimestamp = await latestAckTimestampForSenderCrcInDb(
+      db,
+      senderCrc,
+    );
+    return ackTimestamp != null && ackTimestamp >= sosTimestampMs;
+  }
+
   Future<int> upsertMessage(SOSMessage message) async {
     final db = await database;
     // Don't hardcode isSynced to 1 here.
@@ -427,6 +533,14 @@ class DatabaseHelper {
 
   Future<void> replaceWithLatestMessage(SOSMessage message) async {
     final db = await database;
+    await replaceWithLatestMessageInDb(db, message);
+    refreshMessages(); // Broadcast change
+  }
+
+  static Future<void> replaceWithLatestMessageInDb(
+    Database db,
+    SOSMessage message,
+  ) async {
     await db.transaction((txn) async {
       final existingRows = message.senderCrc != null
           ? await txn.query(
@@ -441,6 +555,42 @@ class DatabaseHelper {
               where: 'sender_id = ?',
               whereArgs: [message.senderId],
             );
+
+      SOSMessage? latestExisting;
+      for (final row in existingRows) {
+        final rows = await txn.query(
+          'sos_messages',
+          where: 'id = ?',
+          whereArgs: [row['id']],
+          limit: 1,
+        );
+        if (rows.isEmpty) continue;
+        final candidate = SOSMessage.fromDbMap(rows.first);
+        if (latestExisting == null ||
+            candidate.updatedAt > latestExisting.updatedAt ||
+            (candidate.updatedAt == latestExisting.updatedAt &&
+                _statusPriority(candidate.status) >
+                    _statusPriority(latestExisting.status))) {
+          latestExisting = candidate;
+        }
+      }
+
+      if (latestExisting != null) {
+        if (latestExisting.updatedAt > message.updatedAt ||
+            (latestExisting.updatedAt == message.updatedAt &&
+                _statusPriority(latestExisting.status) >
+                    _statusPriority(message.status))) {
+          return;
+        }
+
+        if (message.updatedAt > latestExisting.updatedAt ||
+            (message.updatedAt == latestExisting.updatedAt &&
+                _statusPriority(message.status) >
+                    _statusPriority(latestExisting.status))) {
+          message.relayCount = 0;
+          message.lastRelayedAt = 0;
+        }
+      }
 
       for (final row in existingRows) {
         final existingId = row['id'] as String?;
@@ -473,7 +623,6 @@ class DatabaseHelper {
         conflictAlgorithm: ConflictAlgorithm.replace,
       );
     });
-    refreshMessages(); // Broadcast change
   }
 
   Future<void> cleanupOldDuplicates() async {
@@ -545,5 +694,13 @@ class DatabaseHelper {
 
   void dispose() {
     _messageStreamController.close();
+  }
+
+  static int _statusPriority(SOSMessageStatus status) {
+    return switch (status) {
+      SOSMessageStatus.active => 0,
+      SOSMessageStatus.cancelled => 1,
+      SOSMessageStatus.resolved => 1,
+    };
   }
 }

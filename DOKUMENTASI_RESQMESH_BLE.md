@@ -28,6 +28,7 @@ Konfigurasi runtime utama berada di `lib/config/mesh_config.dart`.
 | `maxAckHop` | `5` | Nilai legacy/metadata, bukan cutoff ACK aktif. |
 | `defaultMessageLifetime` | `6 jam` | Nilai legacy/metadata, bukan cutoff SOS aktif. |
 | `ackLifetime` | `2 menit` | Nilai legacy/metadata, bukan TTL ACK aktif. |
+| `basicFloodingInterval` | `2 detik` | Interval tetap basic flooding sebelum jitter. |
 | `adaptiveBackoffBase` | `10 detik` | Backoff awal setelah relay sukses. |
 | `adaptiveBackoffMax` | `5 menit` | Batas atas adaptive backoff. |
 | `scanAllAdvertisements` | `false` | Scanner default hanya manufacturer filter. |
@@ -127,7 +128,9 @@ berhenti. Queue tidak menghapus SOS aktif karena max hop, lifetime, atau total
 relay count. SOS tetap berada di queue sampai ACK server diterima, state yang
 lebih baru menggantikannya, atau dilakukan administrative deletion.
 
-Controlled persistent epidemic forwarding default memakai:
+Perbedaan mode diterapkan di `RelayQueueService`, yaitu scheduler yang memilih
+packet berikutnya dari persistent queue. Controlled persistent epidemic
+forwarding default memakai:
 
 - dedup berbasis identity packet;
 - fairness antar SOS;
@@ -136,7 +139,8 @@ Controlled persistent epidemic forwarding default memakai:
 - jitter;
 - relay count sebagai metrik saja.
 
-Basic flooding disediakan sebagai pembanding eksperimen.
+Basic flooding disediakan sebagai pembanding eksperimen dan memakai interval
+tetap pendek plus jitter, bukan adaptive exponential backoff.
 
 ## Gateway dan ACK
 
@@ -171,10 +175,16 @@ didukung:
 }
 ```
 
-ACK diterima jika `sender_crc` cocok dan timestamp ACK tidak lebih lama dari
-pesan lokal. ACK valid disimpan sebagai persistent anti-message, diprioritaskan
-di queue, dideduplikasi, dan disebarkan ulang tanpa hard hop limit atau TTL 2
-menit sampai node pembawa SOS menerimanya.
+ACK diterima jika `sender_crc` cocok, status bukan `ACTIVE`, dan timestamp ACK
+tidak lebih lama dari pesan lokal. ACK valid disimpan sebagai tombstone persisten
+terbaru per `sender_crc`, diprioritaskan di queue, dideduplikasi, dikompaksi,
+dan disebarkan ulang tanpa hard hop limit atau TTL 2 menit sampai node pembawa
+SOS menerimanya.
+
+Saat SOS diterima, tombstone dicek sebelum pesan disimpan atau masuk relay. Jika
+`ack_timestamp >= sos_timestamp`, SOS lama dianggap sudah diterminasi dan tidak
+di-relay. SOS dengan timestamp yang lebih baru dari tombstone tetap diterima
+sebagai state baru.
 
 ## Database Lokal
 
@@ -183,6 +193,7 @@ Skema saat ini mencakup:
 - `sos_messages`: pesan lokal/relay, status sync, hop, metadata legacy, sender
   CRC, dan relay metadata.
 - `relay_queue`: queue persisten untuk packet SOS dan ACK.
+- `ack_tombstones`: ACK terbaru per sender untuk menahan relay SOS lama.
 - `processed_packets`: dedup packet SOS/ACK.
 - `gateway_acks`: ACK dari gateway dan metadata relay.
 - `experiment_sessions`: konfigurasi dan waktu session eksperimen.

@@ -102,4 +102,15 @@ void main() {
       throwsFormatException,
     );
   });
+
+  test('gateway ACK contract rejects ACTIVE status', () {
+    expect(
+      () => GatewayAck.fromJson({
+        'sender_crc': 12345,
+        'ack_timestamp': '2026-08-04T05:00:00Z',
+        'status': 'ACTIVE',
+      }),
+      throwsFormatException,
+    );
+  });
 }

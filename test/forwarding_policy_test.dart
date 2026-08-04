@@ -107,6 +107,41 @@ void main() {
     expect(decision.reason, ForwardingDecisionReason.relayAccepted);
   });
 
+  test('ACTIVE does not overwrite CANCELLED at the same timestamp', () {
+    const policy = ForwardingPolicy();
+
+    final decision = policy.decideSos(
+      packet: sosPacket(timestampMs: now, status: SOSMessageStatus.active),
+      nowMs: now,
+      existingMessage: existingMessage(
+        updatedAt: now,
+        status: SOSMessageStatus.cancelled,
+      ),
+    );
+
+    expect(decision.shouldStore, false);
+    expect(decision.reason, ForwardingDecisionReason.dropDuplicate);
+  });
+
+  test('CANCELLED is not delayed by ACTIVE backoff', () {
+    const policy = ForwardingPolicy();
+
+    final decision = policy.decideSos(
+      packet: sosPacket(timestampMs: now, status: SOSMessageStatus.cancelled),
+      nowMs: now,
+      existingMessage: existingMessage(
+        updatedAt: now,
+        status: SOSMessageStatus.active,
+        lastRelayedAt: now - const Duration(seconds: 1).inMilliseconds,
+      ),
+    );
+
+    expect(decision.shouldStore, true);
+    expect(decision.shouldRelay, true);
+    expect(decision.nextEligibleAt, isNull);
+    expect(decision.reason, ForwardingDecisionReason.relayAccepted);
+  });
+
   test('same identity still ignores BLE address and drops non-better hop', () {
     const policy = ForwardingPolicy();
 

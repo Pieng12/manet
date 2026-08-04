@@ -68,6 +68,16 @@ class ForwardingPolicy {
       );
     }
 
+    if (packet.status == SOSMessageStatus.cancelled ||
+        packet.status == SOSMessageStatus.resolved) {
+      return ForwardingDecision(
+        shouldStore: true,
+        shouldRelay: true,
+        reason: ForwardingDecisionReason.relayAccepted,
+        nextHopCount: nextHopCount,
+      );
+    }
+
     final lastRelayedAt = existingMessage?.lastRelayedAt ?? 0;
     final backoff = adaptiveBackoffForRelayCount(
       existingMessage?.relayCount ?? 0,
@@ -100,7 +110,9 @@ class ForwardingPolicy {
     if (message == null) return false;
     if (message.updatedAt > packet.timestampMs) return true;
     if (message.updatedAt < packet.timestampMs) return false;
-    if (message.status != packet.status) return false;
+    if (message.status != packet.status) {
+      return _statusPriority(packet.status) <= _statusPriority(message.status);
+    }
 
     final incomingBestHop = _saturateHop(packet.hopCount + 1);
     if (incomingBestHop < message.hopCount) return false;
@@ -128,5 +140,13 @@ class ForwardingPolicy {
 
   bool _isCoordinateValid(double value, double min, double max) {
     return value.isFinite && value >= min && value <= max;
+  }
+
+  int _statusPriority(SOSMessageStatus status) {
+    return switch (status) {
+      SOSMessageStatus.active => 0,
+      SOSMessageStatus.cancelled => 1,
+      SOSMessageStatus.resolved => 1,
+    };
   }
 }
