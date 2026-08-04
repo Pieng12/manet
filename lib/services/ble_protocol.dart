@@ -1,12 +1,13 @@
 import 'dart:typed_data';
 
+import 'package:pkmproject/config/mesh_config.dart';
 import 'package:pkmproject/models/sos_message.dart';
 import 'package:pkmproject/utils/hash_utils.dart';
 
 enum BlePacketKind { sos, ack }
 
 class BlePacket {
-  static const int length = 17;
+  static const int length = MeshConfig.protocolLength;
   static const int ackFlag = 0x80;
   static const int fromServerFlag = 0x40;
   static const int hopMask = 0x3F;
@@ -34,7 +35,15 @@ class BlePacket {
 
   bool get isAck => kind == BlePacketKind.ack;
 
-  static Uint8List packSos(SOSMessage message, {int hopCount = 0}) {
+  String get identity => packetIdentity(this);
+
+  static String packetIdentity(BlePacket packet) {
+    final type = packet.isAck ? 'ACK' : 'SOS';
+    return '$type:${packet.senderCrc}:${packet.timestampMs}:${packet.status.index}';
+  }
+
+  static Uint8List packSos(SOSMessage message, {int? hopCount}) {
+    final effectiveHopCount = hopCount ?? message.hopCount;
     final buffer = ByteData(length);
     _writeHeader(buffer);
     final senderCrc = message.senderCrc ?? crc32(message.senderId);
@@ -45,7 +54,8 @@ class BlePacket {
     buffer.setUint8(15, message.status.index);
     buffer.setUint8(
       16,
-      (message.fromServer ? fromServerFlag : 0x00) | (hopCount & hopMask),
+      (message.fromServer ? fromServerFlag : 0x00) |
+          (effectiveHopCount & hopMask),
     );
     return buffer.buffer.asUint8List();
   }
@@ -67,9 +77,7 @@ class BlePacket {
     buffer.setUint8(15, status.index);
     buffer.setUint8(
       16,
-      ackFlag |
-          (fromServer ? fromServerFlag : 0x00) |
-          ((hopCount + 1) & hopMask),
+      ackFlag | (fromServer ? fromServerFlag : 0x00) | (hopCount & hopMask),
     );
     return buffer.buffer.asUint8List();
   }

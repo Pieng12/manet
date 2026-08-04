@@ -21,18 +21,34 @@ class BackgroundServiceManager {
     }
   }
 
-  static Future<void> requestIgnoreBatteryOptimizations() async {
+  static Future<bool> requestIgnoreBatteryOptimizations() async {
     try {
-      final result = await platform.invokeMethod(
+      final result = await platform.invokeMethod<bool>(
         'requestIgnoreBatteryOptimizations',
       );
       print(
         '[BackgroundServiceManager] Battery optimization requested: $result',
       );
+      return result ?? false;
     } catch (e) {
       print(
         '[BackgroundServiceManager] Error requesting battery optimization: $e',
       );
+      return false;
+    }
+  }
+
+  static Future<bool> isIgnoringBatteryOptimizations() async {
+    try {
+      final result = await platform.invokeMethod<bool>(
+        'isIgnoringBatteryOptimizations',
+      );
+      return result ?? false;
+    } catch (e) {
+      print(
+        '[BackgroundServiceManager] Error reading battery optimization state: $e',
+      );
+      return false;
     }
   }
 }

@@ -8,18 +8,15 @@ import android.bluetooth.le.ScanSettings
 import android.content.Context
 import android.content.Intent
 import android.os.Build
-import android.os.ParcelUuid
 import android.util.Log
 
 object NativeBleManager {
 
     private const val TAG = "NativeBleManager"
     private const val REQUEST_CODE_PENDING_INTENT = 123
-    const val RESQ_MESH_SERVICE_UUID_STRING = "000021FE-0000-1000-8000-00805F9B34FB"
-    private val RESQ_MESH_SERVICE_UUID = ParcelUuid.fromString(RESQ_MESH_SERVICE_UUID_STRING)
+    const val RESQ_MESH_SERVICE_UUID_STRING = NativeBleConfig.RESQ_MESH_SERVICE_UUID_STRING
     const val BLE_WAKE_UP_ACTION = "com.example.pkmproject.BLE_WAKE_UP"
-    private const val MANUFACTURER_ID = 0xFFFF
-    private const val DEBUG_SCAN_ALL_ADVERTISEMENTS = true
+    private const val DEFAULT_SCAN_ALL_ADVERTISEMENTS = false
 
     private fun getBluetoothAdapter(context: Context): BluetoothAdapter? {
         val bluetoothManager =
@@ -27,8 +24,11 @@ object NativeBleManager {
         return bluetoothManager.adapter
     }
 
-    fun startBleScan(context: Context): Boolean {
-        Log.i(TAG, "Starting BLE scan (PendingIntent mode)")
+    fun startBleScan(
+        context: Context,
+        scanAllAdvertisements: Boolean = DEFAULT_SCAN_ALL_ADVERTISEMENTS
+    ): Boolean {
+        Log.i(TAG, "Starting BLE scan (PendingIntent mode), scanAll=$scanAllAdvertisements")
 
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
             Log.w(TAG, "BLE PendingIntent scan requires Android 8.0+")
@@ -52,18 +52,13 @@ object NativeBleManager {
             return false
         }
 
-        val filters = if (DEBUG_SCAN_ALL_ADVERTISEMENTS) {
+        val filters = if (scanAllAdvertisements) {
+            Log.w(TAG, "Debug scan-all mode is active. Experiment filters are disabled.")
             emptyList()
         } else {
             listOf(
                 ScanFilter.Builder()
-                    .setManufacturerData(MANUFACTURER_ID, byteArrayOf())
-                    .build(),
-                ScanFilter.Builder()
-                    .setManufacturerData(0x0006, byteArrayOf())
-                    .build(),
-                ScanFilter.Builder()
-                    .setServiceUuid(RESQ_MESH_SERVICE_UUID)
+                    .setManufacturerData(NativeBleConfig.MANUFACTURER_ID, byteArrayOf())
                     .build()
             )
         }

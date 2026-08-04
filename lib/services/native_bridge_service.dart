@@ -1,4 +1,5 @@
 import 'package:flutter/services.dart';
+import 'package:pkmproject/config/mesh_config.dart';
 
 class NativeBridgeService {
   static const MethodChannel _platform = MethodChannel(
@@ -11,7 +12,9 @@ class NativeBridgeService {
 
   static Future<bool> startBleWakeUpScan() async {
     try {
-      final bool? result = await _platform.invokeMethod('startBleWakeUpScan');
+      final bool? result = await _platform.invokeMethod('startBleWakeUpScan', {
+        'scanAllAdvertisements': MeshConfig.scanAllAdvertisements,
+      });
       _isBleWakeUpScanning = result ?? false;
       return _isBleWakeUpScanning;
     } on PlatformException catch (e) {

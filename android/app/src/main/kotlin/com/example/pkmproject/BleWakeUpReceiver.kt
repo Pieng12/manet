@@ -12,8 +12,6 @@ class BleWakeUpReceiver : BroadcastReceiver() {
 
     companion object {
         private const val TAG = "BleWakeUpReceiver"
-        private const val MANUFACTURER_ID = 0xFFFF
-        private const val SIMULATION_MANUFACTURER_ID = 0x0006
         private const val DEDUPLICATION_WINDOW_MS = 5000L
 
         private val lastProcessedPayloads = mutableMapOf<String, Long>()
@@ -29,8 +27,10 @@ class BleWakeUpReceiver : BroadcastReceiver() {
             val scanRecord = scanResult.scanRecord ?: continue
             val manufacturerData = scanRecord.manufacturerSpecificData
             val id = when {
-                manufacturerData?.get(MANUFACTURER_ID) != null -> MANUFACTURER_ID
-                manufacturerData?.get(SIMULATION_MANUFACTURER_ID) != null -> SIMULATION_MANUFACTURER_ID
+                manufacturerData?.get(NativeBleConfig.MANUFACTURER_ID) != null ->
+                    NativeBleConfig.MANUFACTURER_ID
+                manufacturerData?.get(NativeBleConfig.SIMULATION_MANUFACTURER_ID) != null ->
+                    NativeBleConfig.SIMULATION_MANUFACTURER_ID
                 else -> -1
             }
 
@@ -98,11 +98,15 @@ class BleWakeUpReceiver : BroadcastReceiver() {
             }
         }
 
-        if (startIndex == -1 || rawPayload.size < startIndex + 17) {
+        if (startIndex == -1 ||
+            rawPayload.size < startIndex + NativeBleConfig.PROTOCOL_LENGTH_BYTES
+        ) {
             return
         }
 
-        val payload = rawPayload.sliceArray(startIndex until startIndex + 17)
+        val payload = rawPayload.sliceArray(
+            startIndex until startIndex + NativeBleConfig.PROTOCOL_LENGTH_BYTES
+        )
         val payloadBase64 = android.util.Base64.encodeToString(
             payload,
             android.util.Base64.NO_WRAP

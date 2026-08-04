@@ -5,10 +5,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
-import android.net.Uri
 import android.os.Build
-import android.os.PowerManager
-import android.provider.Settings
 import android.util.Log
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -55,11 +52,15 @@ class MainActivity : FlutterActivity() {
                         result.success(true)
                     }
                     "requestIgnoreBatteryOptimizations" -> {
-                        requestIgnoreBatteryOptimizations()
-                        result.success(true)
+                        result.success(NativeBatteryOptimization.requestExemption(this))
+                    }
+                    "isIgnoringBatteryOptimizations" -> {
+                        result.success(NativeBatteryOptimization.isIgnoring(this))
                     }
                     "startBleWakeUpScan" -> {
-                        val success = NativeBleManager.startBleScan(this)
+                        val scanAllAdvertisements =
+                            call.argument<Boolean>("scanAllAdvertisements") ?: false
+                        val success = NativeBleManager.startBleScan(this, scanAllAdvertisements)
                         result.success(success)
                     }
                     "stopBleWakeUpScan" -> {
@@ -78,10 +79,17 @@ class MainActivity : FlutterActivity() {
                                 null
                             }
                             val debugVisible =
-                                call.argument<Boolean>("debugVisible") ?: true
-                            val success =
-                                NativeBleAdvertiser.startAdvertising(this, payload, debugVisible)
-                            result.success(success)
+                                call.argument<Boolean>("debugVisible") ?: false
+                            val connectable =
+                                call.argument<Boolean>("connectable") ?: false
+                            NativeBleAdvertiser.startAdvertising(
+                                this,
+                                payload,
+                                debugVisible,
+                                connectable
+                            ) { success, _, _ ->
+                                result.success(success)
+                            }
                         } else {
                             result.success(false)
                         }
@@ -99,6 +107,19 @@ class MainActivity : FlutterActivity() {
                             result.success(NativeBleAdvertiser.isCurrentlyAdvertising())
                         } else {
                             result.success(false)
+                        }
+                    }
+                    "getNativeBleAdvertisingStatus" -> {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                            result.success(NativeBleAdvertiser.statusMap())
+                        } else {
+                            result.success(
+                                mapOf(
+                                    "status" to "unsupported",
+                                    "active" to false,
+                                    "errorCode" to "SDK_UNSUPPORTED"
+                                )
+                            )
                         }
                     }
                     else -> result.notImplemented()
@@ -119,7 +140,6 @@ class MainActivity : FlutterActivity() {
     override fun onDestroy() {
         super.onDestroy()
         unregisterBleStateReceiver()
-        NativeBleManager.stopBleScan(this)
     }
 
     private fun registerBleStateReceiver() {
@@ -180,22 +200,4 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    private fun requestIgnoreBatteryOptimizations() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
-
-        try {
-            val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
-            if (powerManager.isIgnoringBatteryOptimizations(packageName)) {
-                return
-            }
-
-            val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
-                data = Uri.parse("package:$packageName")
-            }
-            startActivity(intent)
-            Log.d("MainActivity", "Battery optimization dialog opened")
-        } catch (e: Exception) {
-            Log.e("MainActivity", "Error requesting battery optimization: ${e.message}", e)
-        }
-    }
 }

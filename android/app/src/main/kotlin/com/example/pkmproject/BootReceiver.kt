@@ -22,7 +22,9 @@ class BootReceiver : BroadcastReceiver() {
             return
         }
 
-        val serviceIntent = Intent(appContext, MeshBackgroundService::class.java)
+        val serviceIntent = Intent(appContext, MeshBackgroundService::class.java).apply {
+            this.action = MeshBackgroundService.BOOT_RECOVERY_ACTION
+        }
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 appContext.startForegroundService(serviceIntent)

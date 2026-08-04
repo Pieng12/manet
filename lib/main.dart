@@ -11,6 +11,8 @@ import 'package:pkmproject/services/background_service_manager.dart';
 import 'package:pkmproject/services/ble_relay_service.dart';
 import 'package:pkmproject/services/database_helper.dart';
 import 'package:pkmproject/services/demo_seed_service.dart';
+import 'package:pkmproject/services/experiment_logger.dart';
+import 'package:pkmproject/services/relay_queue_service.dart';
 import 'package:pkmproject/services/workmanager_service.dart';
 import 'package:pkmproject/sync_service.dart';
 import 'package:pkmproject/utils/navigator_key.dart';
@@ -36,6 +38,11 @@ void main() async {
 Future<void> _initializeCoreServices() async {
   await DatabaseHelper().database;
   await SyncService().initializeIdentity();
+  await ExperimentLogger().ensureSession(deviceId: SyncService().deviceId);
+  await ExperimentLogger().logEvent(
+    eventType: ExperimentEventTypes.serviceStarted,
+    deviceId: SyncService().deviceId,
+  );
 
   try {
     await FMTCObjectBoxBackend().initialise();
@@ -46,6 +53,9 @@ Future<void> _initializeCoreServices() async {
 
   await DemoSeedService.seedIfNeeded();
   await DatabaseHelper().cleanupOldDuplicates();
+  await RelayQueueService().removeExpiredSos(
+    DateTime.now().millisecondsSinceEpoch,
+  );
   await WorkManagerService.initialize();
   SyncService().startSyncListener();
 
@@ -54,6 +64,7 @@ Future<void> _initializeCoreServices() async {
       await BackgroundServiceManager.startBackgroundService();
       await BackgroundServiceManager.requestIgnoreBatteryOptimizations();
       await BleRelayService().start();
+      await BleRelayService().recoverPersistedRelayState();
     } catch (e) {
       debugPrint('[main] Background service init error: $e');
     }
@@ -151,8 +162,18 @@ void backgroundServiceMain() {
 
   DatabaseHelper().database.then((_) async {
     await SyncService().initializeIdentity();
+    await ExperimentLogger().ensureSession(deviceId: SyncService().deviceId);
+    await ExperimentLogger().logEvent(
+      eventType: ExperimentEventTypes.serviceStarted,
+      deviceId: SyncService().deviceId,
+      detail: {'entrypoint': 'background'},
+    );
+    await RelayQueueService().removeExpiredSos(
+      DateTime.now().millisecondsSinceEpoch,
+    );
     SyncService().startSyncListener();
     await BleRelayService().start();
+    await BleRelayService().recoverPersistedRelayState();
   });
 
   backgroundChannel.setMethodCallHandler((call) async {
@@ -164,9 +185,14 @@ void backgroundServiceMain() {
         debugPrint("[backgroundServiceMain] Connectivity changed");
         await SyncService().initiateFullSync();
         break;
+      case "recoverPersistedRelayState":
+        debugPrint("[backgroundServiceMain] Recovering persisted relay state");
+        await BleRelayService().recoverPersistedRelayState();
+        break;
       case "blePayloadReceived":
         final args = Map<String, dynamic>.from(call.arguments as Map);
         final payloadBase64 = args['payload'] as String?;
+        final rssi = args['rssi'] as int?;
         if (payloadBase64 == null || payloadBase64.isEmpty) return;
 
         final now = DateTime.now().millisecondsSinceEpoch;
@@ -177,7 +203,10 @@ void backgroundServiceMain() {
           lastProcessedPayloads.clear();
         }
 
-        await BleRelayService().processIncomingBase64(payloadBase64);
+        await BleRelayService().processIncomingBase64(
+          payloadBase64,
+          rssi: rssi,
+        );
         break;
       default:
         debugPrint("[backgroundServiceMain] Unknown method: ${call.method}");

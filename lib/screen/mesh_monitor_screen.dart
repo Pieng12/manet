@@ -5,7 +5,10 @@ import 'package:pkmproject/models/sos_message.dart';
 import 'package:pkmproject/services/ble_advertiser_service.dart';
 import 'package:pkmproject/services/ble_relay_service.dart';
 import 'package:pkmproject/services/database_helper.dart';
+import 'package:pkmproject/services/experiment_export_service.dart';
+import 'package:pkmproject/services/experiment_logger.dart';
 import 'package:pkmproject/services/native_bridge_service.dart';
+import 'package:pkmproject/services/relay_queue_service.dart';
 import 'package:pkmproject/sync_service.dart';
 import 'package:pkmproject/utils/hash_utils.dart';
 import 'package:pkmproject/widgets/resq_ui.dart';
@@ -26,6 +29,8 @@ class _MeshMonitorScreenState extends State<MeshMonitorScreen>
   final SyncService _syncService = SyncService();
   final BleRelayService _bleRelayService = BleRelayService();
   final BleAdvertiserService _bleAdvertiserService = BleAdvertiserService();
+  final RelayQueueService _relayQueueService = RelayQueueService();
+  final ExperimentLogger _experimentLogger = ExperimentLogger();
   final List<String> _logs = [];
 
   late TabController _tabController;
@@ -36,12 +41,16 @@ class _MeshMonitorScreenState extends State<MeshMonitorScreen>
 
   List<SOSMessage> _messages = [];
   String _messageFilter = 'all';
+  String _experimentSessionId = '-';
+  int _experimentEventCount = 0;
+  int _relayQueueSize = 0;
 
   @override
   void initState() {
     super.initState();
     _tabController = TabController(length: 3, vsync: this);
     _loadMessages();
+    _loadExperimentStatus();
     _messageSubscription = _dbHelper.messageStream.listen((messages) {
       if (mounted) setState(() => _messages = messages);
     });
@@ -54,15 +63,29 @@ class _MeshMonitorScreenState extends State<MeshMonitorScreen>
     });
     _advertisingSubscription = _bleAdvertiserService.onAdvertisingChanged
         .listen((_) => mounted ? setState(() {}) : null);
-    _statusTimer = Timer.periodic(
-      const Duration(seconds: 3),
-      (_) => mounted ? setState(() {}) : null,
-    );
+    _statusTimer = Timer.periodic(const Duration(seconds: 3), (_) async {
+      await _loadExperimentStatus();
+      if (mounted) setState(() {});
+    });
   }
 
   Future<void> _loadMessages() async {
     final messages = await _dbHelper.getAllMessages();
     if (mounted) setState(() => _messages = messages);
+  }
+
+  Future<void> _loadExperimentStatus() async {
+    final session = await _experimentLogger.currentSession();
+    final eventCount = await _experimentLogger.eventCount(
+      sessionId: session?.sessionId,
+    );
+    final queueSize = await _relayQueueService.queueSize();
+    if (!mounted) return;
+    setState(() {
+      _experimentSessionId = session?.sessionId ?? '-';
+      _experimentEventCount = eventCount;
+      _relayQueueSize = queueSize;
+    });
   }
 
   Future<void> _broadcastTestPayload() async {
@@ -84,6 +107,14 @@ class _MeshMonitorScreenState extends State<MeshMonitorScreen>
 
     try {
       await _bleRelayService.activateForMessage(message);
+      await _experimentLogger.logEvent(
+        eventType: ExperimentEventTypes.sosCreated,
+        deviceId: deviceId,
+        messageId: message.id,
+        senderCrc: message.senderCrc,
+        hopCount: message.hopCount,
+        detail: {'source': 'monitor_test'},
+      );
       await _loadMessages();
       _addLog('TEST SOS broadcast started. CRC=${message.senderCrc}');
       if (mounted) {
@@ -263,6 +294,24 @@ class _MeshMonitorScreenState extends State<MeshMonitorScreen>
           SyncService.offlineOnly ? Icons.cloud_off : Icons.cloud_sync,
           SyncService.offlineOnly ? ResqColors.muted : ResqColors.ember,
         ),
+        _statusCard(
+          'Session ID',
+          _experimentSessionId,
+          Icons.fingerprint,
+          ResqColors.signal,
+        ),
+        _statusCard(
+          'Relay Queue',
+          _relayQueueSize.toString(),
+          Icons.queue,
+          ResqColors.ember,
+        ),
+        _statusCard(
+          'Experiment Events',
+          _experimentEventCount.toString(),
+          Icons.analytics_outlined,
+          ResqColors.safe,
+        ),
         const SizedBox(height: 8),
         ElevatedButton.icon(
           onPressed: _broadcastTestPayload,
@@ -278,6 +327,25 @@ class _MeshMonitorScreenState extends State<MeshMonitorScreen>
           },
           icon: const Icon(Icons.radar),
           label: const Text('Start BLE Scan'),
+        ),
+        const SizedBox(height: 8),
+        OutlinedButton.icon(
+          onPressed: () async {
+            final jsonFile = await ExperimentExportService().exportJson(
+              sessionId: _experimentSessionId == '-'
+                  ? null
+                  : _experimentSessionId,
+            );
+            final csvFile = await ExperimentExportService().exportCsv(
+              sessionId: _experimentSessionId == '-'
+                  ? null
+                  : _experimentSessionId,
+            );
+            _addLog('Experiment exported: ${jsonFile.path}');
+            _addLog('Experiment exported: ${csvFile.path}');
+          },
+          icon: const Icon(Icons.download),
+          label: const Text('Export Experiment Data'),
         ),
       ],
     );

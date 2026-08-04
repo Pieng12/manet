@@ -36,6 +36,8 @@ class MeshBackgroundService : Service() {
     companion object {
         const val DART_ENTRYPOINT = "backgroundServiceMain"
         const val CONNECTIVITY_CHANGED_ACTION = "com.example.pkmproject.CONNECTIVITY_CHANGED"
+        const val BOOT_RECOVERY_ACTION = "com.example.pkmproject.BOOT_RECOVERY"
+        const val TASK_REMOVED_RECOVERY_ACTION = "com.example.pkmproject.TASK_REMOVED_RECOVERY"
         var serviceStarted = false
     }
 
@@ -101,6 +103,10 @@ class MeshBackgroundService : Service() {
                 CONNECTIVITY_CHANGED_ACTION -> {
                     sendWakeUpToFlutter("connectivityChanged", null, null, 0)
                 }
+                BOOT_RECOVERY_ACTION, TASK_REMOVED_RECOVERY_ACTION -> {
+                    NativeBleManager.startBleScan(this)
+                    sendWakeUpToFlutter("recoverPersistedRelayState", null, null, 0)
+                }
             }
         }
 
@@ -109,8 +115,10 @@ class MeshBackgroundService : Service() {
 
     override fun onTaskRemoved(rootIntent: Intent?) {
         super.onTaskRemoved(rootIntent)
-        Log.d(tag, "onTaskRemoved called. Stopping foreground service.")
-        stopSelf()
+        Log.d(tag, "onTaskRemoved called. Keeping relay state and scan recoverable.")
+        NativeBleManager.startBleScan(this)
+        sendWakeUpToFlutter("recoverPersistedRelayState", null, null, 0)
+        resetIdleStop()
     }
 
     override fun onDestroy() {
@@ -230,10 +238,17 @@ class MeshBackgroundService : Service() {
                                 null
                             }
                             val debugVisible =
-                                call.argument<Boolean>("debugVisible") ?: true
-                            val success =
-                                NativeBleAdvertiser.startAdvertising(this, payload, debugVisible)
-                            result.success(success)
+                                call.argument<Boolean>("debugVisible") ?: false
+                            val connectable =
+                                call.argument<Boolean>("connectable") ?: false
+                            NativeBleAdvertiser.startAdvertising(
+                                this,
+                                payload,
+                                debugVisible,
+                                connectable
+                            ) { success, _, _ ->
+                                result.success(success)
+                            }
                         } else {
                             result.success(false)
                         }
@@ -253,8 +268,23 @@ class MeshBackgroundService : Service() {
                             result.success(false)
                         }
                     }
+                    "getNativeBleAdvertisingStatus" -> {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                            result.success(NativeBleAdvertiser.statusMap())
+                        } else {
+                            result.success(
+                                mapOf(
+                                    "status" to "unsupported",
+                                    "active" to false,
+                                    "errorCode" to "SDK_UNSUPPORTED"
+                                )
+                            )
+                        }
+                    }
                     "startBleWakeUpScan" -> {
-                        result.success(NativeBleManager.startBleScan(this))
+                        val scanAllAdvertisements =
+                            call.argument<Boolean>("scanAllAdvertisements") ?: false
+                        result.success(NativeBleManager.startBleScan(this, scanAllAdvertisements))
                     }
                     "stopBleWakeUpScan" -> {
                         result.success(NativeBleManager.stopBleScan(this))
@@ -263,7 +293,10 @@ class MeshBackgroundService : Service() {
                         result.success(true)
                     }
                     "requestIgnoreBatteryOptimizations" -> {
-                        result.success(true)
+                        result.success(NativeBatteryOptimization.requestExemption(this))
+                    }
+                    "isIgnoringBatteryOptimizations" -> {
+                        result.success(NativeBatteryOptimization.isIgnoring(this))
                     }
                     else -> result.notImplemented()
                 }
@@ -277,7 +310,7 @@ class MeshBackgroundService : Service() {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP &&
                 NativeBleAdvertiser.isCurrentlyAdvertising()
             ) {
-                NativeBleAdvertiser.startAdvertising(this, null)
+                NativeBleAdvertiser.startAdvertising(this, null, callback = null)
             }
 
             dutyCycleHandler.postDelayed(dutyCycleRunnable, 30000)

@@ -1,9 +1,14 @@
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:pkmproject/config/mesh_config.dart';
+import 'package:pkmproject/database_schema.dart';
 import 'package:pkmproject/models/sos_message.dart';
+import 'package:pkmproject/services/ble_relay_service.dart';
 import 'package:pkmproject/services/ble_protocol.dart';
+import 'package:pkmproject/services/database_helper.dart';
 import 'package:pkmproject/utils/hash_utils.dart';
+import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 void main() {
   final reference = DateTime.utc(2026, 6, 8, 12);
@@ -56,6 +61,157 @@ void main() {
     expect(packet!.senderCrc, 12345);
   });
 
+  test('origin SOS advertises hop 0 and first relay advertises hop 1', () {
+    final updatedAt = reference.millisecondsSinceEpoch;
+    final origin = SOSMessage(
+      id: 'origin-1',
+      senderId: 'device-a',
+      senderCrc: crc32('device-a'),
+      content: 'SOS',
+      latitude: -6.2,
+      longitude: 106.8,
+      status: SOSMessageStatus.active,
+      createdAt: updatedAt,
+      updatedAt: updatedAt,
+    );
+
+    final originPayload = BlePacket.packSos(origin);
+    final incoming = BlePacket.unpack(originPayload, referenceTime: reference);
+
+    expect(incoming, isNotNull);
+    expect(incoming!.hopCount, 0);
+
+    final relayed = BleRelayService.messageFromSosPacket(
+      incoming,
+      updatedAt + const Duration(seconds: 1).inMilliseconds,
+    );
+    final relayPayload = BlePacket.packSos(relayed);
+    final relayPacket = BlePacket.unpack(
+      relayPayload,
+      referenceTime: reference,
+    );
+
+    expect(relayed.hopCount, 1);
+    expect(relayPacket, isNotNull);
+    expect(relayPacket!.hopCount, 1);
+  });
+
+  test('SOS at hop 4 is relayed as hop 5', () {
+    final updatedAt = reference.millisecondsSinceEpoch;
+    final message = SOSMessage(
+      id: 'relay-4',
+      senderId: 'device-a',
+      senderCrc: crc32('device-a'),
+      content: 'SOS',
+      latitude: -6.2,
+      longitude: 106.8,
+      status: SOSMessageStatus.active,
+      createdAt: updatedAt,
+      updatedAt: updatedAt,
+      hopCount: MeshConfig.defaultMaxHop - 1,
+    );
+    final packet = BlePacket.unpack(
+      BlePacket.packSos(message),
+      referenceTime: reference,
+    );
+
+    final relayed = BleRelayService.messageFromSosPacket(
+      packet!,
+      updatedAt + const Duration(seconds: 1).inMilliseconds,
+    );
+
+    expect(
+      BleRelayService.canRelaySosPacket(packet, relayed.firstSeenAt),
+      true,
+    );
+    expect(relayed.hopCount, MeshConfig.defaultMaxHop);
+  });
+
+  test('SOS at max hop is stored but not relayed', () {
+    final updatedAt = reference.millisecondsSinceEpoch;
+    final message = SOSMessage(
+      id: 'relay-5',
+      senderId: 'device-a',
+      senderCrc: crc32('device-a'),
+      content: 'SOS',
+      latitude: -6.2,
+      longitude: 106.8,
+      status: SOSMessageStatus.active,
+      createdAt: updatedAt,
+      updatedAt: updatedAt,
+      hopCount: MeshConfig.defaultMaxHop,
+    );
+    final packet = BlePacket.unpack(
+      BlePacket.packSos(message),
+      referenceTime: reference,
+    );
+    final receivedAt = updatedAt + const Duration(seconds: 1).inMilliseconds;
+
+    final stored = BleRelayService.messageFromSosPacket(packet!, receivedAt);
+
+    expect(stored.hopCount, MeshConfig.defaultMaxHop);
+    expect(BleRelayService.canRelaySosPacket(packet, receivedAt), false);
+  });
+
+  test('expired SOS is stored as expired and not relayed', () {
+    final updatedAt = reference.millisecondsSinceEpoch;
+    final message = SOSMessage(
+      id: 'expired-1',
+      senderId: 'device-a',
+      senderCrc: crc32('device-a'),
+      content: 'SOS',
+      latitude: -6.2,
+      longitude: 106.8,
+      status: SOSMessageStatus.active,
+      createdAt: updatedAt,
+      updatedAt: updatedAt,
+    );
+    final packet = BlePacket.unpack(
+      BlePacket.packSos(message),
+      referenceTime: reference,
+    );
+    final receivedAt =
+        updatedAt + MeshConfig.defaultMessageLifetime.inMilliseconds;
+
+    final stored = BleRelayService.messageFromSosPacket(packet!, receivedAt);
+
+    expect(stored.localState, 'expired');
+    expect(stored.isExpiredAt(receivedAt), true);
+    expect(BleRelayService.canRelaySosPacket(packet, receivedAt), false);
+  });
+
+  test('database map preserves hop and expiry metadata after reload', () {
+    final updatedAt = DateTime.now().millisecondsSinceEpoch;
+    final expiresAt =
+        updatedAt + MeshConfig.defaultMessageLifetime.inMilliseconds;
+    final message = SOSMessage(
+      id: 'persisted-hop',
+      senderId: 'device-a',
+      senderCrc: crc32('device-a'),
+      content: 'SOS',
+      latitude: -6.2,
+      longitude: 106.8,
+      status: SOSMessageStatus.active,
+      createdAt: updatedAt,
+      updatedAt: updatedAt,
+      hopCount: 3,
+      maxHop: MeshConfig.defaultMaxHop,
+      expiresAt: expiresAt,
+      firstSeenAt: updatedAt + 500,
+      relayCount: 2,
+      localState: 'relayed',
+    );
+
+    final reloaded = SOSMessage.fromDbMap(message.toDbMap());
+
+    expect(reloaded.hopCount, 3);
+    expect(reloaded.maxHop, MeshConfig.defaultMaxHop);
+    expect(reloaded.expiresAt, expiresAt);
+    expect(reloaded.firstSeenAt, updatedAt + 500);
+    expect(reloaded.relayCount, 2);
+    expect(reloaded.localState, 'relayed');
+  });
+
   test('packs and unpacks ACK payload in 17 bytes', () {
     final ackTimestamp = reference.millisecondsSinceEpoch;
     final payload = BlePacket.packAck(
@@ -72,6 +228,67 @@ void main() {
     expect(packet.senderCrc, 12345);
     expect(packet.timestampMs, ackTimestamp);
     expect(packet.status, SOSMessageStatus.resolved);
+    expect(packet.hopCount, 0);
+  });
+
+  test('ACK relay increments hop at caller and stops at max ACK hop', () {
+    final ackTimestamp = reference.millisecondsSinceEpoch;
+    final originPayload = BlePacket.packAck(
+      senderCrc: 12345,
+      ackTimestampMs: ackTimestamp,
+      status: SOSMessageStatus.resolved,
+    );
+    final originPacket = BlePacket.unpack(
+      originPayload,
+      referenceTime: reference,
+    );
+
+    expect(originPacket, isNotNull);
+    expect(originPacket!.hopCount, 0);
+    expect(BleRelayService.canRelayAckPacket(originPacket, ackTimestamp), true);
+
+    final relayPayload = BlePacket.packAck(
+      senderCrc: originPacket.senderCrc,
+      ackTimestampMs: originPacket.timestampMs,
+      status: originPacket.status,
+      hopCount: originPacket.hopCount + 1,
+    );
+    final relayPacket = BlePacket.unpack(
+      relayPayload,
+      referenceTime: reference,
+    );
+
+    expect(relayPacket, isNotNull);
+    expect(relayPacket!.hopCount, 1);
+
+    final maxHopPayload = BlePacket.packAck(
+      senderCrc: 12345,
+      ackTimestampMs: ackTimestamp,
+      hopCount: MeshConfig.maxAckHop,
+    );
+    final maxHopPacket = BlePacket.unpack(
+      maxHopPayload,
+      referenceTime: reference,
+    );
+    expect(maxHopPacket, isNotNull);
+    expect(
+      BleRelayService.canRelayAckPacket(maxHopPacket!, ackTimestamp),
+      false,
+    );
+  });
+
+  test('expired ACK is not relayed', () {
+    final ackTimestamp = reference.millisecondsSinceEpoch;
+    final payload = BlePacket.packAck(
+      senderCrc: 12345,
+      ackTimestampMs: ackTimestamp,
+    );
+    final packet = BlePacket.unpack(payload, referenceTime: reference);
+    final expiredAt = ackTimestamp + MeshConfig.ackLifetime.inMilliseconds;
+
+    expect(packet, isNotNull);
+    expect(BleRelayService.isAckPacketExpired(packet!, expiredAt), true);
+    expect(BleRelayService.canRelayAckPacket(packet, expiredAt), false);
   });
 
   test('rejects invalid header', () {
@@ -95,5 +312,74 @@ void main() {
       localUpdatedAt.millisecondsSinceEpoch <= newAck.millisecondsSinceEpoch,
       isTrue,
     );
+  });
+
+  test('database migration keeps old SOS rows and creates relay queue', () async {
+    sqfliteFfiInit();
+    final db = await databaseFactoryFfi.openDatabase(inMemoryDatabasePath);
+    addTearDown(db.close);
+
+    await db.execute('''
+CREATE TABLE sos_messages (
+  id TEXT PRIMARY KEY,
+  sender_id TEXT,
+  sender_name TEXT NULL,
+  content TEXT,
+  latitude REAL,
+  longitude REAL,
+  status INTEGER,
+  created_at INTEGER,
+  updated_at INTEGER,
+  is_synced INTEGER DEFAULT 0,
+  sender_crc INTEGER NULL,
+  from_server INTEGER DEFAULT 0
+);
+''');
+    final createdAt = reference.millisecondsSinceEpoch;
+    await db.insert('sos_messages', {
+      'id': 'legacy-1',
+      'sender_id': 'legacy-device',
+      'sender_name': 'Legacy Node',
+      'content': 'SOS',
+      'latitude': -6.2,
+      'longitude': 106.8,
+      'status': SOSMessageStatus.active.index,
+      'created_at': createdAt,
+      'updated_at': createdAt,
+      'is_synced': 0,
+      'sender_crc': 12345,
+      'from_server': 0,
+    });
+
+    await DatabaseHelper.migrateDatabase(db, 2, DatabaseHelper.databaseVersion);
+
+    final rows = await db.query('sos_messages');
+    expect(rows, hasLength(1));
+    expect(rows.single['id'], 'legacy-1');
+    expect(rows.single['hop_count'], 0);
+    expect(rows.single['max_hop'], MeshConfig.defaultMaxHop);
+    expect(
+      rows.single['expires_at'],
+      createdAt + MeshConfig.defaultMessageLifetime.inMilliseconds,
+    );
+    expect(rows.single['first_seen_at'], createdAt);
+    expect(rows.single['local_state'], 'pending');
+
+    final columns = await db.rawQuery('PRAGMA table_info(sos_messages)');
+    final columnNames = columns.map((column) => column['name']).toSet();
+    for (final columnName in sosMessagesColumnDefinitions.keys) {
+      expect(columnNames, contains(columnName));
+    }
+
+    final relayQueue = await db.rawQuery(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='relay_queue'",
+    );
+    expect(relayQueue, hasLength(1));
+
+    final experimentTables = await db.rawQuery(
+      "SELECT name FROM sqlite_master WHERE type='table' "
+      "AND name IN ('experiment_sessions', 'experiment_events')",
+    );
+    expect(experimentTables, hasLength(2));
   });
 }

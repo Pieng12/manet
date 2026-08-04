@@ -5,6 +5,7 @@ import 'package:pkmproject/models/sos_message.dart';
 import 'package:pkmproject/services/ble_advertiser_service.dart';
 import 'package:pkmproject/services/ble_relay_service.dart';
 import 'package:pkmproject/services/database_helper.dart';
+import 'package:pkmproject/services/experiment_logger.dart';
 import 'package:pkmproject/services/location_service.dart';
 import 'package:pkmproject/services/native_bridge_service.dart';
 import 'package:pkmproject/services/workmanager_service.dart';
@@ -135,6 +136,14 @@ class _HomeScreenState extends State<HomeScreen>
       sosMessage.status = SOSMessageStatus.active;
       sosMessage.isSynced = 0;
 
+      await ExperimentLogger().logEvent(
+        eventType: ExperimentEventTypes.sosCreated,
+        deviceId: deviceId,
+        messageId: sosMessage.id,
+        senderCrc: sosMessage.senderCrc,
+        hopCount: sosMessage.hopCount,
+        detail: {'source': existingSOS == null ? 'new' : 'replace'},
+      );
       await _bleRelayService.activateForMessage(sosMessage);
       _log('SOS saved and BLE connectionless broadcast started.');
       if (mounted) {

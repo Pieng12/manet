@@ -1,5 +1,7 @@
 // pkmproject/lib/models/sos_message.dart
 
+import 'package:pkmproject/config/mesh_config.dart';
+
 enum SOSMessageStatus { cancelled, active, resolved }
 
 class SOSMessage {
@@ -18,6 +20,16 @@ class SOSMessage {
   createdAt; // Epoch milliseconds (local creation time / server's occurred_at)
   int updatedAt; // Epoch milliseconds (local update time / server's updated_at)
   int isSynced; // 0 = Not synced, 1 = Synced
+  int hopCount;
+  int maxHop;
+  int expiresAt;
+  int firstSeenAt;
+  int lastRelayedAt;
+  int relayCount;
+  int duplicateCount;
+  int? ackReceivedAt;
+  int? syncedAt;
+  String localState;
 
   SOSMessage({
     required this.id,
@@ -32,10 +44,30 @@ class SOSMessage {
     required this.createdAt,
     required this.updatedAt,
     this.isSynced = 0,
-  });
+    this.hopCount = 0,
+    this.maxHop = MeshConfig.defaultMaxHop,
+    int? expiresAt,
+    int? firstSeenAt,
+    this.lastRelayedAt = 0,
+    this.relayCount = 0,
+    this.duplicateCount = 0,
+    this.ackReceivedAt,
+    this.syncedAt,
+    this.localState = 'pending',
+  }) : expiresAt =
+           expiresAt ??
+           createdAt + MeshConfig.defaultMessageLifetime.inMilliseconds,
+       firstSeenAt = firstSeenAt ?? createdAt;
+
+  bool isExpiredAt(int nowMs) => nowMs >= expiresAt;
+
+  bool get isExpired =>
+      isExpiredAt(DateTime.now().millisecondsSinceEpoch) ||
+      localState == 'expired';
 
   // Convert a SOSMessage object into a Map object for database insertion/update
   Map<String, dynamic> toDbMap() {
+    final dbLocalState = isExpired ? 'expired' : localState;
     return {
       'id': id,
       'sender_id': senderId,
@@ -49,11 +81,22 @@ class SOSMessage {
       'is_synced': isSynced,
       'sender_crc': senderCrc,
       'from_server': fromServer ? 1 : 0,
+      'hop_count': hopCount,
+      'max_hop': maxHop,
+      'expires_at': expiresAt,
+      'first_seen_at': firstSeenAt,
+      'last_relayed_at': lastRelayedAt,
+      'relay_count': relayCount,
+      'duplicate_count': duplicateCount,
+      'ack_received_at': ackReceivedAt,
+      'synced_at': syncedAt,
+      'local_state': dbLocalState,
     };
   }
 
   // Convert a Map object from database into a SOSMessage object
   factory SOSMessage.fromDbMap(Map<String, dynamic> map) {
+    final createdAt = map['created_at'] as int;
     return SOSMessage(
       id: map['id'],
       senderId: map['sender_id'],
@@ -65,9 +108,21 @@ class SOSMessage {
       longitude: map['longitude'],
       status: SOSMessageStatus
           .values[map['status']], // Convert integer back to enum
-      createdAt: map['created_at'],
+      createdAt: createdAt,
       updatedAt: map['updated_at'],
       isSynced: map['is_synced'],
+      hopCount: map['hop_count'] ?? 0,
+      maxHop: map['max_hop'] ?? MeshConfig.defaultMaxHop,
+      expiresAt:
+          map['expires_at'] ??
+          createdAt + MeshConfig.defaultMessageLifetime.inMilliseconds,
+      firstSeenAt: map['first_seen_at'] ?? createdAt,
+      lastRelayedAt: map['last_relayed_at'] ?? 0,
+      relayCount: map['relay_count'] ?? 0,
+      duplicateCount: map['duplicate_count'] ?? 0,
+      ackReceivedAt: map['ack_received_at'],
+      syncedAt: map['synced_at'],
+      localState: map['local_state'] ?? 'pending',
     );
   }
 
@@ -83,6 +138,9 @@ class SOSMessage {
       'status': status.name, // Use the enum name as string
       'createdAt': createdAt,
       'updatedAt': updatedAt,
+      'hopCount': hopCount,
+      'maxHop': maxHop,
+      'expiresAt': expiresAt,
     };
   }
 
@@ -95,7 +153,7 @@ class SOSMessage {
     final minute = dt.minute.toString().padLeft(2, '0');
     final second = dt.second.toString().padLeft(2, '0');
     final microsecond = dt.microsecond.toString().padLeft(6, '0');
-    return '${year}-${month}-${day}T${hour}:${minute}:${second}.${microsecond}Z';
+    return '$year-$month-${day}T$hour:$minute:$second.${microsecond}Z';
   }
 
   // Convert a SOSMessage object into a Map object suitable for API upload
@@ -113,6 +171,7 @@ class SOSMessage {
       'longitude': longitude,
       'status': status.name.toUpperCase(),
       'occurred_at': apiTimestamp,
+      'updated_at': apiTimestamp,
       'device_id': senderId,
       'sender_crc': senderCrc,
       'from_server': fromServer,
@@ -144,6 +203,8 @@ class SOSMessage {
       createdAt: DateTime.parse(json['occurred_at']).millisecondsSinceEpoch,
       updatedAt: DateTime.parse(json['updated_at']).millisecondsSinceEpoch,
       isSynced: 1, // Data from server is always synced
+      syncedAt: DateTime.now().millisecondsSinceEpoch,
+      localState: 'synced',
     );
   }
 }

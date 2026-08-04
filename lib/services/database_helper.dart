@@ -3,10 +3,13 @@
 import 'dart:async';
 import 'package:sqflite/sqflite.dart';
 import 'package:path/path.dart';
+import 'package:pkmproject/config/mesh_config.dart';
 import 'package:pkmproject/database_schema.dart'; // Import our SQL schema
 import 'package:pkmproject/models/sos_message.dart'; // Import the SOSMessage model
 
 class DatabaseHelper {
+  static const int databaseVersion = 5;
+
   static final DatabaseHelper _instance = DatabaseHelper._internal();
   static Database? _database;
 
@@ -60,26 +63,16 @@ class DatabaseHelper {
 
     return await openDatabase(
       databasePath,
-      version: 2,
+      version: databaseVersion,
       onCreate: (db, version) async {
         await db.execute(createSosMessagesTableSql);
+        await db.execute(createRelayQueueTableSql);
+        await db.execute(createExperimentSessionsTableSql);
+        await db.execute(createExperimentEventsTableSql);
         print("[DatabaseHelper] Table created in onCreate");
       },
       onUpgrade: (db, oldVersion, newVersion) async {
-        if (oldVersion < 2) {
-          try {
-            await db.execute(
-              'ALTER TABLE sos_messages ADD COLUMN sender_crc INTEGER NULL',
-            );
-            await db.execute(
-              'ALTER TABLE sos_messages ADD COLUMN from_server INTEGER DEFAULT 0',
-            );
-          } catch (e) {
-            print(
-              "[DatabaseHelper] Upgrade column error (maybe already exists): $e",
-            );
-          }
-        }
+        await migrateDatabase(db, oldVersion, newVersion);
       },
       onOpen: (db) async {
         // SELF-HEALING: Ensure table exists even if onCreate skipped it
@@ -92,7 +85,90 @@ class DatabaseHelper {
           );
           await db.execute(createSosMessagesTableSql);
         }
+        await ensureSosMessageColumns(db);
+        await ensureRelayQueueTable(db);
+        await ensureExperimentTables(db);
       },
+    );
+  }
+
+  static Future<void> migrateDatabase(
+    Database db,
+    int oldVersion,
+    int newVersion,
+  ) async {
+    if (oldVersion < 2) {
+      await ensureSosMessageColumns(db);
+    }
+
+    if (oldVersion < 3) {
+      await ensureSosMessageColumns(db);
+      await _backfillStage1Columns(db);
+    }
+
+    if (oldVersion < 4) {
+      await ensureRelayQueueTable(db);
+    }
+
+    if (oldVersion < 5) {
+      await ensureExperimentTables(db);
+    }
+  }
+
+  static Future<void> ensureExperimentTables(Database db) async {
+    final tables = await db.rawQuery(
+      "SELECT name FROM sqlite_master WHERE type='table' "
+      "AND name IN ('experiment_sessions', 'experiment_events')",
+    );
+    final tableNames = tables.map((row) => row['name'] as String).toSet();
+    if (!tableNames.contains('experiment_sessions')) {
+      await db.execute(createExperimentSessionsTableSql);
+    }
+    if (!tableNames.contains('experiment_events')) {
+      await db.execute(createExperimentEventsTableSql);
+    }
+  }
+
+  static Future<void> ensureRelayQueueTable(Database db) async {
+    final tables = await db.rawQuery(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='relay_queue'",
+    );
+    if (tables.isEmpty) {
+      await db.execute(createRelayQueueTableSql);
+    }
+  }
+
+  static Future<void> ensureSosMessageColumns(Database db) async {
+    final existingColumns = await _sosMessageColumnNames(db);
+    for (final entry in sosMessagesColumnDefinitions.entries) {
+      if (existingColumns.contains(entry.key)) continue;
+      await db.execute(
+        'ALTER TABLE sos_messages ADD COLUMN ${entry.key} ${entry.value}',
+      );
+    }
+  }
+
+  static Future<Set<String>> _sosMessageColumnNames(Database db) async {
+    final columns = await db.rawQuery('PRAGMA table_info(sos_messages)');
+    return columns.map((column) => column['name'] as String).toSet();
+  }
+
+  static Future<void> _backfillStage1Columns(Database db) async {
+    final lifetimeMs = MeshConfig.defaultMessageLifetime.inMilliseconds;
+    await db.rawUpdate(
+      'UPDATE sos_messages '
+      'SET expires_at = created_at + ? '
+      'WHERE expires_at = 0 OR expires_at IS NULL',
+      [lifetimeMs],
+    );
+    await db.rawUpdate(
+      'UPDATE sos_messages '
+      'SET first_seen_at = created_at '
+      'WHERE first_seen_at = 0 OR first_seen_at IS NULL',
+    );
+    await db.rawUpdate(
+      "UPDATE sos_messages SET local_state = 'pending' "
+      "WHERE local_state IS NULL OR local_state = ''",
     );
   }
 
@@ -111,8 +187,8 @@ class DatabaseHelper {
     final db = await database;
     final List<Map<String, dynamic>> maps = await db.query(
       'sos_messages',
-      where: 'is_synced = ?',
-      whereArgs: [0],
+      where: 'is_synced = ? AND expires_at > ? AND local_state != ?',
+      whereArgs: [0, DateTime.now().millisecondsSinceEpoch, 'expired'],
     );
     return List.generate(maps.length, (i) {
       return SOSMessage.fromDbMap(maps[i]);
@@ -121,17 +197,47 @@ class DatabaseHelper {
 
   Future<int> updateSyncStatus(String uuid) async {
     final db = await database;
+    final now = DateTime.now().millisecondsSinceEpoch;
     // IMPORTANT: Only update is_synced, NOT updated_at.
     // updated_at should only change when the user creates/updates the SOS message.
     // Syncing is a backend operation and should not modify the message timestamp.
     final result = await db.update(
       'sos_messages',
-      {'is_synced': 1},
+      {'is_synced': 1, 'synced_at': now, 'local_state': 'synced'},
       where: 'id = ?',
       whereArgs: [uuid],
     );
     if (result > 0) {
+      await db.delete(
+        'relay_queue',
+        where: 'message_id = ?',
+        whereArgs: [uuid],
+      );
       refreshMessages(); // Broadcast change
+    }
+    return result;
+  }
+
+  Future<int> updateAckStatus(String uuid, int ackReceivedAt) async {
+    final db = await database;
+    final result = await db.update(
+      'sos_messages',
+      {
+        'is_synced': 1,
+        'ack_received_at': ackReceivedAt,
+        'synced_at': ackReceivedAt,
+        'local_state': 'acked',
+      },
+      where: 'id = ?',
+      whereArgs: [uuid],
+    );
+    if (result > 0) {
+      await db.delete(
+        'relay_queue',
+        where: 'message_id = ?',
+        whereArgs: [uuid],
+      );
+      refreshMessages();
     }
     return result;
   }
@@ -194,6 +300,61 @@ class DatabaseHelper {
     return List.generate(maps.length, (i) {
       return SOSMessage.fromDbMap(maps[i]);
     });
+  }
+
+  Future<SOSMessage?> getLatestMessageForSender({
+    required String senderId,
+    int? senderCrc,
+  }) async {
+    final db = await database;
+
+    final List<Map<String, dynamic>> maps;
+    if (senderCrc != null) {
+      maps = await db.query(
+        'sos_messages',
+        where: 'sender_id = ? OR sender_crc = ?',
+        whereArgs: [senderId, senderCrc],
+        orderBy: 'updated_at DESC',
+        limit: 1,
+      );
+    } else {
+      maps = await db.query(
+        'sos_messages',
+        where: 'sender_id = ?',
+        whereArgs: [senderId],
+        orderBy: 'updated_at DESC',
+        limit: 1,
+      );
+    }
+
+    if (maps.isEmpty) return null;
+    return SOSMessage.fromDbMap(maps.first);
+  }
+
+  Future<SOSMessage?> getMessageById(String messageId) async {
+    final db = await database;
+    final maps = await db.query(
+      'sos_messages',
+      where: 'id = ?',
+      whereArgs: [messageId],
+      limit: 1,
+    );
+    if (maps.isEmpty) return null;
+    return SOSMessage.fromDbMap(maps.first);
+  }
+
+  Future<int> incrementDuplicateCount(String messageId) async {
+    final db = await database;
+    final result = await db.rawUpdate(
+      'UPDATE sos_messages '
+      'SET duplicate_count = duplicate_count + 1 '
+      'WHERE id = ?',
+      [messageId],
+    );
+    if (result > 0) {
+      refreshMessages();
+    }
+    return result;
   }
 
   Future<bool> isMessageNewer(SOSMessage incomingMessage) async {
