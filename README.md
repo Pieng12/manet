@@ -60,8 +60,8 @@ Mode forwarding:
 
 - `controlled` default: scheduler `RelayQueueService` memakai dedup, fairness,
   adaptive exponential backoff, cooldown, dan jitter.
-- `basic`: scheduler memakai interval pendek tetap plus jitter sebagai pembanding
-  eksperimen yang lebih agresif.
+- `basic`: scheduler memakai interval dan slot aktual 2 detik plus jitter
+  sebagai pembanding eksperimen yang lebih agresif.
 
 ```bash
 flutter run --dart-define=RESQMESH_FORWARDING_MODE=controlled
@@ -120,6 +120,8 @@ membangun ulang ACK queue yang hilang. ACK dengan status selain `CANCELLED` atau
 
 State lokal baru dibuat monotonic per sender pada resolusi detik, sehingga SOS
 baru tidak memakai timestamp BLE yang sama dengan ACK atau state sebelumnya.
+ACK dan SOS disimpan bersama queue dalam transaksi SQLite atomik; recovery
+startup membangun ulang queue SOS/ACK yang hilang dari tabel persisten.
 
 ## Format Payload 17 Byte
 
@@ -137,6 +139,8 @@ Byte 16    flags: bit 7 ACK, bit 6 fromServer, bit 0-5 hopCount
 ```
 
 Payload harus tetap 17 byte kecuali protokol diubah secara terdokumentasi.
+Timestamp protokol selalu canonical pada presisi satu detik untuk payload,
+identity, tombstone, dan recovery.
 
 ## Persyaratan Perangkat
 

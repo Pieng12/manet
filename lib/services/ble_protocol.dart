@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import 'package:pkmproject/config/mesh_config.dart';
 import 'package:pkmproject/models/sos_message.dart';
 import 'package:pkmproject/utils/hash_utils.dart';
+import 'package:pkmproject/utils/protocol_timestamp.dart';
 
 enum BlePacketKind { sos, ack }
 
@@ -39,7 +40,7 @@ class BlePacket {
 
   static String packetIdentity(BlePacket packet) {
     final type = packet.isAck ? 'ACK' : 'SOS';
-    return '$type:${packet.senderCrc}:${packet.timestampMs}:${packet.status.index}';
+    return '$type:${packet.senderCrc}:${canonicalProtocolTimestamp(packet.timestampMs)}:${packet.status.index}';
   }
 
   static Uint8List packSos(SOSMessage message, {int? hopCount}) {
@@ -50,7 +51,7 @@ class BlePacket {
     _writeHeader(buffer);
     final senderCrc = message.senderCrc ?? crc32(message.senderId);
     buffer.setUint32(2, senderCrc & 0xFFFFFFFF, Endian.big);
-    _writeTimestamp(buffer, message.updatedAt);
+    _writeTimestamp(buffer, canonicalProtocolTimestamp(message.updatedAt));
     _writeCoordinate(buffer, 9, message.latitude, -90.0, 10000.0);
     _writeCoordinate(buffer, 12, message.longitude, -180.0, 10000.0);
     buffer.setUint8(15, message.status.index);
@@ -73,7 +74,7 @@ class BlePacket {
     final buffer = ByteData(length);
     _writeHeader(buffer);
     buffer.setUint32(2, senderCrc & 0xFFFFFFFF, Endian.big);
-    _writeTimestamp(buffer, ackTimestampMs);
+    _writeTimestamp(buffer, canonicalProtocolTimestamp(ackTimestampMs));
     for (var i = 9; i <= 14; i++) {
       buffer.setUint8(i, 0);
     }
@@ -211,7 +212,9 @@ class BlePacket {
       }
     }
 
-    return (SOSMessage.kBaseTimestamp + best) * 1000;
+    return canonicalProtocolTimestamp(
+      (SOSMessage.kBaseTimestamp + best) * 1000,
+    );
   }
 
   static void _writeCoordinate(

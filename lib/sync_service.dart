@@ -3,12 +3,14 @@ import 'dart:async';
 import 'package:battery_plus/battery_plus.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:pkmproject/config/mesh_config.dart';
+import 'package:pkmproject/models/ack_apply_result.dart';
 import 'package:pkmproject/models/gateway_ack.dart';
 import 'package:pkmproject/models/sos_message.dart';
 import 'package:pkmproject/services/api_service.dart';
 import 'package:pkmproject/services/ble_advertiser_service.dart';
 import 'package:pkmproject/services/database_helper.dart';
 import 'package:pkmproject/services/experiment_logger.dart';
+import 'package:pkmproject/services/relay_queue_service.dart';
 import 'package:pkmproject/utils/hash_utils.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
@@ -25,6 +27,7 @@ class SyncService {
 
   final DatabaseHelper _databaseHelper = DatabaseHelper();
   final BleAdvertiserService _bleAdvertiser = BleAdvertiserService();
+  final RelayQueueService _relayQueue = RelayQueueService();
   final ExperimentLogger _experimentLogger = ExperimentLogger();
   final Battery _battery = Battery();
   final _syncCompletedController = StreamController<void>.broadcast();
@@ -173,7 +176,10 @@ class SyncService {
       if (ackData.isNotEmpty) {
         for (final rawAck in ackData) {
           await _processAckData(
-            GatewayAck.fromJson(Map<String, dynamic>.from(rawAck as Map)),
+            GatewayAck.fromJson(
+              Map<String, dynamic>.from(rawAck as Map),
+              nowMs: DateTime.now().millisecondsSinceEpoch,
+            ),
           );
         }
         return;
@@ -210,7 +216,10 @@ class SyncService {
       final ackData = _extractList(response['ack_data']);
       for (final rawAck in ackData) {
         await _processAckData(
-          GatewayAck.fromJson(Map<String, dynamic>.from(rawAck as Map)),
+          GatewayAck.fromJson(
+            Map<String, dynamic>.from(rawAck as Map),
+            nowMs: DateTime.now().millisecondsSinceEpoch,
+          ),
         );
       }
 
@@ -243,27 +252,15 @@ class SyncService {
   }
 
   Future<void> _processAckData(GatewayAck ack) async {
-    final localMessage = await _findLocalMessageForAck(
+    final result = await _relayQueue.acceptAndQueueAck(
       senderCrc: ack.senderCrc,
-      senderDeviceId: ack.senderDeviceId,
-      localMessageId: ack.localMessageId,
+      ackTimestampMs: ack.ackTimestampMs,
+      status: ack.status,
+      nowMs: DateTime.now().millisecondsSinceEpoch,
     );
-
-    if (localMessage == null) {
-      await _bleAdvertiser.advertiseAckFor(
-        senderCrc: ack.senderCrc,
-        ackTimestampMs: ack.ackTimestampMs,
-        status: ack.status,
-      );
-      return;
+    if (result.shouldRelay) {
+      await _bleAdvertiser.advertiseLatestOrStop(preemptCurrent: true);
     }
-
-    await _acceptAckForLocalMessage(
-      localMessage,
-      ack.ackTimestampMs,
-      shouldBroadcastAck: true,
-      ackStatus: ack.status,
-    );
   }
 
   Future<void> _acceptAckForLocalMessage(
@@ -272,55 +269,20 @@ class SyncService {
     required bool shouldBroadcastAck,
     SOSMessageStatus? ackStatus,
   }) async {
-    final senderCrc = localMessage.senderCrc ?? crc32(localMessage.senderId);
-    if (_isNotNewerThanAck(localMessage.updatedAt, ackTimestampMs)) {
-      await _databaseHelper.updateAckStatus(localMessage.id, ackTimestampMs);
-      await _bleAdvertiser.stopAdvertisingForMessage(localMessage.id);
-      if (shouldBroadcastAck) {
-        await _bleAdvertiser.advertiseAckFor(
-          senderCrc: senderCrc,
-          ackTimestampMs: ackTimestampMs,
-          status:
-              ackStatus ??
-              (localMessage.status == SOSMessageStatus.cancelled
-                  ? SOSMessageStatus.cancelled
-                  : SOSMessageStatus.resolved),
-        );
-      }
-      return;
-    }
-
-    await _bleAdvertiser.enqueueSosForAdvertising(
-      localMessage,
-      nextEligibleAt: DateTime.now().millisecondsSinceEpoch,
-      preemptCurrent: true,
+    localMessage.senderCrc ??= crc32(localMessage.senderId);
+    final result = await _relayQueue.acceptAndQueueAck(
+      senderCrc: localMessage.senderCrc!,
+      ackTimestampMs: ackTimestampMs,
+      status:
+          ackStatus ??
+          (localMessage.status == SOSMessageStatus.cancelled
+              ? SOSMessageStatus.cancelled
+              : SOSMessageStatus.resolved),
+      nowMs: DateTime.now().millisecondsSinceEpoch,
     );
-    print('[SyncService] Ignored older ACK for ${localMessage.id}');
-  }
-
-  bool _isNotNewerThanAck(int localTimestampMs, int ackTimestampMs) {
-    return localTimestampMs ~/ 1000 <= ackTimestampMs ~/ 1000;
-  }
-
-  Future<SOSMessage?> _findLocalMessageForAck({
-    required int senderCrc,
-    String? senderDeviceId,
-    String? localMessageId,
-  }) async {
-    final allMessages = await _databaseHelper.getAllMessages();
-    SOSMessage? latestMatch;
-    for (final message in allMessages) {
-      final idMatches = localMessageId != null && message.id == localMessageId;
-      final crcMatches = message.senderCrc == senderCrc;
-      final deviceMatches =
-          senderDeviceId != null && message.senderId == senderDeviceId;
-      if (!idMatches && !crcMatches && !deviceMatches) continue;
-
-      if (latestMatch == null || message.updatedAt > latestMatch.updatedAt) {
-        latestMatch = message;
-      }
+    if (result.shouldRelay && shouldBroadcastAck) {
+      await _bleAdvertiser.advertiseLatestOrStop(preemptCurrent: true);
     }
-    return latestMatch;
   }
 
   void startSyncListener() {

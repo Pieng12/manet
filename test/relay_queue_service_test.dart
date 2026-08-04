@@ -4,12 +4,14 @@ import 'dart:math';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pkmproject/config/mesh_config.dart';
 import 'package:pkmproject/database_schema.dart';
+import 'package:pkmproject/models/ack_apply_result.dart';
 import 'package:pkmproject/models/forwarding_decision.dart';
 import 'package:pkmproject/models/sos_message.dart';
 import 'package:pkmproject/services/ble_protocol.dart';
 import 'package:pkmproject/services/database_helper.dart';
 import 'package:pkmproject/services/forwarding_policy.dart';
 import 'package:pkmproject/services/relay_queue_service.dart';
+import 'package:pkmproject/utils/protocol_timestamp.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 void main() {
@@ -716,6 +718,356 @@ void main() {
     expect(item, isNotNull);
     expect(item!.nextEligibleAt, decision.nextEligibleAt);
     expect(await queue.nextEligible(now), isNull);
+  });
+
+  test(
+    'ACK transaction atomically tombstones, ACKs SOS, removes SOS queue, and queues ACK',
+    () async {
+      final sos = message('ack-transaction', senderCrc: 7001);
+      await queue.storeAndQueueSos(message: sos, nextEligibleAt: now);
+
+      final result = await queue.acceptAndQueueAck(
+        senderCrc: 7001,
+        ackTimestampMs: now + 123,
+        status: SOSMessageStatus.resolved,
+        nowMs: now,
+      );
+
+      final storedSos = SOSMessage.fromDbMap(
+        (await db.query(
+          'sos_messages',
+          where: 'id = ?',
+          whereArgs: [sos.id],
+        )).single,
+      );
+      final tombstone = (await db.query('ack_tombstones')).single;
+
+      expect(result, AckApplyResult.inserted);
+      expect(storedSos.localState, 'acked');
+      expect(storedSos.ackReceivedAt, canonicalProtocolTimestamp(now + 123));
+      expect(await queue.getItem(sos.id, 'sos'), isNull);
+      expect(await queue.getItem('ack-7001', 'ack'), isNotNull);
+      expect(
+        tombstone['ack_timestamp_ms'],
+        canonicalProtocolTimestamp(now + 123),
+      );
+    },
+  );
+
+  test('ACK transaction rollback leaves no partial state', () async {
+    final sos = message('ack-rollback', senderCrc: 7002);
+    await queue.storeAndQueueSos(message: sos, nextEligibleAt: now);
+
+    expect(
+      () => queue.acceptAndQueueAck(
+        senderCrc: 7002,
+        ackTimestampMs: now,
+        status: SOSMessageStatus.resolved,
+        nowMs: now,
+        failAfterTombstoneForTest: true,
+      ),
+      throwsStateError,
+    );
+
+    final storedSos = SOSMessage.fromDbMap(
+      (await db.query(
+        'sos_messages',
+        where: 'id = ?',
+        whereArgs: [sos.id],
+      )).single,
+    );
+    expect(await db.query('ack_tombstones'), isEmpty);
+    expect(storedSos.localState, 'pending');
+    expect(await queue.getItem(sos.id, 'sos'), isNotNull);
+    expect(await queue.getItem('ack-7002', 'ack'), isNull);
+  });
+
+  test(
+    'ACK transaction handles unknown sender and duplicate queue recovery',
+    () async {
+      final first = await queue.acceptAndQueueAck(
+        senderCrc: 7003,
+        ackTimestampMs: now,
+        status: SOSMessageStatus.resolved,
+        nowMs: now,
+      );
+      await db.delete('relay_queue', where: "packet_type = 'ack'");
+      final duplicate = await queue.acceptAndQueueAck(
+        senderCrc: 7003,
+        ackTimestampMs: now,
+        status: SOSMessageStatus.resolved,
+        nowMs: now,
+      );
+
+      expect(first, AckApplyResult.inserted);
+      expect(duplicate, AckApplyResult.duplicate);
+      expect(await db.query('ack_tombstones'), hasLength(1));
+      expect(await queue.getItem('ack-7003', 'ack'), isNotNull);
+    },
+  );
+
+  test('duplicate ACK does not reset relay metadata', () async {
+    await queue.acceptAndQueueAck(
+      senderCrc: 7004,
+      ackTimestampMs: now,
+      status: SOSMessageStatus.resolved,
+      nowMs: now,
+    );
+    final item = (await queue.getItem('ack-7004', 'ack'))!;
+    await queue.markAdvertisingStarted(item, nowMs: now);
+    await queue.markAdvertisingSucceeded(item, nowMs: now);
+    final before = (await queue.getItem('ack-7004', 'ack'))!;
+
+    final duplicate = await queue.acceptAndQueueAck(
+      senderCrc: 7004,
+      ackTimestampMs: now,
+      status: SOSMessageStatus.resolved,
+      nowMs: now,
+    );
+    final after = (await queue.getItem('ack-7004', 'ack'))!;
+
+    expect(duplicate, AckApplyResult.duplicate);
+    expect(after.relayCount, before.relayCount);
+    expect(after.lastRelayedAt, before.lastRelayedAt);
+    expect(after.nextEligibleAt, before.nextEligibleAt);
+    expect(after.queueState, before.queueState);
+  });
+
+  test(
+    'ACK status ordering accepts RESOLVED upgrade and rejects downgrade or older ACK',
+    () async {
+      final inserted = await queue.acceptAndQueueAck(
+        senderCrc: 7005,
+        ackTimestampMs: now,
+        status: SOSMessageStatus.cancelled,
+        nowMs: now,
+      );
+      final upgraded = await queue.acceptAndQueueAck(
+        senderCrc: 7005,
+        ackTimestampMs: now,
+        status: SOSMessageStatus.resolved,
+        nowMs: now,
+      );
+      final downgrade = await queue.acceptAndQueueAck(
+        senderCrc: 7005,
+        ackTimestampMs: now,
+        status: SOSMessageStatus.cancelled,
+        nowMs: now,
+      );
+      final older = await queue.acceptAndQueueAck(
+        senderCrc: 7005,
+        ackTimestampMs: now - 1000,
+        status: SOSMessageStatus.resolved,
+        nowMs: now,
+      );
+      final tombstone = (await db.query('ack_tombstones')).single;
+
+      expect(inserted, AckApplyResult.inserted);
+      expect(upgraded, AckApplyResult.replacedHigherStatus);
+      expect(downgrade, AckApplyResult.duplicate);
+      expect(older, AckApplyResult.rejectedOlder);
+      expect(tombstone['status'], SOSMessageStatus.resolved.index);
+    },
+  );
+
+  test('ACK too far in the future is rejected', () async {
+    final result = await queue.acceptAndQueueAck(
+      senderCrc: 7006,
+      ackTimestampMs: now + MeshConfig.maxClockSkew.inMilliseconds + 2000,
+      status: SOSMessageStatus.resolved,
+      nowMs: now,
+    );
+
+    expect(result, AckApplyResult.rejectedFuture);
+    expect(await db.query('ack_tombstones'), isEmpty);
+  });
+
+  test('SOS transaction stores message and queue atomically', () async {
+    final sos = message('sos-transaction', senderCrc: 8001);
+
+    final stored = await queue.storeAndQueueSos(
+      message: sos,
+      nextEligibleAt: now,
+    );
+
+    expect(stored, true);
+    expect(await db.query('sos_messages'), hasLength(1));
+    expect(await queue.getItem(sos.id, 'sos'), isNotNull);
+  });
+
+  test('SOS transaction rollback leaves no SOS without queue', () async {
+    final sos = message('sos-rollback', senderCrc: 8002);
+
+    expect(
+      () => queue.storeAndQueueSos(
+        message: sos,
+        nextEligibleAt: now,
+        failAfterStoreForTest: true,
+      ),
+      throwsStateError,
+    );
+
+    expect(await db.query('sos_messages'), isEmpty);
+    expect(await queue.queueSize(), 0);
+  });
+
+  test(
+    'SOS recovery restores missing queues without duplicating valid queues',
+    () async {
+      final missing = message('recover-missing', senderCrc: 8003);
+      final existing = message('recover-existing', senderCrc: 8004)
+        ..relayCount = 3
+        ..lastRelayedAt = now - const Duration(seconds: 1).inMilliseconds;
+      final acked = message('recover-acked', senderCrc: 8005)
+        ..ackReceivedAt = now
+        ..localState = 'acked';
+      final terminal = message(
+        'recover-terminal',
+        senderCrc: 8006,
+        status: SOSMessageStatus.resolved,
+      );
+      await insertMessage(missing);
+      await insertMessage(existing);
+      await insertMessage(acked);
+      await insertMessage(terminal);
+      await queue.enqueueSos(existing, nextEligibleAt: now + 9999);
+
+      final recovered = await queue.recoverSosQueueFromMessages(nowMs: now);
+
+      expect(recovered, 2);
+      expect(await queue.getItem(missing.id, 'sos'), isNotNull);
+      final existingQueue = (await queue.getItem(existing.id, 'sos'))!;
+      final terminalQueue = (await queue.getItem(terminal.id, 'sos'))!;
+      expect(existingQueue.relayCount, 3);
+      expect(existingQueue.nextEligibleAt, now + 9999);
+      expect(await queue.getItem(acked.id, 'sos'), isNull);
+      expect(terminalQueue.priority, 60);
+      expect(terminalQueue.nextEligibleAt, now);
+    },
+  );
+
+  test(
+    'storeAndQueueSos accepts newer ACTIVE after ACK and rejects stale state',
+    () async {
+      await queue.acceptAndQueueAck(
+        senderCrc: 8007,
+        ackTimestampMs: now,
+        status: SOSMessageStatus.resolved,
+        nowMs: now,
+      );
+      final newer = message(
+        'newer-after-ack',
+        senderCrc: 8007,
+        updatedAt: now + 1000,
+      );
+      final stale = message(
+        'stale-after-newer',
+        senderCrc: 8007,
+        updatedAt: now,
+      );
+
+      expect(
+        await queue.storeAndQueueSos(message: newer, nextEligibleAt: now),
+        true,
+      );
+      expect(
+        await queue.storeAndQueueSos(message: stale, nextEligibleAt: now),
+        false,
+      );
+      final stored = SOSMessage.fromDbMap(
+        (await db.query('sos_messages')).single,
+      );
+      expect(stored.id, newer.id);
+    },
+  );
+
+  test(
+    'canonical timestamp is used by tombstone payload and packet identity',
+    () async {
+      final rawTimestamp = now + 123;
+      await queue.acceptAndQueueAck(
+        senderCrc: 9001,
+        ackTimestampMs: rawTimestamp,
+        status: SOSMessageStatus.resolved,
+        nowMs: now,
+      );
+
+      final tombstone = (await db.query('ack_tombstones')).single;
+      final item = (await queue.getItem('ack-9001', 'ack'))!;
+      final packet = BlePacket.unpack(
+        base64Decode(item.payloadBase64!),
+        referenceTime: DateTime.fromMillisecondsSinceEpoch(rawTimestamp),
+      )!;
+      final tombstoneTimestamp = tombstone['ack_timestamp_ms'] as int;
+
+      expect(tombstoneTimestamp, canonicalProtocolTimestamp(rawTimestamp));
+      expect(packet.timestampMs, tombstoneTimestamp);
+      expect(packet.identity, 'ACK:9001:$tombstoneTimestamp:2');
+    },
+  );
+
+  test(
+    'local monotonic timestamps advance by second but incoming packet is unchanged',
+    () async {
+      final first = message('mono-first', senderCrc: 9002, updatedAt: now);
+      await insertMessage(first);
+      final second = message(
+        'mono-second',
+        senderCrc: 9002,
+        updatedAt: now + 500,
+      );
+      await DatabaseHelper.ensureMonotonicStateTimestampInDb(db, second);
+      final packet = BlePacket(
+        kind: BlePacketKind.sos,
+        senderCrc: 9002,
+        timestampMs: now + 500,
+        latitude: -6.2,
+        longitude: 106.8,
+        status: SOSMessageStatus.active,
+      );
+
+      expect(second.updatedAt, now + 1000);
+      expect(packet.timestampMs, now + 500);
+    },
+  );
+
+  test('basic and controlled use different actual slot durations', () {
+    final basic = RelayQueueService(
+      database: db,
+      mode: ForwardingMode.basicFlooding,
+    );
+    final controlled = RelayQueueService(
+      database: db,
+      mode: ForwardingMode.controlledFlooding,
+    );
+
+    expect(basic.slotDurationForMode(), MeshConfig.basicFloodingSlotDuration);
+    expect(controlled.slotDurationForMode(), MeshConfig.relaySlotDuration);
+  });
+
+  test('ACK fairness yields SOS after maximum consecutive ACK slots', () async {
+    final sos = message('fairness-sos', senderCrc: 9100);
+    await insertMessage(sos);
+    await queue.enqueueSos(sos, nextEligibleAt: now);
+    for (final crc in [9101, 9102, 9103, 9104]) {
+      await queue.acceptAndQueueAck(
+        senderCrc: crc,
+        ackTimestampMs: now,
+        status: SOSMessageStatus.resolved,
+        nowMs: now,
+      );
+    }
+
+    final selected = <String>[];
+    for (var i = 0; i < 4; i++) {
+      final item = (await queue.nextEligible(now))!;
+      selected.add(item.packetType);
+      await queue.markAdvertisingStarted(item, nowMs: now + i);
+      await queue.markAdvertisingSucceeded(item, nowMs: now + i);
+    }
+
+    expect(selected.take(3).every((type) => type == 'ack'), true);
+    expect(selected[3], 'sos');
   });
 
   test('queue state persists across service instances', () async {

@@ -29,6 +29,7 @@ Konfigurasi runtime utama berada di `lib/config/mesh_config.dart`.
 | `defaultMessageLifetime` | `6 jam` | Nilai legacy/metadata, bukan cutoff SOS aktif. |
 | `ackLifetime` | `2 menit` | Nilai legacy/metadata, bukan TTL ACK aktif. |
 | `basicFloodingInterval` | `2 detik` | Interval tetap basic flooding sebelum jitter. |
+| `basicFloodingSlotDuration` | `2 detik` | Durasi slot advertising aktual untuk basic flooding. |
 | `adaptiveBackoffBase` | `10 detik` | Backoff awal setelah relay sukses. |
 | `adaptiveBackoffMax` | `5 menit` | Batas atas adaptive backoff. |
 | `scanAllAdvertisements` | `false` | Scanner default hanya manufacturer filter. |
@@ -141,6 +142,8 @@ forwarding default memakai:
 
 Basic flooding disediakan sebagai pembanding eksperimen dan memakai interval
 tetap pendek plus jitter, bukan adaptive exponential backoff.
+ACK tetap prioritas tinggi, tetapi scheduler membatasi slot ACK beruntun agar
+SOS eligible mendapat giliran setelah batas fairness.
 
 ## Gateway dan ACK
 
@@ -181,15 +184,20 @@ terbaru per `sender_crc`, diprioritaskan di queue, dideduplikasi, dikompaksi,
 dan disebarkan ulang tanpa hard hop limit atau TTL 2 menit sampai node pembawa
 SOS menerimanya.
 
-Saat SOS diterima, tombstone dicek sebelum pesan disimpan atau masuk relay. Jika
+ACK gateway dan ACK BLE diproses melalui transaksi SQLite yang sama: validasi,
+tombstone, update SOS `acked`, penghapusan SOS dari queue, compact ACK, dan
+upsert ACK queue dilakukan atomik. Saat SOS diterima, tombstone dicek sebelum
+pesan disimpan atau masuk relay. Jika
 `ack_timestamp >= sos_timestamp`, SOS lama dianggap sudah diterminasi dan tidak
 di-relay. SOS dengan timestamp yang lebih baru dari tombstone tetap diterima
 sebagai state baru.
 
 Saat startup atau recovery service, `RelayQueueService` membaca seluruh
-`ack_tombstones` dan membangun ulang ACK queue item yang hilang. Untuk state
-lokal, timestamp dibuat monotonic per sender pada resolusi detik agar state baru
-tidak memakai timestamp BLE yang sama dengan ACK atau state sebelumnya.
+`ack_tombstones` dan `sos_messages` aktif, lalu membangun ulang queue item yang
+hilang. Untuk state lokal, timestamp dibuat monotonic per sender pada resolusi
+detik agar state baru tidak memakai timestamp BLE yang sama dengan ACK atau
+state sebelumnya. Packet BLE yang diterima dari node lain tidak diubah oleh
+helper monotonic.
 
 ## Database Lokal
 
@@ -204,7 +212,10 @@ Skema saat ini mencakup:
 - `experiment_sessions`: konfigurasi dan waktu session eksperimen.
 - `experiment_events`: event log, RSSI, hop, hash payload, dan detail JSON.
 
-Migrasi database harus menambah kolom/tabel tanpa menghapus data lama.
+Timestamp protokol disimpan canonical pada presisi satu detik. Tombstone ACK,
+payload ACK hasil recovery, message id BLE, dan packet identity harus memakai
+nilai canonical yang sama. Migrasi database harus menambah kolom/tabel tanpa
+menghapus data lama.
 
 ## Background Recovery
 

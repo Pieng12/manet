@@ -67,6 +67,18 @@ Event minimal yang sudah dicatat:
 - `BLE_RELAY_DROPPED`
 - `ACK_RECEIVED`
 - `ACK_ACCEPTED`
+- `ACK_TRANSACTION_COMMITTED`
+- `ACK_TRANSACTION_ROLLED_BACK`
+- `ACK_DUPLICATE`
+- `ACK_REPLACED_NEWER_TIMESTAMP`
+- `ACK_REPLACED_HIGHER_STATUS`
+- `ACK_REJECTED_OLDER`
+- `ACK_REJECTED_FUTURE`
+- `SOS_TRANSACTION_COMMITTED`
+- `SOS_TRANSACTION_ROLLED_BACK`
+- `SOS_QUEUE_RECOVERED`
+- `ACK_QUEUE_RECOVERED`
+- `SCHEDULER_PACKET_SELECTED`
 - `GATEWAY_DETECTED`
 - `GATEWAY_UPLOAD_STARTED`
 - `GATEWAY_UPLOAD_SUCCEEDED`
@@ -107,3 +119,8 @@ Catatan forwarding terbaru: `max_hop`, `message_lifetime_ms`, dan
 diteruskan secara persistent sampai ACK server, state lebih baru, atau deletion.
 Hitung dampak adaptive backoff dari `relay_count`, `last_relayed_at`, dan event
 advertising.
+
+Timestamp BLE memakai presisi satu detik. Gunakan timestamp canonical dari
+payload/identity saat menghitung duplicate, ACK tombstone, dan recovery queue.
+Mode `basic` memakai slot aktual 2 detik, sedangkan `controlled` memakai slot
+default 5 detik plus adaptive backoff.

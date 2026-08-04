@@ -36,6 +36,7 @@ class MeshConfig {
   static const Duration ackAdvertiseDuration = Duration(seconds: 10);
   static const Duration relayCooldown = Duration(seconds: 10);
   static const Duration basicFloodingInterval = Duration(seconds: 2);
+  static const Duration basicFloodingSlotDuration = Duration(seconds: 2);
   static const Duration adaptiveBackoffBase = Duration(seconds: 10);
   static const Duration adaptiveBackoffMax = Duration(minutes: 5);
   static const Duration relaySlotDuration = Duration(seconds: 5);
@@ -44,6 +45,7 @@ class MeshConfig {
   static const Duration gatewayHealthTimeout = Duration(seconds: 5);
   static const Duration maxClockSkew = Duration(minutes: 5);
   static const int gatewayHealthMaxRetry = 2;
+  static const int maxConsecutiveAckSlots = 3;
 
   static const bool scanAllAdvertisements = false;
   static const bool connectableAdvertising = false;

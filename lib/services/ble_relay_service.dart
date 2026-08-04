@@ -4,6 +4,7 @@ import 'dart:typed_data';
 
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:pkmproject/config/mesh_config.dart';
+import 'package:pkmproject/models/ack_apply_result.dart';
 import 'package:pkmproject/models/forwarding_decision.dart';
 import 'package:pkmproject/models/sos_message.dart';
 import 'package:pkmproject/services/background_service_manager.dart';
@@ -17,6 +18,7 @@ import 'package:pkmproject/services/relay_queue_service.dart';
 import 'package:pkmproject/services/workmanager_service.dart';
 import 'package:pkmproject/sync_service.dart';
 import 'package:pkmproject/utils/hash_utils.dart';
+import 'package:pkmproject/utils/protocol_timestamp.dart';
 import 'package:pkmproject/utils/sos_status_priority.dart';
 
 class BleRelayService {
@@ -63,12 +65,13 @@ class BleRelayService {
 
   static SOSMessage messageFromSosPacket(BlePacket packet, int receivedAtMs) {
     final expiresAt = sosExpiresAt(packet);
+    final timestampMs = canonicalProtocolTimestamp(packet.timestampMs);
     final nextHopCount = packet.hopCount >= MeshConfig.maxProtocolHop
         ? MeshConfig.maxProtocolHop
         : packet.hopCount + 1;
 
     return SOSMessage(
-      id: 'ble-${packet.senderCrc}-${packet.timestampMs}',
+      id: 'ble-${packet.senderCrc}-$timestampMs',
       senderId: 'ble-device-${packet.senderCrc}',
       senderCrc: packet.senderCrc,
       fromServer: packet.fromServer,
@@ -77,8 +80,8 @@ class BleRelayService {
       latitude: packet.latitude ?? 0,
       longitude: packet.longitude ?? 0,
       status: packet.status,
-      createdAt: packet.timestampMs,
-      updatedAt: packet.timestampMs,
+      createdAt: timestampMs,
+      updatedAt: timestampMs,
       isSynced: packet.fromServer ? 1 : 0,
       hopCount: nextHopCount,
       maxHop: MeshConfig.defaultMaxHop,
@@ -91,14 +94,14 @@ class BleRelayService {
   Future<void> start() async {
     await BackgroundServiceManager.startBackgroundService();
     await NativeBridgeService.startBleWakeUpScan();
-    await _relayQueue.recoverAckQueueFromTombstones();
+    await _recoverQueues();
     await _advertiser.flushPendingAck();
     _log('BLE relay started');
   }
 
   Future<void> recoverPersistedRelayState() async {
     await NativeBridgeService.startBleWakeUpScan();
-    await _relayQueue.recoverAckQueueFromTombstones();
+    await _recoverQueues();
     await _advertiser.advertiseLatestOrStop();
     await _experimentLogger.logEvent(
       eventType: ExperimentEventTypes.relayStateRecovered,
@@ -119,7 +122,6 @@ class BleRelayService {
 
   Future<void> activateForMessage(SOSMessage message) async {
     await _dbHelper.ensureMonotonicStateTimestamp(message);
-    await _dbHelper.replaceWithLatestMessage(message);
     await start();
     await _advertiser.enqueueSosForAdvertising(
       message,
@@ -170,74 +172,22 @@ class BleRelayService {
     SOSMessageStatus status = SOSMessageStatus.resolved,
     bool relayAck = true,
   }) async {
-    if (status == SOSMessageStatus.active) {
-      _log('Rejected ACTIVE ACK for sender CRC $senderCrc');
-      return false;
+    final result = await _relayQueue.acceptAndQueueAck(
+      senderCrc: senderCrc,
+      ackTimestampMs: ackTimestampMs,
+      status: status,
+      nowMs: DateTime.now().millisecondsSinceEpoch,
+    );
+    if (result.shouldRelay && relayAck) {
+      await _advertiser.advertiseLatestOrStop(preemptCurrent: true);
     }
-
-    await _dbHelper.upsertAckTombstone(
+    await _logAckResult(
+      result,
       senderCrc: senderCrc,
       ackTimestampMs: ackTimestampMs,
       status: status,
     );
-
-    final allMessages = await _dbHelper.getAllMessages();
-    SOSMessage? latest;
-    for (final message in allMessages) {
-      if (message.senderCrc == senderCrc) {
-        if (latest == null || message.updatedAt > latest.updatedAt) {
-          latest = message;
-        }
-      }
-    }
-
-    if (latest == null) {
-      if (relayAck) {
-        await _advertiser.advertiseAckFor(
-          senderCrc: senderCrc,
-          ackTimestampMs: ackTimestampMs,
-          status: status,
-        );
-      }
-      _log('Relaying ACK for unknown sender CRC $senderCrc');
-      return false;
-    }
-
-    if (_isNotNewerThanAck(latest.updatedAt, ackTimestampMs)) {
-      await _dbHelper.updateAckStatus(latest.id, ackTimestampMs);
-      await _relayQueue.removeMessage(latest.id);
-      await _advertiser.stopAdvertisingForMessage(latest.id);
-      await _experimentLogger.logEvent(
-        eventType: ExperimentEventTypes.ackAccepted,
-        deviceId: SyncService().deviceId,
-        messageId: latest.id,
-        senderCrc: senderCrc,
-        detail: {'ack_timestamp_ms': ackTimestampMs},
-      );
-      if (relayAck) {
-        await _advertiser.advertiseAckFor(
-          senderCrc: senderCrc,
-          ackTimestampMs: ackTimestampMs,
-          status: status,
-        );
-      }
-      _log('ACK accepted for ${latest.id}');
-      return true;
-    }
-
-    await _advertiser.enqueueSosForAdvertising(
-      latest,
-      nextEligibleAt: DateTime.now().millisecondsSinceEpoch,
-      preemptCurrent: true,
-    );
-    _log(
-      'ACK ignored for sender CRC $senderCrc because local message is newer',
-    );
-    return false;
-  }
-
-  bool _isNotNewerThanAck(int localTimestampMs, int ackTimestampMs) {
-    return localTimestampMs ~/ 1000 <= ackTimestampMs ~/ 1000;
+    return result.shouldRelay;
   }
 
   bool _isNewerState(SOSMessage incoming, SOSMessage? existing) {
@@ -246,14 +196,6 @@ class BleRelayService {
     if (incoming.updatedAt < existing.updatedAt) return false;
     return sosStatusPriority(incoming.status) >
         sosStatusPriority(existing.status);
-  }
-
-  int _priorityForStatus(SOSMessageStatus status) {
-    return switch (status) {
-      SOSMessageStatus.active => 0,
-      SOSMessageStatus.cancelled => 50,
-      SOSMessageStatus.resolved => 60,
-    };
   }
 
   Future<void> _processAck(BlePacket packet, {int? rssi}) async {
@@ -279,18 +221,38 @@ class BleRelayService {
       rssi: rssi,
       payloadHash: packet.identity,
     );
-    final latestAckBefore = await _dbHelper.latestAckTimestampForSenderCrc(
-      packet.senderCrc,
-    );
-
-    await applyAck(
+    final AckApplyResult result;
+    try {
+      result = await _relayQueue.acceptAndQueueAck(
+        senderCrc: packet.senderCrc,
+        ackTimestampMs: packet.timestampMs,
+        status: packet.status,
+        hopCount: packet.hopCount >= MeshConfig.maxProtocolHop
+            ? MeshConfig.maxProtocolHop
+            : packet.hopCount + 1,
+        nowMs: DateTime.now().millisecondsSinceEpoch,
+      );
+    } catch (e) {
+      await _experimentLogger.logEvent(
+        eventType: ExperimentEventTypes.ackTransactionRolledBack,
+        deviceId: SyncService().deviceId,
+        senderCrc: packet.senderCrc,
+        rssi: rssi,
+        payloadHash: packet.identity,
+        detail: {'error': e.toString()},
+      );
+      rethrow;
+    }
+    await _logAckResult(
+      result,
       senderCrc: packet.senderCrc,
       ackTimestampMs: packet.timestampMs,
       status: packet.status,
-      relayAck: false,
+      rssi: rssi,
+      payloadHash: packet.identity,
     );
 
-    if (latestAckBefore != null && latestAckBefore >= packet.timestampMs) {
+    if (!result.shouldRelay) {
       await _experimentLogger.logEvent(
         eventType: ExperimentEventTypes.blePacketDuplicate,
         deviceId: SyncService().deviceId,
@@ -300,18 +262,11 @@ class BleRelayService {
         payloadHash: packet.identity,
         detail: {'kind': 'ack'},
       );
-      _log('ACK_DUPLICATE ${packet.identity}');
+      _log('${result.name.toUpperCase()} ${packet.identity}');
       return;
     }
 
-    await _advertiser.advertiseAckFor(
-      senderCrc: packet.senderCrc,
-      ackTimestampMs: packet.timestampMs,
-      status: packet.status,
-      hopCount: packet.hopCount >= MeshConfig.maxProtocolHop
-          ? MeshConfig.maxProtocolHop
-          : packet.hopCount + 1,
-    );
+    await _advertiser.advertiseLatestOrStop(preemptCurrent: true);
     final nextAckHop = packet.hopCount >= MeshConfig.maxProtocolHop
         ? MeshConfig.maxProtocolHop
         : packet.hopCount + 1;
@@ -403,7 +358,53 @@ class BleRelayService {
       message.lastRelayedAt = existing.lastRelayedAt;
     }
 
-    await _dbHelper.replaceWithLatestMessage(message);
+    final nextEligibleAt =
+        decision.reason == ForwardingDecisionReason.dropCooldown &&
+            decision.nextEligibleAt != null
+        ? decision.nextEligibleAt!
+        : isNewerState || isPriorityStatus
+        ? now
+        : _relayQueue.sosCooldownEligibleAt(
+            now,
+            relayCount: message.relayCount,
+          );
+    final bool stored;
+    try {
+      stored = await _relayQueue.storeAndQueueSos(
+        message: message,
+        priority: RelayQueueService.priorityForSosStatus(message.status),
+        nextEligibleAt: nextEligibleAt,
+      );
+    } catch (e) {
+      await _experimentLogger.logEvent(
+        eventType: ExperimentEventTypes.sosTransactionRolledBack,
+        deviceId: SyncService().deviceId,
+        messageId: message.id,
+        senderCrc: message.senderCrc,
+        rssi: rssi,
+        payloadHash: packet.identity,
+        detail: {'error': e.toString()},
+      );
+      rethrow;
+    }
+    if (!stored) {
+      _log('SOS_TRANSACTION_SKIPPED ${packet.identity}');
+      return;
+    }
+    await _experimentLogger.logEvent(
+      eventType: ExperimentEventTypes.sosTransactionCommitted,
+      deviceId: SyncService().deviceId,
+      messageId: message.id,
+      senderCrc: message.senderCrc,
+      hopCount: message.hopCount,
+      rssi: rssi,
+      payloadHash: packet.identity,
+      detail: {
+        'status': message.status.name,
+        'next_eligible_at': nextEligibleAt,
+        'relay_count': message.relayCount,
+      },
+    );
     await _experimentLogger.logEvent(
       eventType: ExperimentEventTypes.blePacketStored,
       deviceId: SyncService().deviceId,
@@ -418,10 +419,6 @@ class BleRelayService {
 
     if (decision.reason == ForwardingDecisionReason.dropCooldown &&
         decision.nextEligibleAt != null) {
-      await _relayQueue.enqueueSos(
-        message,
-        nextEligibleAt: decision.nextEligibleAt,
-      );
       await _experimentLogger.logEvent(
         eventType: ExperimentEventTypes.bleRelayQueued,
         deviceId: SyncService().deviceId,
@@ -454,16 +451,6 @@ class BleRelayService {
       return;
     }
 
-    await _relayQueue.enqueueSos(
-      message,
-      priority: _priorityForStatus(message.status),
-      nextEligibleAt: isNewerState || isPriorityStatus
-          ? now
-          : _relayQueue.sosCooldownEligibleAt(
-              now,
-              relayCount: message.relayCount,
-            ),
-    );
     await _experimentLogger.logEvent(
       eventType: ExperimentEventTypes.bleRelayQueued,
       deviceId: SyncService().deviceId,
@@ -495,6 +482,58 @@ class BleRelayService {
     } catch (e) {
       _log('Gateway sync skipped/failed: $e');
     }
+  }
+
+  Future<void> _recoverQueues() async {
+    final ackRecovered = await _relayQueue.recoverAckQueueFromTombstones();
+    final sosRecovered = await _relayQueue.recoverSosQueueFromMessages();
+    if (ackRecovered > 0) {
+      await _experimentLogger.logEvent(
+        eventType: ExperimentEventTypes.ackQueueRecovered,
+        deviceId: SyncService().deviceId,
+        detail: {'queue_size': ackRecovered},
+      );
+    }
+    if (sosRecovered > 0) {
+      await _experimentLogger.logEvent(
+        eventType: ExperimentEventTypes.sosQueueRecovered,
+        deviceId: SyncService().deviceId,
+        detail: {'queue_size': sosRecovered},
+      );
+    }
+  }
+
+  Future<void> _logAckResult(
+    AckApplyResult result, {
+    required int senderCrc,
+    required int ackTimestampMs,
+    required SOSMessageStatus status,
+    int? rssi,
+    String? payloadHash,
+  }) async {
+    final eventType = switch (result) {
+      AckApplyResult.inserted => ExperimentEventTypes.ackTransactionCommitted,
+      AckApplyResult.replacedNewerTimestamp =>
+        ExperimentEventTypes.ackReplacedNewerTimestamp,
+      AckApplyResult.replacedHigherStatus =>
+        ExperimentEventTypes.ackReplacedHigherStatus,
+      AckApplyResult.duplicate => ExperimentEventTypes.ackDuplicate,
+      AckApplyResult.rejectedOlder => ExperimentEventTypes.ackRejectedOlder,
+      AckApplyResult.rejectedInvalid => ExperimentEventTypes.bleRelayDropped,
+      AckApplyResult.rejectedFuture => ExperimentEventTypes.ackRejectedFuture,
+    };
+    await _experimentLogger.logEvent(
+      eventType: eventType,
+      deviceId: SyncService().deviceId,
+      senderCrc: senderCrc,
+      rssi: rssi,
+      payloadHash: payloadHash,
+      detail: {
+        'ack_timestamp_ms': canonicalProtocolTimestamp(ackTimestampMs),
+        'status': status.name,
+        'result': result.name,
+      },
+    );
   }
 
   void _log(String message) {

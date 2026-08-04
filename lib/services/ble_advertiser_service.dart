@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:flutter/services.dart';
 import 'package:pkmproject/config/mesh_config.dart';
+import 'package:pkmproject/models/ack_apply_result.dart';
 import 'package:pkmproject/models/relay_queue_item.dart';
 import 'package:pkmproject/models/sos_message.dart';
 import 'package:pkmproject/services/android_permission_service.dart';
@@ -119,7 +120,7 @@ class BleAdvertiserService {
   void _startSlotTimer() {
     _slotTimer?.cancel();
     _slotTimer = Timer(
-      MeshConfig.relaySlotDuration,
+      _relayQueue.slotDurationForMode(),
       () => advertiseLatestOrStop(preemptCurrent: true),
     );
   }
@@ -143,10 +144,10 @@ class BleAdvertiserService {
     int? nextEligibleAt,
     bool preemptCurrent = false,
   }) async {
-    await _relayQueue.enqueueSos(
-      message,
+    await _relayQueue.storeAndQueueSos(
+      message: message,
       priority: priority,
-      nextEligibleAt: nextEligibleAt,
+      nextEligibleAt: nextEligibleAt ?? 0,
     );
     await advertiseLatestOrStop(preemptCurrent: preemptCurrent);
   }
@@ -156,32 +157,25 @@ class BleAdvertiserService {
     required int ackTimestampMs,
     SOSMessageStatus status = SOSMessageStatus.resolved,
     int hopCount = 0,
-    Duration duration = MeshConfig.ackAdvertiseDuration,
+    Duration? duration,
   }) async {
-    final payload = BlePacket.packAck(
+    final result = await _relayQueue.acceptAndQueueAck(
       senderCrc: senderCrc,
       ackTimestampMs: ackTimestampMs,
       status: status,
       hopCount: hopCount,
     );
-    final messageId = RelayQueueService.ackMessageId(
-      senderCrc: senderCrc,
-      ackTimestampMs: ackTimestampMs,
-      statusIndex: status.index,
-    );
-    await _relayQueue.enqueueAck(
-      messageId: messageId,
-      payloadBase64: base64Encode(payload),
-    );
-    await advertiseLatestOrStop(
-      preemptCurrent: true,
-      ackSlotDuration: duration,
-    );
+    if (result.shouldRelay) {
+      await advertiseLatestOrStop(
+        preemptCurrent: true,
+        ackSlotDuration: duration,
+      );
+    }
   }
 
   Future<void> advertiseLatestOrStop({
     bool preemptCurrent = false,
-    Duration ackSlotDuration = MeshConfig.ackAdvertiseDuration,
+    Duration? ackSlotDuration,
   }) async {
     if (!_isSchedulerOwner) {
       await BackgroundServiceManager.requestSchedulerTick();
@@ -221,7 +215,10 @@ class BleAdvertiserService {
 
     final queued = await _nextQueuedAdvertisement();
     if (queued?.payload != null) {
-      await _startQueuedAck(queued!, duration: ackSlotDuration);
+      await _startQueuedAck(
+        queued!,
+        duration: ackSlotDuration ?? _relayQueue.slotDurationForMode(),
+      );
       return;
     }
 
@@ -271,6 +268,7 @@ class BleAdvertiserService {
           await _relayQueue.removeItem(item);
           continue;
         }
+        await _logSchedulerSelection(item);
         return _QueuedAdvertisement(item: item, payload: item.payloadBase64);
       }
 
@@ -282,9 +280,26 @@ class BleAdvertiserService {
         await _relayQueue.removeItem(item);
         continue;
       }
+      await _logSchedulerSelection(item);
       return _QueuedAdvertisement(item: item, message: message);
     }
     return null;
+  }
+
+  Future<void> _logSchedulerSelection(RelayQueueItem item) async {
+    await _experimentLogger.logEvent(
+      eventType: ExperimentEventTypes.schedulerPacketSelected,
+      deviceId: 'unknown',
+      messageId: item.isSos ? item.messageId : null,
+      detail: {
+        'packet_type': item.packetType,
+        'relay_count': item.relayCount,
+        'queue_state': item.queueState,
+        'forwarding_mode': MeshConfig.forwardingMode.name,
+        'ack_queue_size': await _relayQueue.queueSizeByType('ack'),
+        'sos_queue_size': await _relayQueue.queueSizeByType('sos'),
+      },
+    );
   }
 
   Future<void> _startQueuedSos(_QueuedAdvertisement queued) async {
@@ -295,7 +310,7 @@ class BleAdvertiserService {
     await _relayQueue.markAdvertisingStarted(
       queued.item,
       nowMs: now,
-      slotDuration: MeshConfig.relaySlotDuration,
+      slotDuration: _relayQueue.slotDurationForMode(),
     );
 
     final payload = BlePacket.packSos(message);
@@ -323,6 +338,7 @@ class BleAdvertiserService {
         await _relayQueue.markAdvertisingSucceeded(
           queued.item,
           nowMs: succeededAt,
+          slotDuration: _relayQueue.slotDurationForMode(),
         );
         await _experimentLogger.logEvent(
           eventType: ExperimentEventTypes.bleAdvertiseStarted,

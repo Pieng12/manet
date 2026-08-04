@@ -14,8 +14,12 @@ ditafsirkan melebihi kemampuan implementasi saat ini.
   ringkas.
 - Timestamp compact memakai resolusi detik dan bergantung pada waktu referensi
   penerima.
+- Timestamp ACK dan SOS dicanonicalize ke presisi detik; analisis sub-detik
+  harus memakai log lokal, bukan payload BLE.
 - Karena forwarding bersifat persistent sampai ACK, adaptive backoff wajib
   dipantau pada pengujian baterai multi-jam.
+- Fairness ACK/SOS diverifikasi unit test, tetapi dampaknya pada kepadatan radio
+  nyata tetap perlu diuji dengan beberapa perangkat fisik.
 
 ## Android Background
 
@@ -24,6 +28,8 @@ ditafsirkan melebihi kemampuan implementasi saat ini.
   menghentikan scan/service.
 - Recovery setelah app removed, Doze, atau reboot harus divalidasi pada
   perangkat fisik.
+- Recovery queue SOS/ACK bersifat persisten di SQLite, tetapi keberhasilan
+  restart service tetap bergantung pada kebijakan background vendor.
 - Battery optimization exemption membutuhkan persetujuan user dan tidak
   menjamin service selalu aktif.
 

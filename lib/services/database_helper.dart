@@ -6,6 +6,7 @@ import 'package:path/path.dart';
 import 'package:pkmproject/config/mesh_config.dart';
 import 'package:pkmproject/database_schema.dart'; // Import our SQL schema
 import 'package:pkmproject/models/sos_message.dart'; // Import the SOSMessage model
+import 'package:pkmproject/utils/protocol_timestamp.dart';
 import 'package:pkmproject/utils/sos_status_priority.dart';
 
 class DatabaseHelper {
@@ -321,6 +322,7 @@ class DatabaseHelper {
     String? payloadBase64,
   }) async {
     if (!isValidAckStatus(status)) return false;
+    final canonicalAckTimestamp = canonicalProtocolTimestamp(ackTimestampMs);
 
     final existing = await db.query(
       'ack_tombstones',
@@ -332,20 +334,22 @@ class DatabaseHelper {
     String? payloadToStore = payloadBase64;
     if (existing.isNotEmpty) {
       final existingRow = existing.first;
-      final existingTimestamp = existingRow['ack_timestamp_ms'] as int? ?? 0;
+      final existingTimestamp = canonicalProtocolTimestamp(
+        existingRow['ack_timestamp_ms'] as int? ?? 0,
+      );
       final existingStatusIndex = existingRow['status'] as int? ?? -1;
       final existingStatus =
           existingStatusIndex >= 0 &&
               existingStatusIndex < SOSMessageStatus.values.length
           ? SOSMessageStatus.values[existingStatusIndex]
           : SOSMessageStatus.cancelled;
-      if (existingTimestamp > ackTimestampMs) return false;
-      if (existingTimestamp == ackTimestampMs &&
+      if (existingTimestamp > canonicalAckTimestamp) return false;
+      if (existingTimestamp == canonicalAckTimestamp &&
           sosStatusPriority(existingStatus) > sosStatusPriority(status)) {
         return false;
       }
       if (payloadToStore == null &&
-          existingTimestamp == ackTimestampMs &&
+          existingTimestamp == canonicalAckTimestamp &&
           existingStatus == status) {
         payloadToStore = existingRow['payload_base64'] as String?;
       }
@@ -353,7 +357,7 @@ class DatabaseHelper {
 
     await db.insert('ack_tombstones', {
       'sender_crc': senderCrc,
-      'ack_timestamp_ms': ackTimestampMs,
+      'ack_timestamp_ms': canonicalAckTimestamp,
       'status': status.index,
       'payload_base64': payloadToStore,
       'updated_at': DateTime.now().millisecondsSinceEpoch,
@@ -378,7 +382,7 @@ class DatabaseHelper {
       limit: 1,
     );
     if (rows.isEmpty) return null;
-    return rows.first['ack_timestamp_ms'] as int?;
+    return canonicalProtocolTimestamp(rows.first['ack_timestamp_ms'] as int);
   }
 
   Future<bool> isSuppressedByAckTombstone({
@@ -417,11 +421,20 @@ class DatabaseHelper {
     final latestTimestamp = await _latestTimestampForSenderInDb(db, message);
     if (latestTimestamp == null) return;
 
-    final latestSecond = latestTimestamp ~/ 1000;
-    if (message.updatedAt ~/ 1000 > latestSecond) return;
+    final canonicalUpdatedAt = canonicalProtocolTimestamp(message.updatedAt);
+    if (canonicalUpdatedAt ~/ 1000 > latestTimestamp ~/ 1000) {
+      message.updatedAt = canonicalUpdatedAt;
+      if (message.createdAt > message.updatedAt) {
+        message.createdAt = message.updatedAt;
+      }
+      return;
+    }
 
     final originalUpdatedAt = message.updatedAt;
-    message.updatedAt = (latestSecond + 1) * 1000;
+    message.updatedAt = nextMonotonicProtocolTimestamp(
+      candidateMs: message.updatedAt,
+      previousMs: latestTimestamp,
+    );
     if (message.createdAt == originalUpdatedAt) {
       message.createdAt = message.updatedAt;
     }
@@ -450,7 +463,9 @@ class DatabaseHelper {
             limit: 1,
           );
     if (existingRows.isNotEmpty) {
-      latest = existingRows.first['updated_at'] as int?;
+      latest = canonicalProtocolTimestamp(
+        existingRows.first['updated_at'] as int,
+      );
     }
 
     if (message.senderCrc != null) {
@@ -774,8 +789,10 @@ class DatabaseHelper {
   }
 
   static SOSMessage _newerMessage(SOSMessage a, SOSMessage b) {
-    if (a.updatedAt != b.updatedAt) {
-      return a.updatedAt > b.updatedAt ? a : b;
+    final aTimestamp = canonicalProtocolTimestamp(a.updatedAt);
+    final bTimestamp = canonicalProtocolTimestamp(b.updatedAt);
+    if (aTimestamp != bTimestamp) {
+      return aTimestamp > bTimestamp ? a : b;
     }
     return sosStatusPriority(a.status) >= sosStatusPriority(b.status) ? a : b;
   }

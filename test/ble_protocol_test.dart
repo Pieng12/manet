@@ -8,6 +8,7 @@ import 'package:pkmproject/services/ble_relay_service.dart';
 import 'package:pkmproject/services/ble_protocol.dart';
 import 'package:pkmproject/services/database_helper.dart';
 import 'package:pkmproject/utils/hash_utils.dart';
+import 'package:pkmproject/utils/protocol_timestamp.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 void main() {
@@ -229,6 +230,27 @@ void main() {
     expect(packet.timestampMs, ackTimestamp);
     expect(packet.status, SOSMessageStatus.resolved);
     expect(packet.hopCount, 0);
+  });
+
+  test('BLE payload timestamps are canonical to protocol seconds', () {
+    final rawTimestamp = reference.millisecondsSinceEpoch + 789;
+    final payload = BlePacket.packAck(
+      senderCrc: 12345,
+      ackTimestampMs: rawTimestamp,
+      status: SOSMessageStatus.resolved,
+    );
+
+    final packet = BlePacket.unpack(
+      payload,
+      referenceTime: DateTime.fromMillisecondsSinceEpoch(rawTimestamp),
+    );
+
+    expect(packet, isNotNull);
+    expect(packet!.timestampMs, canonicalProtocolTimestamp(rawTimestamp));
+    expect(
+      packet.identity,
+      'ACK:12345:${canonicalProtocolTimestamp(rawTimestamp)}:2',
+    );
   });
 
   test('rejects ACK with ACTIVE status', () {
