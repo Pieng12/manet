@@ -127,10 +127,10 @@ void main() {
     expect(relayed.hopCount, MeshConfig.defaultMaxHop);
   });
 
-  test('SOS at max hop is stored but not relayed', () {
+  test('SOS at hop 63 is relayed with saturated hop 63', () {
     final updatedAt = reference.millisecondsSinceEpoch;
     final message = SOSMessage(
-      id: 'relay-5',
+      id: 'relay-63',
       senderId: 'device-a',
       senderCrc: crc32('device-a'),
       content: 'SOS',
@@ -139,7 +139,7 @@ void main() {
       status: SOSMessageStatus.active,
       createdAt: updatedAt,
       updatedAt: updatedAt,
-      hopCount: MeshConfig.defaultMaxHop,
+      hopCount: MeshConfig.maxProtocolHop,
     );
     final packet = BlePacket.unpack(
       BlePacket.packSos(message),
@@ -149,11 +149,11 @@ void main() {
 
     final stored = BleRelayService.messageFromSosPacket(packet!, receivedAt);
 
-    expect(stored.hopCount, MeshConfig.defaultMaxHop);
-    expect(BleRelayService.canRelaySosPacket(packet, receivedAt), false);
+    expect(stored.hopCount, MeshConfig.maxProtocolHop);
+    expect(BleRelayService.canRelaySosPacket(packet, receivedAt), true);
   });
 
-  test('expired SOS is stored as expired and not relayed', () {
+  test('old SOS remains relayable while not ACKed', () {
     final updatedAt = reference.millisecondsSinceEpoch;
     final message = SOSMessage(
       id: 'expired-1',
@@ -175,9 +175,9 @@ void main() {
 
     final stored = BleRelayService.messageFromSosPacket(packet!, receivedAt);
 
-    expect(stored.localState, 'expired');
-    expect(stored.isExpiredAt(receivedAt), true);
-    expect(BleRelayService.canRelaySosPacket(packet, receivedAt), false);
+    expect(stored.localState, 'pending');
+    expect(stored.isExpiredAt(receivedAt), false);
+    expect(BleRelayService.canRelaySosPacket(packet, receivedAt), true);
   });
 
   test('database map preserves hop and expiry metadata after reload', () {
@@ -231,7 +231,7 @@ void main() {
     expect(packet.hopCount, 0);
   });
 
-  test('ACK relay increments hop at caller and stops at max ACK hop', () {
+  test('ACK relay increments hop and continues beyond legacy max ACK hop', () {
     final ackTimestamp = reference.millisecondsSinceEpoch;
     final originPayload = BlePacket.packAck(
       senderCrc: 12345,
@@ -264,7 +264,7 @@ void main() {
     final maxHopPayload = BlePacket.packAck(
       senderCrc: 12345,
       ackTimestampMs: ackTimestamp,
-      hopCount: MeshConfig.maxAckHop,
+      hopCount: MeshConfig.maxAckHop + 1,
     );
     final maxHopPacket = BlePacket.unpack(
       maxHopPayload,
@@ -273,11 +273,11 @@ void main() {
     expect(maxHopPacket, isNotNull);
     expect(
       BleRelayService.canRelayAckPacket(maxHopPacket!, ackTimestamp),
-      false,
+      true,
     );
   });
 
-  test('expired ACK is not relayed', () {
+  test('old ACK remains relayable as persistent anti-message', () {
     final ackTimestamp = reference.millisecondsSinceEpoch;
     final payload = BlePacket.packAck(
       senderCrc: 12345,
@@ -287,8 +287,8 @@ void main() {
     final expiredAt = ackTimestamp + MeshConfig.ackLifetime.inMilliseconds;
 
     expect(packet, isNotNull);
-    expect(BleRelayService.isAckPacketExpired(packet!, expiredAt), true);
-    expect(BleRelayService.canRelayAckPacket(packet, expiredAt), false);
+    expect(BleRelayService.isAckPacketExpired(packet!, expiredAt), false);
+    expect(BleRelayService.canRelayAckPacket(packet, expiredAt), true);
   });
 
   test('rejects invalid header', () {
@@ -342,7 +342,12 @@ void main() {
     );
 
     expect(() => BlePacket.packSos(invalidLatitude), throwsArgumentError);
-    expect(() => BlePacket.packSos(invalidHop), throwsRangeError);
+    final saturatedHop = BlePacket.unpack(
+      BlePacket.packSos(invalidHop),
+      referenceTime: reference,
+    );
+    expect(saturatedHop, isNotNull);
+    expect(saturatedHop!.hopCount, MeshConfig.maxProtocolHop);
     expect(
       BlePacket.unpack(
         BlePacket.packSos(futureMessage),

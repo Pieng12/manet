@@ -276,10 +276,9 @@ class BleAdvertiserService {
 
       final message = await _dbHelper.getMessageById(item.messageId);
       if (message == null ||
-          message.isExpired ||
-          message.hopCount > message.maxHop ||
-          message.isSynced == 1 ||
-          message.ackReceivedAt != null) {
+          message.ackReceivedAt != null ||
+          message.localState == 'acked' ||
+          message.localState == 'synced') {
         await _relayQueue.removeItem(item);
         continue;
       }

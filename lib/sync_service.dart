@@ -60,8 +60,6 @@ class SyncService {
       if (message.isSynced != 0 ||
           message.ackReceivedAt != null ||
           message.fromServer ||
-          message.expiresAt <= nowMs ||
-          message.localState == 'expired' ||
           message.localState == 'acked' ||
           message.localState == 'synced') {
         continue;

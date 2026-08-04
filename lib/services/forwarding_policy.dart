@@ -6,17 +6,13 @@ import 'package:pkmproject/services/ble_protocol.dart';
 class ForwardingPolicy {
   const ForwardingPolicy({
     this.mode = MeshConfig.forwardingMode,
-    this.maxHop = MeshConfig.defaultMaxHop,
-    this.maxRelayCount = MeshConfig.maxRelayCount,
-    this.messageLifetime = MeshConfig.defaultMessageLifetime,
-    this.relayCooldown = MeshConfig.relayCooldown,
+    this.adaptiveBackoffBase = MeshConfig.adaptiveBackoffBase,
+    this.adaptiveBackoffMax = MeshConfig.adaptiveBackoffMax,
   });
 
   final ForwardingMode mode;
-  final int maxHop;
-  final int maxRelayCount;
-  final Duration messageLifetime;
-  final Duration relayCooldown;
+  final Duration adaptiveBackoffBase;
+  final Duration adaptiveBackoffMax;
 
   ForwardingDecision decideSos({
     required BlePacket packet,
@@ -30,8 +26,7 @@ class ForwardingPolicy {
         !_isCoordinateValid(packet.latitude!, -90.0, 90.0) ||
         !_isCoordinateValid(packet.longitude!, -180.0, 180.0) ||
         packet.timestampMs > nowMs + MeshConfig.maxClockSkew.inMilliseconds ||
-        packet.hopCount < 0 ||
-        packet.hopCount > MeshConfig.maxProtocolHop) {
+        packet.hopCount < 0) {
       return const ForwardingDecision(
         shouldStore: false,
         shouldRelay: false,
@@ -44,24 +39,6 @@ class ForwardingPolicy {
         shouldStore: false,
         shouldRelay: false,
         reason: ForwardingDecisionReason.dropOwnPacket,
-      );
-    }
-
-    final expiresAt = packet.timestampMs + messageLifetime.inMilliseconds;
-    if (nowMs >= expiresAt) {
-      return const ForwardingDecision(
-        shouldStore: true,
-        shouldRelay: false,
-        reason: ForwardingDecisionReason.dropExpired,
-      );
-    }
-
-    if (packet.hopCount >= maxHop) {
-      return ForwardingDecision(
-        shouldStore: true,
-        shouldRelay: false,
-        reason: ForwardingDecisionReason.dropMaxHop,
-        nextHopCount: packet.hopCount,
       );
     }
 
@@ -81,7 +58,7 @@ class ForwardingPolicy {
       );
     }
 
-    final nextHopCount = packet.hopCount + 1;
+    final nextHopCount = _saturateHop(packet.hopCount + 1);
     if (mode == ForwardingMode.basicFlooding) {
       return ForwardingDecision(
         shouldStore: true,
@@ -91,22 +68,16 @@ class ForwardingPolicy {
       );
     }
 
-    if ((existingMessage?.relayCount ?? 0) >= maxRelayCount) {
-      return const ForwardingDecision(
-        shouldStore: true,
-        shouldRelay: false,
-        reason: ForwardingDecisionReason.dropMaxRelay,
-      );
-    }
-
     final lastRelayedAt = existingMessage?.lastRelayedAt ?? 0;
-    if (lastRelayedAt > 0 &&
-        nowMs - lastRelayedAt < relayCooldown.inMilliseconds) {
+    final backoff = adaptiveBackoffForRelayCount(
+      existingMessage?.relayCount ?? 0,
+    );
+    if (lastRelayedAt > 0 && nowMs - lastRelayedAt < backoff.inMilliseconds) {
       return ForwardingDecision(
         shouldStore: true,
         shouldRelay: false,
         reason: ForwardingDecisionReason.dropCooldown,
-        nextEligibleAt: lastRelayedAt + relayCooldown.inMilliseconds,
+        nextEligibleAt: lastRelayedAt + backoff.inMilliseconds,
       );
     }
 
@@ -131,10 +102,28 @@ class ForwardingPolicy {
     if (message.updatedAt < packet.timestampMs) return false;
     if (message.status != packet.status) return false;
 
-    final incomingBestHop = (packet.hopCount + 1).clamp(0, maxHop);
+    final incomingBestHop = _saturateHop(packet.hopCount + 1);
     if (incomingBestHop < message.hopCount) return false;
 
     return true;
+  }
+
+  Duration adaptiveBackoffForRelayCount(int relayCount) {
+    final exponent = relayCount.clamp(0, 8);
+    final baseMs = adaptiveBackoffBase.inMilliseconds;
+    final candidateMs = baseMs * (1 << exponent);
+    final cappedMs = candidateMs > adaptiveBackoffMax.inMilliseconds
+        ? adaptiveBackoffMax.inMilliseconds
+        : candidateMs;
+    return Duration(milliseconds: cappedMs);
+  }
+
+  int _saturateHop(int hopCount) {
+    if (hopCount < 0) return 0;
+    if (hopCount > MeshConfig.maxProtocolHop) {
+      return MeshConfig.maxProtocolHop;
+    }
+    return hopCount;
   }
 
   bool _isCoordinateValid(double value, double min, double max) {

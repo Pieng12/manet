@@ -59,15 +59,12 @@ class SOSMessage {
            createdAt + MeshConfig.defaultMessageLifetime.inMilliseconds,
        firstSeenAt = firstSeenAt ?? createdAt;
 
-  bool isExpiredAt(int nowMs) => nowMs >= expiresAt;
+  bool isExpiredAt(int nowMs) => localState == 'expired';
 
-  bool get isExpired =>
-      isExpiredAt(DateTime.now().millisecondsSinceEpoch) ||
-      localState == 'expired';
+  bool get isExpired => localState == 'expired';
 
   // Convert a SOSMessage object into a Map object for database insertion/update
   Map<String, dynamic> toDbMap() {
-    final dbLocalState = isExpired ? 'expired' : localState;
     return {
       'id': id,
       'sender_id': senderId,
@@ -90,7 +87,7 @@ class SOSMessage {
       'duplicate_count': duplicateCount,
       'ack_received_at': ackReceivedAt,
       'synced_at': syncedAt,
-      'local_state': dbLocalState,
+      'local_state': localState,
     };
   }
 

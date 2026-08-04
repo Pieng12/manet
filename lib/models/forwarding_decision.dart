@@ -1,12 +1,9 @@
 enum ForwardingDecisionReason {
   relayAccepted('RELAY_ACCEPTED'),
   dropInvalid('DROP_INVALID'),
-  dropExpired('DROP_EXPIRED'),
-  dropMaxHop('DROP_MAX_HOP'),
   dropDuplicate('DROP_DUPLICATE'),
   dropCooldown('DROP_COOLDOWN'),
   dropAcked('DROP_ACKED'),
-  dropMaxRelay('DROP_MAX_RELAY'),
   dropOwnPacket('DROP_OWN_PACKET');
 
   const ForwardingDecisionReason(this.code);

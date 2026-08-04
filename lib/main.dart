@@ -13,7 +13,6 @@ import 'package:pkmproject/services/ble_relay_service.dart';
 import 'package:pkmproject/services/database_helper.dart';
 import 'package:pkmproject/services/demo_seed_service.dart';
 import 'package:pkmproject/services/experiment_logger.dart';
-import 'package:pkmproject/services/relay_queue_service.dart';
 import 'package:pkmproject/services/workmanager_service.dart';
 import 'package:pkmproject/sync_service.dart';
 import 'package:pkmproject/utils/navigator_key.dart';
@@ -54,9 +53,6 @@ Future<void> _initializeCoreServices() async {
 
   await DemoSeedService.seedIfNeeded();
   await DatabaseHelper().cleanupOldDuplicates();
-  await RelayQueueService().removeExpiredSos(
-    DateTime.now().millisecondsSinceEpoch,
-  );
   await WorkManagerService.initialize();
   SyncService().startSyncListener();
 
@@ -168,9 +164,6 @@ void backgroundServiceMain() {
       eventType: ExperimentEventTypes.serviceStarted,
       deviceId: SyncService().deviceId,
       detail: {'entrypoint': 'background'},
-    );
-    await RelayQueueService().removeExpiredSos(
-      DateTime.now().millisecondsSinceEpoch,
     );
     SyncService().startSyncListener();
     await BleRelayService().start();

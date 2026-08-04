@@ -61,23 +61,25 @@ void main() {
   });
 
   test(
-    'gateway upload candidates exclude synced acked expired and server rows',
+    'gateway upload candidates exclude terminal/server rows but not old SOS',
     () {
       final validOld = message('valid-old', offsetMs: -1000)..senderCrc = 777;
       final validNewer = message('valid-newer', offsetMs: 1000)
         ..senderCrc = 777;
+      final oldSos = message('old', expiresAt: now - 1)..senderCrc = 888;
       final candidates = SyncService.filterGatewayUploadCandidates([
         validOld,
         validNewer,
         message('synced', isSynced: 1),
         message('acked', ackReceivedAt: now),
-        message('expired', expiresAt: now - 1),
+        oldSos,
         message('server', fromServer: true),
-        message('local-expired', localState: 'expired'),
       ], nowMs: now);
 
-      expect(candidates, hasLength(1));
-      expect(candidates.single.id, validNewer.id);
+      expect(candidates.map((item) => item.id).toSet(), {
+        validNewer.id,
+        oldSos.id,
+      });
     },
   );
 

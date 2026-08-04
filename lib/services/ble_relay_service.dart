@@ -33,12 +33,11 @@ class BleRelayService {
   Stream<String> get logStream => _logController.stream;
 
   static int sosExpiresAt(BlePacket packet) {
-    return packet.timestampMs +
-        MeshConfig.defaultMessageLifetime.inMilliseconds;
+    return 0x7FFFFFFFFFFFFFFF;
   }
 
   static bool isSosPacketExpired(BlePacket packet, int nowMs) {
-    return nowMs >= sosExpiresAt(packet);
+    return false;
   }
 
   static bool canRelaySosPacket(BlePacket packet, int nowMs) {
@@ -50,23 +49,22 @@ class BleRelayService {
   }
 
   static int ackExpiresAt(BlePacket packet) {
-    return packet.timestampMs + MeshConfig.ackLifetime.inMilliseconds;
+    return 0x7FFFFFFFFFFFFFFF;
   }
 
   static bool isAckPacketExpired(BlePacket packet, int nowMs) {
-    return nowMs >= ackExpiresAt(packet);
+    return false;
   }
 
   static bool canRelayAckPacket(BlePacket packet, int nowMs) {
-    return packet.isAck &&
-        !isAckPacketExpired(packet, nowMs) &&
-        packet.hopCount < MeshConfig.maxAckHop;
+    return packet.isAck;
   }
 
   static SOSMessage messageFromSosPacket(BlePacket packet, int receivedAtMs) {
     final expiresAt = sosExpiresAt(packet);
-    final reachedMaxHop = packet.hopCount >= MeshConfig.defaultMaxHop;
-    final isExpired = receivedAtMs >= expiresAt;
+    final nextHopCount = packet.hopCount >= MeshConfig.maxProtocolHop
+        ? MeshConfig.maxProtocolHop
+        : packet.hopCount + 1;
 
     return SOSMessage(
       id: 'ble-${packet.senderCrc}-${packet.timestampMs}',
@@ -81,11 +79,11 @@ class BleRelayService {
       createdAt: packet.timestampMs,
       updatedAt: packet.timestampMs,
       isSynced: packet.fromServer ? 1 : 0,
-      hopCount: reachedMaxHop ? packet.hopCount : packet.hopCount + 1,
+      hopCount: nextHopCount,
       maxHop: MeshConfig.defaultMaxHop,
       expiresAt: expiresAt,
       firstSeenAt: receivedAtMs,
-      localState: isExpired ? 'expired' : 'pending',
+      localState: 'pending',
     );
   }
 
@@ -97,7 +95,6 @@ class BleRelayService {
   }
 
   Future<void> recoverPersistedRelayState() async {
-    await _relayQueue.removeExpiredSos(DateTime.now().millisecondsSinceEpoch);
     await NativeBridgeService.startBleWakeUpScan();
     await _advertiser.advertiseLatestOrStop();
     await _experimentLogger.logEvent(
@@ -120,15 +117,11 @@ class BleRelayService {
   Future<void> activateForMessage(SOSMessage message) async {
     await _dbHelper.replaceWithLatestMessage(message);
     await start();
-    if (message.isExpired) {
-      _log('Stored expired SOS ${message.id}; advertising skipped.');
-    } else {
-      await _advertiser.enqueueSosForAdvertising(
-        message,
-        nextEligibleAt: DateTime.now().millisecondsSinceEpoch,
-        preemptCurrent: true,
-      );
-    }
+    await _advertiser.enqueueSosForAdvertising(
+      message,
+      nextEligibleAt: DateTime.now().millisecondsSinceEpoch,
+      preemptCurrent: true,
+    );
     await WorkManagerService.registerSyncTask();
     await _tryGatewaySync();
   }
@@ -233,7 +226,6 @@ class BleRelayService {
   }
 
   Future<void> _processAck(BlePacket packet, {int? rssi}) async {
-    final now = DateTime.now().millisecondsSinceEpoch;
     await _experimentLogger.logEvent(
       eventType: ExperimentEventTypes.ackReceived,
       deviceId: SyncService().deviceId,
@@ -242,20 +234,6 @@ class BleRelayService {
       rssi: rssi,
       payloadHash: packet.identity,
     );
-    if (isAckPacketExpired(packet, now)) {
-      await _experimentLogger.logEvent(
-        eventType: ExperimentEventTypes.bleRelayDropped,
-        deviceId: SyncService().deviceId,
-        senderCrc: packet.senderCrc,
-        hopCount: packet.hopCount,
-        rssi: rssi,
-        payloadHash: packet.identity,
-        detail: {'reason': 'ACK_REJECTED_EXPIRED'},
-      );
-      _log('ACK_REJECTED_EXPIRED ${packet.identity}');
-      return;
-    }
-
     final ackQueueId = RelayQueueService.ackMessageId(
       senderCrc: packet.senderCrc,
       ackTimestampMs: packet.timestampMs,
@@ -269,20 +247,6 @@ class BleRelayService {
       status: packet.status,
       relayAck: false,
     );
-
-    if (packet.hopCount >= MeshConfig.maxAckHop) {
-      await _experimentLogger.logEvent(
-        eventType: ExperimentEventTypes.bleRelayDropped,
-        deviceId: SyncService().deviceId,
-        senderCrc: packet.senderCrc,
-        hopCount: packet.hopCount,
-        rssi: rssi,
-        payloadHash: packet.identity,
-        detail: {'reason': 'ACK_MAX_HOP_LOCAL_ONLY'},
-      );
-      _log('ACK_MAX_HOP_LOCAL_ONLY ${packet.identity}');
-      return;
-    }
 
     if (alreadyQueued) {
       await _experimentLogger.logEvent(
@@ -302,18 +266,23 @@ class BleRelayService {
       senderCrc: packet.senderCrc,
       ackTimestampMs: packet.timestampMs,
       status: packet.status,
-      hopCount: packet.hopCount + 1,
+      hopCount: packet.hopCount >= MeshConfig.maxProtocolHop
+          ? MeshConfig.maxProtocolHop
+          : packet.hopCount + 1,
     );
+    final nextAckHop = packet.hopCount >= MeshConfig.maxProtocolHop
+        ? MeshConfig.maxProtocolHop
+        : packet.hopCount + 1;
     await _experimentLogger.logEvent(
       eventType: ExperimentEventTypes.bleRelayQueued,
       deviceId: SyncService().deviceId,
       senderCrc: packet.senderCrc,
-      hopCount: packet.hopCount + 1,
+      hopCount: nextAckHop,
       rssi: rssi,
       payloadHash: packet.identity,
       detail: {'kind': 'ack'},
     );
-    _log('ACK_RELAY_QUEUED ${packet.identity} hop=${packet.hopCount + 1}');
+    _log('ACK_RELAY_QUEUED ${packet.identity} hop=$nextAckHop');
   }
 
   Future<void> _processSos(BlePacket packet, {int? rssi}) async {
@@ -382,18 +351,6 @@ class BleRelayService {
     );
     await WorkManagerService.registerSyncTask();
 
-    if (decision.reason == ForwardingDecisionReason.dropExpired) {
-      await _experimentLogger.logEvent(
-        eventType: ExperimentEventTypes.messageExpired,
-        deviceId: SyncService().deviceId,
-        messageId: message.id,
-        senderCrc: packet.senderCrc,
-        hopCount: packet.hopCount,
-        rssi: rssi,
-        payloadHash: packet.identity,
-      );
-    }
-
     if (decision.reason == ForwardingDecisionReason.dropCooldown &&
         decision.nextEligibleAt != null) {
       await _relayQueue.enqueueSos(
@@ -434,7 +391,10 @@ class BleRelayService {
 
     await _relayQueue.enqueueSos(
       message,
-      nextEligibleAt: _relayQueue.sosCooldownEligibleAt(now),
+      nextEligibleAt: _relayQueue.sosCooldownEligibleAt(
+        now,
+        relayCount: message.relayCount,
+      ),
     );
     await _experimentLogger.logEvent(
       eventType: ExperimentEventTypes.bleRelayQueued,

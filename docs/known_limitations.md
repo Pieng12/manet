@@ -14,6 +14,8 @@ ditafsirkan melebihi kemampuan implementasi saat ini.
   ringkas.
 - Timestamp compact memakai resolusi detik dan bergantung pada waktu referensi
   penerima.
+- Karena forwarding bersifat persistent sampai ACK, adaptive backoff wajib
+  dipantau pada pengujian baterai multi-jam.
 
 ## Android Background
 

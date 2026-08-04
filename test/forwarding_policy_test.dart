@@ -151,18 +151,13 @@ void main() {
       ),
       nowMs: now,
     );
-    final invalidHop = policy.decideSos(
-      packet: sosPacket(hopCount: MeshConfig.maxProtocolHop + 1),
-      nowMs: now,
-    );
 
     expect(invalidLatitude.reason, ForwardingDecisionReason.dropInvalid);
     expect(invalidLongitude.reason, ForwardingDecisionReason.dropInvalid);
     expect(futureTimestamp.reason, ForwardingDecisionReason.dropInvalid);
-    expect(invalidHop.reason, ForwardingDecisionReason.dropInvalid);
   });
 
-  test('expired packet is stored but not relayed', () {
+  test('old packet is stored and relayed while not ACKed', () {
     const policy = ForwardingPolicy();
     final oldTimestamp = now - MeshConfig.defaultMessageLifetime.inMilliseconds;
 
@@ -172,22 +167,22 @@ void main() {
     );
 
     expect(decision.shouldStore, true);
-    expect(decision.shouldRelay, false);
-    expect(decision.reason, ForwardingDecisionReason.dropExpired);
+    expect(decision.shouldRelay, true);
+    expect(decision.reason, ForwardingDecisionReason.relayAccepted);
   });
 
-  test('max hop packet is stored but not relayed', () {
+  test('hop 63 packet is stored and relayed with saturated hop', () {
     const policy = ForwardingPolicy();
 
     final decision = policy.decideSos(
-      packet: sosPacket(hopCount: MeshConfig.defaultMaxHop),
+      packet: sosPacket(hopCount: MeshConfig.maxProtocolHop),
       nowMs: now,
     );
 
     expect(decision.shouldStore, true);
-    expect(decision.shouldRelay, false);
-    expect(decision.nextHopCount, MeshConfig.defaultMaxHop);
-    expect(decision.reason, ForwardingDecisionReason.dropMaxHop);
+    expect(decision.shouldRelay, true);
+    expect(decision.nextHopCount, MeshConfig.maxProtocolHop);
+    expect(decision.reason, ForwardingDecisionReason.relayAccepted);
   });
 
   test('controlled flooding defers packet during relay cooldown', () {
@@ -208,7 +203,7 @@ void main() {
     expect(decision.reason, ForwardingDecisionReason.dropCooldown);
     expect(
       decision.nextEligibleAt,
-      lastRelayedAt + MeshConfig.relayCooldown.inMilliseconds,
+      lastRelayedAt + MeshConfig.adaptiveBackoffBase.inMilliseconds,
     );
   });
 
@@ -244,7 +239,7 @@ void main() {
     expect(decision.reason, ForwardingDecisionReason.dropOwnPacket);
   });
 
-  test('controlled flooding enforces max relay count', () {
+  test('relay count is metric only and does not stop forwarding', () {
     const policy = ForwardingPolicy();
 
     final decision = policy.decideSos(
@@ -257,8 +252,8 @@ void main() {
     );
 
     expect(decision.shouldStore, true);
-    expect(decision.shouldRelay, false);
-    expect(decision.reason, ForwardingDecisionReason.dropMaxRelay);
+    expect(decision.shouldRelay, true);
+    expect(decision.reason, ForwardingDecisionReason.relayAccepted);
   });
 
   test('basic flooding ignores controlled cooldown and max relay count', () {

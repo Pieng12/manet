@@ -103,8 +103,9 @@ Expected:
 
 - `BootReceiver` memulai `MeshBackgroundService`.
 - `recoverPersistedRelayState` berjalan.
-- Queue expired dibersihkan.
-- SOS aktif yang belum ACK kembali masuk rotasi advertising.
+- Queue persisten dipulihkan tanpa menghapus SOS aktif karena lifetime/max hop.
+- SOS aktif dan ACK anti-message yang belum terminal kembali masuk rotasi
+  advertising.
 
 ## Battery Optimization
 

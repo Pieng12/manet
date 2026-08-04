@@ -209,13 +209,12 @@ class DatabaseHelper {
 
   Future<List<SOSMessage>> getUnsyncedMessages() async {
     final db = await database;
-    final now = DateTime.now().millisecondsSinceEpoch;
     final List<Map<String, dynamic>> maps = await db.query(
       'sos_messages',
       where:
-          'is_synced = ? AND expires_at > ? AND local_state NOT IN (?, ?, ?) '
+          'is_synced = ? AND local_state NOT IN (?, ?) '
           'AND ack_received_at IS NULL AND from_server = ?',
-      whereArgs: [0, now, 'expired', 'acked', 'synced', 0],
+      whereArgs: [0, 'acked', 'synced', 0],
     );
     return List.generate(maps.length, (i) {
       return SOSMessage.fromDbMap(maps[i]);
@@ -224,13 +223,12 @@ class DatabaseHelper {
 
   Future<List<SOSMessage>> getGatewayUploadCandidates({int? nowMs}) async {
     final db = await database;
-    final now = nowMs ?? DateTime.now().millisecondsSinceEpoch;
     final maps = await db.query(
       'sos_messages',
       where:
-          'is_synced = ? AND ack_received_at IS NULL AND expires_at > ? '
-          'AND from_server = ? AND local_state NOT IN (?, ?, ?)',
-      whereArgs: [0, now, 0, 'expired', 'acked', 'synced'],
+          'is_synced = ? AND ack_received_at IS NULL '
+          'AND from_server = ? AND local_state NOT IN (?, ?)',
+      whereArgs: [0, 0, 'acked', 'synced'],
       orderBy: 'updated_at DESC',
     );
     return maps.map(SOSMessage.fromDbMap).toList();

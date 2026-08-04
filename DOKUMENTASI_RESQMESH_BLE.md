@@ -24,10 +24,12 @@ Konfigurasi runtime utama berada di `lib/config/mesh_config.dart`.
 | `RESQMESH_FORWARDING_MODE` | `controlled` | `controlled` atau `basic`. |
 | `protocolLength` | `17` | Panjang payload BLE. |
 | `manufacturerId` | `0xFFFF` | Manufacturer ID penelitian internal. |
-| `defaultMaxHop` | `5` | Batas hop SOS. |
-| `maxAckHop` | `5` | Batas hop ACK. |
-| `defaultMessageLifetime` | `6 jam` | Lifetime SOS. |
-| `ackLifetime` | `2 menit` | Lifetime ACK BLE. |
+| `defaultMaxHop` | `5` | Nilai legacy/metadata, bukan cutoff relay aktif. |
+| `maxAckHop` | `5` | Nilai legacy/metadata, bukan cutoff ACK aktif. |
+| `defaultMessageLifetime` | `6 jam` | Nilai legacy/metadata, bukan cutoff SOS aktif. |
+| `ackLifetime` | `2 menit` | Nilai legacy/metadata, bukan TTL ACK aktif. |
+| `adaptiveBackoffBase` | `10 detik` | Backoff awal setelah relay sukses. |
+| `adaptiveBackoffMax` | `5 menit` | Batas atas adaptive backoff. |
 | `scanAllAdvertisements` | `false` | Scanner default hanya manufacturer filter. |
 | `connectableAdvertising` | `false` | Advertising default non-connectable. |
 
@@ -38,7 +40,7 @@ resmi.
 
 | Modul | Peran |
 | --- | --- |
-| `SOSMessage` | Model pesan dengan hop, max hop, expiry, relay metadata, dan sender CRC. |
+| `SOSMessage` | Model pesan dengan hop, metadata legacy, relay metadata, dan sender CRC. |
 | `BlePacket` | Pack/unpack payload SOS dan ACK 17 byte. |
 | `BleRelayService` | Menerima packet, validasi, simpan, relay, ACK, dan logging. |
 | `ForwardingPolicy` | Menentukan apakah packet boleh diteruskan. |
@@ -101,7 +103,7 @@ CRC32 hanya identifier ringkas untuk payload, bukan mekanisme keamanan.
 ```text
 User membuat SOS
   -> SOSMessage disimpan lokal
-  -> hopCount=0, maxHop=5, expiresAt=now+6 jam
+  -> hopCount=0 dan metadata relay disiapkan
   -> BlePacket.packSos membuat payload 17 byte
   -> Native advertiser mengiklankan payload
 ```
@@ -112,7 +114,7 @@ Saat perangkat lain menerima payload:
 Native scan menerima manufacturer data
   -> payload dan RSSI dikirim ke Dart
   -> BlePacket.unpack memvalidasi header, panjang, status, dan flags
-  -> forwarding policy memeriksa duplicate, expiry, dan hop
+  -> forwarding policy memeriksa duplicate, koordinat, timestamp, dan hop
   -> pesan valid disimpan
   -> hopCount dinaikkan sebelum relay
   -> relay queue menjadwalkan advertising berikutnya
@@ -121,17 +123,18 @@ Native scan menerima manufacturer data
 ## Relay Queue dan Forwarding
 
 Relay queue disimpan di SQLite sehingga state relay tidak hilang saat service
-berhenti. Queue membersihkan item expired, memberi prioritas pada ACK, lalu
-memutar item SOS agar satu pesan tidak mendominasi slot advertising.
+berhenti. Queue tidak menghapus SOS aktif karena max hop, lifetime, atau total
+relay count. SOS tetap berada di queue sampai ACK server diterima, state yang
+lebih baru menggantikannya, atau dilakukan administrative deletion.
 
-Controlled flooding default memakai:
+Controlled persistent epidemic forwarding default memakai:
 
 - dedup berbasis identity packet;
-- max hop;
-- message lifetime;
-- relay cooldown;
+- fairness antar SOS;
+- adaptive backoff;
+- cooldown;
 - jitter;
-- batas relay count.
+- relay count sebagai metrik saja.
 
 Basic flooding disediakan sebagai pembanding eksperimen.
 
@@ -169,15 +172,16 @@ didukung:
 ```
 
 ACK diterima jika `sender_crc` cocok dan timestamp ACK tidak lebih lama dari
-pesan lokal. ACK valid disimpan, diprioritaskan di queue, dan disebarkan lagi
-dengan hop/lifetime sendiri.
+pesan lokal. ACK valid disimpan sebagai persistent anti-message, diprioritaskan
+di queue, dideduplikasi, dan disebarkan ulang tanpa hard hop limit atau TTL 2
+menit sampai node pembawa SOS menerimanya.
 
 ## Database Lokal
 
 Skema saat ini mencakup:
 
-- `sos_messages`: pesan lokal/relay, status sync, hop, max hop, expiry, sender
-  CRC, relay metadata.
+- `sos_messages`: pesan lokal/relay, status sync, hop, metadata legacy, sender
+  CRC, dan relay metadata.
 - `relay_queue`: queue persisten untuk packet SOS dan ACK.
 - `processed_packets`: dedup packet SOS/ACK.
 - `gateway_acks`: ACK dari gateway dan metadata relay.
@@ -240,8 +244,9 @@ flutter test
 flutter build apk --debug
 ```
 
-Unit test mencakup protocol pack/unpack, hop, max hop, expiry, forwarding
-policy, relay queue, ACK, gateway contract, dan experiment logger.
+Unit test mencakup protocol pack/unpack, hop saturasi, persistent SOS,
+adaptive backoff, forwarding policy, relay queue, ACK anti-message, gateway
+contract, dan experiment logger.
 
 ## Kompatibilitas dan Limitasi
 

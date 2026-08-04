@@ -43,8 +43,7 @@ class BlePacket {
   }
 
   static Uint8List packSos(SOSMessage message, {int? hopCount}) {
-    final effectiveHopCount = hopCount ?? message.hopCount;
-    _validateHop(effectiveHopCount);
+    final effectiveHopCount = _saturateHop(hopCount ?? message.hopCount);
     _validateCoordinateRange(message.latitude, -90.0, 90.0, 'latitude');
     _validateCoordinateRange(message.longitude, -180.0, 180.0, 'longitude');
     final buffer = ByteData(length);
@@ -70,7 +69,7 @@ class BlePacket {
     bool fromServer = true,
     int hopCount = 0,
   }) {
-    _validateHop(hopCount);
+    final effectiveHopCount = _saturateHop(hopCount);
     final buffer = ByteData(length);
     _writeHeader(buffer);
     buffer.setUint32(2, senderCrc & 0xFFFFFFFF, Endian.big);
@@ -81,7 +80,9 @@ class BlePacket {
     buffer.setUint8(15, status.index);
     buffer.setUint8(
       16,
-      ackFlag | (fromServer ? fromServerFlag : 0x00) | (hopCount & hopMask),
+      ackFlag |
+          (fromServer ? fromServerFlag : 0x00) |
+          (effectiveHopCount & hopMask),
     );
     return buffer.buffer.asUint8List();
   }
@@ -145,15 +146,12 @@ class BlePacket {
     buffer.setUint8(1, 0x4D);
   }
 
-  static void _validateHop(int hopCount) {
-    if (hopCount < 0 || hopCount > MeshConfig.maxProtocolHop) {
-      throw RangeError.range(
-        hopCount,
-        0,
-        MeshConfig.maxProtocolHop,
-        'hopCount',
-      );
+  static int _saturateHop(int hopCount) {
+    if (hopCount < 0) return 0;
+    if (hopCount > MeshConfig.maxProtocolHop) {
+      return MeshConfig.maxProtocolHop;
     }
+    return hopCount;
   }
 
   static void _validateCoordinateRange(

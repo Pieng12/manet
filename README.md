@@ -11,10 +11,10 @@ Project berada pada tahap implementasi dan pengujian skripsi. Fitur inti yang
 sudah tersedia:
 
 - Payload BLE connectionless sepanjang 17 byte.
-- Hop count, max hop, expiry, dan deduplikasi packet.
-- Controlled flooding dan basic flooding.
+- ACK-terminated persistent epidemic forwarding.
+- Hop count tersaturasi di 63, adaptive backoff, jitter, dan deduplikasi packet.
 - Persistent relay queue dengan prioritas ACK.
-- ACK gateway dengan lifetime, hop limit, dan dedup.
+- ACK gateway sebagai persistent anti-message.
 - Native Android BLE scan/advertising dengan manufacturer filter.
 - Background recovery setelah app removed, boot, dan service restart.
 - Experiment session, event log, RSSI capture, dan export CSV/JSON.
@@ -39,24 +39,27 @@ perangkat dan dikirim ke server melalui gateway.
 ## Alur SOS
 
 1. User membuat SOS dari aplikasi.
-2. Aplikasi menyimpan `SOSMessage` ke SQLite dengan `hopCount=0`, `maxHop`, dan
-   `expiresAt`.
+2. Aplikasi menyimpan `SOSMessage` ke SQLite dengan `hopCount=0` dan metadata
+   relay.
 3. Packet SOS 17 byte dibuat dari sender CRC, timestamp, koordinat, status, dan
    flags.
 4. Native Android mengiklankan packet sebagai manufacturer data BLE.
 5. Perangkat lain yang melakukan scan menerima packet, memvalidasi header,
-   status, expiry, hop, dan identitas packet.
+   status, koordinat, hop, timestamp, dan identitas packet.
 6. Pesan valid disimpan lokal dan masuk relay queue.
 
 ## Alur Relay
 
-Relay memakai store-and-forward. Setiap node menaikkan `hopCount` sebelum
-mengiklankan ulang packet. Packet tidak diteruskan jika expired, melewati
-`maxHop`, sudah pernah diproses, atau ditolak oleh forwarding policy.
+Relay memakai ACK-terminated persistent epidemic forwarding. Setiap node
+menyimpan SOS aktif di persistent relay queue dan terus mengiklankan ulang
+selama belum ada ACK server, belum digantikan state yang lebih baru, dan belum
+dihapus secara administratif. `hopCount` tetap dikirim sebagai metrik dan
+disaturasi pada 63 agar tidak overflow kembali ke 0.
 
 Mode forwarding:
 
-- `controlled` default: memakai cooldown, jitter, dedup, dan batas relay.
+- `controlled` default: memakai dedup, fairness, adaptive backoff, cooldown, dan
+  jitter.
 - `basic`: pembanding eksperimen yang lebih agresif.
 
 ```bash
@@ -106,8 +109,9 @@ Respons ACK server:
 }
 ```
 
-ACK valid disebarkan kembali lewat BLE. ACK tidak mematikan pesan lokal yang
-lebih baru.
+ACK valid disebarkan kembali lewat BLE sebagai persistent anti-message. ACK
+tidak memakai hard hop limit atau TTL 2 menit, tetap diprioritaskan di queue,
+dan menghentikan SOS hanya saat diterima oleh node pembawa SOS yang cocok.
 
 ## Format Payload 17 Byte
 
@@ -150,8 +154,8 @@ flutter build apk --debug
 ## Cara Memulai Sesi Eksperimen
 
 Jalankan aplikasi dalam mode yang ingin diuji. Session eksperimen dibuat saat
-service/app dimulai dan menyimpan konfigurasi forwarding, max hop, lifetime, dan
-timestamp mulai.
+service/app dimulai dan menyimpan konfigurasi forwarding, backoff, lifetime
+legacy, dan timestamp mulai.
 
 Panduan lengkap ada di
 [`docs/experiment_protocol.md`](docs/experiment_protocol.md).

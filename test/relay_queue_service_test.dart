@@ -70,7 +70,7 @@ void main() {
   });
 
   test(
-    'round robin returns oldest relayed item after relay cooldown and jitter',
+    'round robin returns oldest relayed item after adaptive backoff and jitter',
     () async {
       final messages = [message('a'), message('b'), message('c')];
       for (final item in messages) {
@@ -90,7 +90,7 @@ void main() {
 
       final afterCooldown =
           now +
-          MeshConfig.relayCooldown.inMilliseconds +
+          queue.adaptiveBackoffForRelayCount(1).inMilliseconds +
           MeshConfig.relayJitterMax.inMilliseconds +
           1;
       final next = await queue.nextEligible(afterCooldown);
@@ -124,7 +124,7 @@ void main() {
   });
 
   test(
-    'advertising success increments queue and SOS counters with cooldown jitter',
+    'advertising success increments queue and SOS counters with backoff jitter',
     () async {
       final sos = message('success');
       await insertMessage(sos);
@@ -151,7 +151,7 @@ void main() {
         queued.nextEligibleAt,
         greaterThanOrEqualTo(
           now +
-              MeshConfig.relayCooldown.inMilliseconds +
+              queue.adaptiveBackoffForRelayCount(1).inMilliseconds +
               MeshConfig.relayJitterMin.inMilliseconds,
         ),
       );
@@ -159,36 +159,50 @@ void main() {
         queued.nextEligibleAt,
         lessThanOrEqualTo(
           now +
-              MeshConfig.relayCooldown.inMilliseconds +
+              queue.adaptiveBackoffForRelayCount(1).inMilliseconds +
               MeshConfig.relayJitterMax.inMilliseconds,
         ),
       );
     },
   );
 
-  test(
-    'max relay count removes item after native success reaches limit',
-    () async {
-      final sos = message('max-relay')
-        ..relayCount = MeshConfig.maxRelayCount - 1;
-      await insertMessage(sos);
-      await queue.enqueueSos(sos);
+  test('relay count does not remove persistent SOS at any count', () async {
+    final sos = message('max-relay')..relayCount = MeshConfig.maxRelayCount - 1;
+    await insertMessage(sos);
+    await queue.enqueueSos(sos);
 
-      final item = await queue.nextEligible(now);
-      await queue.markAdvertisingStarted(item!, nowMs: now);
-      await queue.markAdvertisingSucceeded(item, nowMs: now);
+    final item = await queue.nextEligible(now);
+    await queue.markAdvertisingStarted(item!, nowMs: now);
+    await queue.markAdvertisingSucceeded(item, nowMs: now);
 
-      expect(await queue.getItem(sos.id, 'sos'), isNull);
-      final stored = SOSMessage.fromDbMap(
-        (await db.query(
-          'sos_messages',
-          where: 'id = ?',
-          whereArgs: [sos.id],
-        )).single,
-      );
-      expect(stored.relayCount, MeshConfig.maxRelayCount);
-    },
-  );
+    expect(await queue.getItem(sos.id, 'sos'), isNotNull);
+    final stored = SOSMessage.fromDbMap(
+      (await db.query(
+        'sos_messages',
+        where: 'id = ?',
+        whereArgs: [sos.id],
+      )).single,
+    );
+    expect(stored.relayCount, MeshConfig.maxRelayCount);
+  });
+
+  test('adaptive backoff increases but never disables message', () async {
+    final first = queue.adaptiveBackoffForRelayCount(0);
+    final later = queue.adaptiveBackoffForRelayCount(4);
+    final capped = queue.adaptiveBackoffForRelayCount(99);
+
+    expect(later, greaterThan(first));
+    expect(capped, MeshConfig.adaptiveBackoffMax);
+
+    final sos = message('backoff')..relayCount = 99;
+    await insertMessage(sos);
+    await queue.enqueueSos(sos);
+    final item = await queue.nextEligible(now);
+    await queue.markAdvertisingStarted(item!, nowMs: now);
+    await queue.markAdvertisingSucceeded(item, nowMs: now);
+
+    expect(await queue.getItem(sos.id, 'sos'), isNotNull);
+  });
 
   test('ACK gets priority over SOS queue items', () async {
     final sos = message('sos-1');
@@ -208,6 +222,46 @@ void main() {
     expect(next.priority, greaterThan(0));
   });
 
+  test('ACK stops SOS by removing matching persistent queue item', () async {
+    final sos = message('acked-sos');
+    await insertMessage(sos);
+    await queue.enqueueSos(sos);
+
+    expect(await queue.getItem(sos.id, 'sos'), isNotNull);
+    await queue.removeMessage(sos.id);
+
+    expect(await queue.getItem(sos.id, 'sos'), isNull);
+  });
+
+  test('queue remains fair with multiple SOS and ACK items', () async {
+    final sosA = message('fair-a');
+    final sosB = message('fair-b');
+    await insertMessage(sosA);
+    await insertMessage(sosB);
+    await queue.enqueueSos(sosA);
+    await queue.enqueueSos(sosB);
+
+    for (final crc in [111, 222]) {
+      final ackPayload = BlePacket.packAck(senderCrc: crc, ackTimestampMs: now);
+      await queue.enqueueAck(
+        messageId: 'ack-$crc-$now',
+        payloadBase64: base64Encode(ackPayload),
+      );
+    }
+
+    final selected = <String>[];
+    for (var i = 0; i < 4; i++) {
+      final item = await queue.nextEligible(now);
+      expect(item, isNotNull);
+      selected.add(item!.packetType);
+      await queue.markAdvertisingStarted(item, nowMs: now + i);
+      await queue.markAdvertisingSucceeded(item, nowMs: now + i);
+    }
+
+    expect(selected.take(2).every((type) => type == 'ack'), true);
+    expect(selected.skip(2).toSet(), {'sos'});
+  });
+
   test('duplicate ACK queue item is not inserted twice', () async {
     final ackPayload = BlePacket.packAck(senderCrc: 12345, ackTimestampMs: now);
     final messageId = 'ack-12345-$now-2';
@@ -224,7 +278,7 @@ void main() {
     expect(await queue.queueSize(), 1);
   });
 
-  test('expired ACK item is removed from queue', () async {
+  test('old ACK item remains in persistent queue', () async {
     final oldAckTimestamp = now - MeshConfig.ackLifetime.inMilliseconds;
     final ackPayload = BlePacket.packAck(
       senderCrc: 12345,
@@ -237,11 +291,12 @@ void main() {
 
     final next = await queue.nextEligible(now);
 
-    expect(next, isNull);
-    expect(await queue.queueSize(), 0);
+    expect(next, isNotNull);
+    expect(next!.isAck, true);
+    expect(await queue.queueSize(), 1);
   });
 
-  test('expired SOS item is removed from queue', () async {
+  test('old SOS item remains eligible while not ACKed', () async {
     final expired = message('expired', expired: true);
     await insertMessage(expired);
     await queue.enqueueSos(expired);
@@ -249,8 +304,8 @@ void main() {
     final next = await queue.nextEligible(now);
     final size = await queue.queueSize();
 
-    expect(size, 0);
-    expect(next, isNull);
+    expect(size, 1);
+    expect(next, isNotNull);
   });
 
   test('duplicate queue item is not inserted twice', () async {

@@ -101,3 +101,9 @@ Hitung metrik dari event export:
 
 Timestamp lintas perangkat bergantung pada sinkronisasi clock. Untuk durasi
 dalam satu perangkat, gunakan event dari session yang sama.
+
+Catatan forwarding terbaru: `max_hop`, `message_lifetime_ms`, dan
+`relay_cooldown_ms` pada session adalah metadata eksperimen/legacy. SOS aktif
+diteruskan secara persistent sampai ACK server, state lebih baru, atau deletion.
+Hitung dampak adaptive backoff dari `relay_count`, `last_relayed_at`, dan event
+advertising.
