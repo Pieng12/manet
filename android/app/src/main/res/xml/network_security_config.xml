@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- Allow HTTPS connections to Railway backend -->
+    <domain-config cleartextTrafficPermitted="false">
+        <domain includeSubdomains="true">resqmesh-backend-production.up.railway.app</domain>
+        <domain includeSubdomains="true">railway.app</domain>
+    </domain-config>
+    
+    <!-- Allow HTTP connections to OpenStreetMap tiles (for offline map) -->
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">tile.openstreetmap.org</domain>
+        <domain includeSubdomains="true">a.tile.openstreetmap.org</domain>
+        <domain includeSubdomains="true">b.tile.openstreetmap.org</domain>
+        <domain includeSubdomains="true">c.tile.openstreetmap.org</domain>
+    </domain-config>
+    
+    <!-- Base config: allow cleartext for development, but prefer HTTPS -->
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>
+

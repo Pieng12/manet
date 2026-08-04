@@ -1,0 +1,362 @@
+Activity Resolver Table:
+  Non-Data Actions:
+      android.intent.action.MAIN:
+        7827b90 com.example.pkmproject/.MainActivity filter 594ac89
+          Action: "android.intent.action.MAIN"
+          Category: "android.intent.category.LAUNCHER"
+
+Receiver Resolver Table:
+  Non-Data Actions:
+      android.intent.action.BATTERY_OKAY:
+        2cd7766 com.example.pkmproject/androidx.work.impl.background.systemalarm.ConstraintProxy$BatteryNotLowProxy filter ac11aa7
+          Action: "android.intent.action.BATTERY_OKAY"
+          Action: "android.intent.action.BATTERY_LOW"
+      android.intent.action.ACTION_POWER_DISCONNECTED:
+        9e22ca8 com.example.pkmproject/androidx.work.impl.background.systemalarm.ConstraintProxy$BatteryChargingProxy filter d863c1
+          Action: "android.intent.action.ACTION_POWER_CONNECTED"
+          Action: "android.intent.action.ACTION_POWER_DISCONNECTED"
+      android.intent.action.QUICKBOOT_POWERON:
+        7d5648e com.example.pkmproject/.BootReceiver filter e5344af
+          Action: "android.intent.action.BOOT_COMPLETED"
+          Action: "android.intent.action.QUICKBOOT_POWERON"
+      androidx.profileinstaller.action.SAVE_PROFILE:
+        2b5bf4a com.example.pkmproject/androidx.profileinstaller.ProfileInstallReceiver filter 120bf31
+          Action: "androidx.profileinstaller.action.SAVE_PROFILE"
+      android.intent.action.DEVICE_STORAGE_LOW:
+        e816b54 com.example.pkmproject/androidx.work.impl.background.systemalarm.ConstraintProxy$StorageNotLowProxy filter 2c67afd
+          Action: "android.intent.action.DEVICE_STORAGE_LOW"
+          Action: "android.intent.action.DEVICE_STORAGE_OK"
+      android.net.conn.CONNECTIVITY_CHANGE:
+        7c73b9a com.example.pkmproject/.ConnectivityReceiver filter 7197ccb
+          Action: "android.net.conn.CONNECTIVITY_CHANGE"
+        4a9a3f2 com.example.pkmproject/androidx.work.impl.background.systemalarm.ConstraintProxy$NetworkStateProxy filter b5aba43
+          Action: "android.net.conn.CONNECTIVITY_CHANGE"
+      android.intent.action.DEVICE_STORAGE_OK:
+        e816b54 com.example.pkmproject/androidx.work.impl.background.systemalarm.ConstraintProxy$StorageNotLowProxy filter 2c67afd
+          Action: "android.intent.action.DEVICE_STORAGE_LOW"
+          Action: "android.intent.action.DEVICE_STORAGE_OK"
+      androidx.profileinstaller.action.INSTALL_PROFILE:
+        2b5bf4a com.example.pkmproject/androidx.profileinstaller.ProfileInstallReceiver filter 4e72ebb
+          Action: "androidx.profileinstaller.action.INSTALL_PROFILE"
+      android.intent.action.BATTERY_LOW:
+        2cd7766 com.example.pkmproject/androidx.work.impl.background.systemalarm.ConstraintProxy$BatteryNotLowProxy filter ac11aa7
+          Action: "android.intent.action.BATTERY_OKAY"
+          Action: "android.intent.action.BATTERY_LOW"
+      android.intent.action.TIMEZONE_CHANGED:
+        d33e8c0 com.example.pkmproject/androidx.work.impl.background.systemalarm.RescheduleReceiver filter 484c9f9
+          Action: "android.intent.action.BOOT_COMPLETED"
+          Action: "android.intent.action.TIME_SET"
+          Action: "android.intent.action.TIMEZONE_CHANGED"
+      android.intent.action.TIME_SET:
+        d33e8c0 com.example.pkmproject/androidx.work.impl.background.systemalarm.RescheduleReceiver filter 484c9f9
+          Action: "android.intent.action.BOOT_COMPLETED"
+          Action: "android.intent.action.TIME_SET"
+          Action: "android.intent.action.TIMEZONE_CHANGED"
+      androidx.profileinstaller.action.SKIP_FILE:
+        2b5bf4a com.example.pkmproject/androidx.profileinstaller.ProfileInstallReceiver filter 64e0fd8
+          Action: "androidx.profileinstaller.action.SKIP_FILE"
+      androidx.profileinstaller.action.BENCHMARK_OPERATION:
+        2b5bf4a com.example.pkmproject/androidx.profileinstaller.ProfileInstallReceiver filter 6188616
+          Action: "androidx.profileinstaller.action.BENCHMARK_OPERATION"
+      android.intent.action.BOOT_COMPLETED:
+        7d5648e com.example.pkmproject/.BootReceiver filter e5344af
+          Action: "android.intent.action.BOOT_COMPLETED"
+          Action: "android.intent.action.QUICKBOOT_POWERON"
+        d33e8c0 com.example.pkmproject/androidx.work.impl.background.systemalarm.RescheduleReceiver filter 484c9f9
+          Action: "android.intent.action.BOOT_COMPLETED"
+          Action: "android.intent.action.TIME_SET"
+          Action: "android.intent.action.TIMEZONE_CHANGED"
+      android.intent.action.ACTION_POWER_CONNECTED:
+        9e22ca8 com.example.pkmproject/androidx.work.impl.background.systemalarm.ConstraintProxy$BatteryChargingProxy filter d863c1
+          Action: "android.intent.action.ACTION_POWER_CONNECTED"
+          Action: "android.intent.action.ACTION_POWER_DISCONNECTED"
+      com.example.pkmproject.BLE_WAKE_UP:
+        6bbc0bc com.example.pkmproject/.BleWakeUpReceiver filter 128845
+          Action: "com.example.pkmproject.BLE_WAKE_UP"
+      androidx.work.diagnostics.REQUEST_DIAGNOSTICS:
+        bced0ec com.example.pkmproject/androidx.work.impl.diagnostics.DiagnosticsReceiver filter d3f0cb5
+          Action: "androidx.work.diagnostics.REQUEST_DIAGNOSTICS"
+      androidx.work.impl.background.systemalarm.UpdateProxies:
+        1aa0d3e com.example.pkmproject/androidx.work.impl.background.systemalarm.ConstraintProxyUpdateReceiver filter 164b79f
+          Action: "androidx.work.impl.background.systemalarm.UpdateProxies"
+
+Permissions:
+  Permission [com.example.pkmproject.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION] (c4ffb97):
+    sourcePackage=com.example.pkmproject
+    uid=10441 gids=null type=0 prot=signature
+    perm=Permission{4958044 com.example.pkmproject.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION}
+
+Registered ContentProviders:
+  com.example.pkmproject/androidx.startup.InitializationProvider:
+    Provider{954852d com.example.pkmproject/androidx.startup.InitializationProvider}
+
+ContentProvider Authorities:
+  [com.example.pkmproject.androidx-startup]:
+    Provider{954852d com.example.pkmproject/androidx.startup.InitializationProvider}
+      applicationInfo=ApplicationInfo{75e9a62 com.example.pkmproject}
+
+Key Set Manager:
+  [com.example.pkmproject]
+      Signing KeySets: 162
+
+Packages:
+  Package [com.example.pkmproject] (1dc7f3):
+    userId=10441
+    pkg=Package{88c5cb0 com.example.pkmproject}
+    codePath=/data/app/~~uNXP-BOike0B0v-7ndlI4g==/com.example.pkmproject-xoM5J9hKtKbwzAMxO5D21w==
+    resourcePath=/data/app/~~uNXP-BOike0B0v-7ndlI4g==/com.example.pkmproject-xoM5J9hKtKbwzAMxO5D21w==
+    legacyNativeLibraryDir=/data/app/~~uNXP-BOike0B0v-7ndlI4g==/com.example.pkmproject-xoM5J9hKtKbwzAMxO5D21w==/lib
+    primaryCpuAbi=arm64-v8a
+    secondaryCpuAbi=null
+    versionCode=1 minSdk=24 targetSdk=36
+    versionName=1.0.0
+    splits=[base]
+    apkSigningVersion=2
+    applicationInfo=ApplicationInfo{88c5cb0 com.example.pkmproject}
+    flags=[ HAS_CODE ALLOW_CLEAR_USER_DATA ALLOW_BACKUP ]
+    privateFlags=[ PRIVATE_FLAG_ACTIVITIES_RESIZE_MODE_RESIZEABLE_VIA_SDK_VERSION ALLOW_AUDIO_PLAYBACK_CAPTURE PARTIALLY_DIRECT_BOOT_AWARE PRIVATE_FLAG_ALLOW_NATIVE_HEAP_POINTER_TAGGING ]
+    forceQueryable=false
+    queriesPackages=[]
+    queriesIntents=[Intent { act=android.intent.action.PROCESS_TEXT dat=content://*/* typ=text/plain }]
+    dataDir=/data/user/0/com.example.pkmproject
+    supportsScreens=[small, medium, large, xlarge, resizeable, anyDensity]
+    usesOptionalLibraries:
+      androidx.window.extensions
+      androidx.window.sidecar
+    timeStamp=2026-01-06 19:49:19
+    firstInstallTime=2026-01-06 19:50:14
+    lastUpdateTime=2026-01-06 19:50:14
+    installerPackageName=com.whatsapp
+    signatures=PackageSignatures{8214729 version:2, signatures:[260f9e73], past signatures:[]}
+    installPermissionsFixed=true
+    pkgFlags=[ HAS_CODE ALLOW_CLEAR_USER_DATA ALLOW_BACKUP ]
+    declared permissions:
+      com.example.pkmproject.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION: prot=signature, INSTALLED
+    requested permissions:
+      android.permission.INTERNET
+      android.permission.ACCESS_NETWORK_STATE
+      android.permission.BLUETOOTH
+      android.permission.BLUETOOTH_ADMIN
+      android.permission.ACCESS_WIFI_STATE
+      android.permission.CHANGE_WIFI_STATE
+      android.permission.ACCESS_COARSE_LOCATION
+      android.permission.ACCESS_FINE_LOCATION
+      android.permission.BLUETOOTH_ADVERTISE
+      android.permission.BLUETOOTH_CONNECT
+      android.permission.BLUETOOTH_SCAN
+      android.permission.NEARBY_WIFI_DEVICES
+      android.permission.FOREGROUND_SERVICE
+      android.permission.WAKE_LOCK
+      android.permission.POST_NOTIFICATIONS
+      android.permission.RECEIVE_BOOT_COMPLETED
+      android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS
+      com.example.pkmproject.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION
+    install permissions:
+      android.permission.FOREGROUND_SERVICE: granted=true
+      android.permission.RECEIVE_BOOT_COMPLETED: granted=true
+      android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS: granted=true
+      android.permission.BLUETOOTH: granted=true
+      android.permission.INTERNET: granted=true
+      android.permission.BLUETOOTH_ADMIN: granted=true
+      com.example.pkmproject.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION: granted=true
+      android.permission.CHANGE_WIFI_STATE: granted=true
+      android.permission.ACCESS_NETWORK_STATE: granted=true
+      android.permission.ACCESS_WIFI_STATE: granted=true
+      android.permission.WAKE_LOCK: granted=true
+    User 0: ceDataInode=458829 installed=true hidden=false suspended=false distractionFlags=0 stopped=false notLaunched=false enabled=0 ofs=0 instant=false virtual=false
+    overlay paths:
+      /my_heytap/overlay/GmsConfigOverlayCommon/GmsConfigOverlayCommon.apk
+      /my_heytap/overlay/GmsConfigOverlayComms/GmsConfigOverlayComms.apk
+      /my_heytap/overlay/GmsConfigOverlayGSA/GmsConfigOverlayGSA.apk
+      /system/product/overlay/GoogleExtServicesConfigOverlay.apk
+      /system/product/overlay/GooglePermissionControllerFrameworkOverlay.apk
+      /system/product/overlay/ModuleMetadataGoogleOverlay.apk
+      /my_stock/overlay/OplusGmsConfigOverlayCommon/OplusGmsConfigOverlayCommon.apk
+      /system/product/overlay/FrameworksResCommon.apk
+      /system/product/overlay/FrameworksResCommonQva.apk
+      /my_product/overlay/framework_res_overlay.trinket.apk
+      /my_product/overlay/framework_res_overlay_Network.trinket.apk
+      /vendor/overlay/FrameworksResTarget.apk
+      /my_product/overlay/android_framework_res_overlay.display.product.19326.apk
+      lastDisabledCaller: com.whatsapp
+      gids=[3002, 3003, 3001]
+      runtime permissions:
+        android.permission.ACCESS_FINE_LOCATION: granted=true, flags=[ USER_SET|USER_SENSITIVE_WHEN_GRANTED|USER_SENSITIVE_WHEN_DENIED|524288]
+        android.permission.ACCESS_COARSE_LOCATION: granted=true, flags=[ USER_SET|USER_SENSITIVE_WHEN_GRANTED|USER_SENSITIVE_WHEN_DENIED]
+      disabledComponents:
+        androidx.work.impl.background.systemalarm.RescheduleReceiver
+      enabledComponents:
+        androidx.work.impl.background.systemjob.SystemJobService
+    User 999: ceDataInode=0 installed=false hidden=false suspended=false distractionFlags=0 stopped=true notLaunched=true enabled=0 ofs=0 instant=false virtual=false
+      gids=[3002, 3003, 3001]
+      runtime permissions:
+
+Queries:
+  system apps queryable: false
+  queries via package name:
+    com.example.pkmproject:
+      com.whatsapp
+  queries via intent:
+    com.heytap.themestore:
+      com.example.pkmproject
+    com.heytap.market:
+      com.example.pkmproject
+    com.nearme.gamecenter:
+      com.example.pkmproject
+    com.nearme.atlas:
+      com.example.pkmproject
+    com.facebook.katana:
+      com.example.pkmproject
+    com.mobile.legends:
+      com.example.pkmproject
+    com.whatsapp:
+      com.example.pkmproject
+    com.instagram.android:
+      com.example.pkmproject
+    com.gojek.app:
+      com.example.pkmproject
+    com.grabtaxi.passenger:
+      com.example.pkmproject
+    ovo.id:
+      com.example.pkmproject
+    com.gojek.gopay:
+      com.example.pkmproject
+    coin.ajaib.co.id:
+      com.example.pkmproject
+    us.zoom.videomeetings:
+      com.example.pkmproject
+    id.dana:
+      com.example.pkmproject
+    com.bd.bdant:
+      com.example.pkmproject
+    com.cloudflare.onedotonedotonedotone:
+      com.example.pkmproject
+    com.venom.wallet:
+      com.example.pkmproject
+    com.lemon.lvoverseas:
+      com.example.pkmproject
+    com.oceanwing.soundcore:
+      com.example.pkmproject
+    com.bstar.intl:
+      com.example.pkmproject
+    com.dois.greedgame:
+      com.example.pkmproject
+    com.google.android.play.games:
+      com.example.pkmproject
+    com.mobilechess.gp:
+      com.example.pkmproject
+    id.go.imigrasi.paspor_online:
+      com.example.pkmproject
+    app.source.getcontact:
+      com.example.pkmproject
+    com.roblox.client:
+      com.example.pkmproject
+    com.example.pkmproject:
+      com.google.android.googlequicksearchbox
+      com.opera.browser
+  queryable via interaction:
+    User 0:
+      [com.wapi.wapicertmanage,com.coloros.simsettings,com.android.inputdevices,com.qti.snapdragon.qdcm_ff,com.tencent.soter.soterserver,com.oppo.engineermode,com.oppo.oppopowermonitor,com.oplus.onetrace,com.oplus.customize.coreapp,com.oplus.postmanservice,com.coloros.notificationmanager,com.android.wallpaperbackup,com.oppo.qualityprotect,com.coloros.healthservice,com.android.localtransport,com.oppo.atlas,com.android.keychain,com.coloros.oppoguardelf,com.android.server.telecom,com.coloros.logkit,com.heytap.mcs,com.android.settings,com.coloros.sau,com.android.location.fused,com.oppo.engineermode.network,com.coloros.athena,com.coloros.deepthinker,com.android.dynsystem,com.android.providers.settings,com.qualcomm.qti.qtisystemservice,com.oppo.engineermode.camera,android,com.coloros.wirelesssettings,com.oplus.crashbox,com.coloros.securitypermission,oplus,com.coloros.sauhelper,com.oppo.lfeh,com.coloros.exsystemservice,com.oppo.multimedia.dolby,com.oppo.tzupdate,com.daemon.shelper,com.coloros.safecenter,com.heytap.appplatform,com.coloros.wifibackuprestore]:
+        com.example.pkmproject
+      com.google.android.permissioncontroller:
+        com.example.pkmproject
+      com.google.android.inputmethod.latin:
+        com.example.pkmproject
+      [com.google.android.gms,com.google.android.gsf]:
+        com.example.pkmproject
+      com.example.pkmproject:
+        [com.wapi.wapicertmanage,com.coloros.simsettings,com.android.inputdevices,com.qti.snapdragon.qdcm_ff,com.tencent.soter.soterserver,com.oppo.engineermode,com.oppo.oppopowermonitor,com.oplus.onetrace,com.oplus.customize.coreapp,com.oplus.postmanservice,com.coloros.notificationmanager,com.android.wallpaperbackup,com.oppo.qualityprotect,com.coloros.healthservice,com.android.localtransport,com.oppo.atlas,com.android.keychain,com.coloros.oppoguardelf,com.android.server.telecom,com.coloros.logkit,com.heytap.mcs,com.android.settings,com.coloros.sau,com.android.location.fused,com.oppo.engineermode.network,com.coloros.athena,com.coloros.deepthinker,com.android.dynsystem,com.android.providers.settings,com.qualcomm.qti.qtisystemservice,com.oppo.engineermode.camera,android,com.coloros.wirelesssettings,com.oplus.crashbox,com.coloros.securitypermission,oplus,com.coloros.sauhelper,com.oppo.lfeh,com.coloros.exsystemservice,com.oppo.multimedia.dolby,com.oppo.tzupdate,com.daemon.shelper,com.coloros.safecenter,com.heytap.appplatform,com.coloros.wifibackuprestore]
+    User 999:
+
+Package Changes:
+  Sequence number=2660
+  User 0:
+    seq=1, package=com.android.stk
+    seq=9, package=com.google.android.gms
+    seq=373, package=com.nearme.gamecenter
+    seq=374, package=com.oceanwing.soundcore
+    seq=375, package=com.intsig.camscanner
+    seq=376, package=org.telegram.messenger
+    seq=775, package=com.coloros.weather2
+    seq=776, package=com.android.shell
+    seq=1289, package=com.opera.browser
+    seq=1402, package=com.spotify.music
+    seq=1525, package=com.google.android.calendar
+    seq=1546, package=com.google.android.marvin.talkback
+    seq=1550, package=com.blitz.blitzandapp1
+    seq=1551, package=com.lemon.lvoverseas
+    seq=1885, package=com.google.android.apps.photos
+    seq=1911, package=com.linkedin.android
+    seq=2240, package=com.google.android.ext.services
+    seq=2602, package=com.twitter.android
+    seq=2649, package=com.google.android.apps.docs
+    seq=2653, package=com.facebook.appmanager
+    seq=2656, package=com.heytap.market
+    seq=2659, package=com.example.pkmproject
+  User 999:
+    seq=27, package=com.google.android.gms
+    seq=376, package=org.telegram.messenger
+    seq=2622, package=com.facebook.appmanager
+
+
+Dexopt state:
+  [com.example.pkmproject]
+    path: /data/app/~~uNXP-BOike0B0v-7ndlI4g==/com.example.pkmproject-xoM5J9hKtKbwzAMxO5D21w==/base.apk
+      arm64: [status=speed-profile] [reason=install]
+
+
+Compiler stats:
+  [com.example.pkmproject]
+     base.apk - 989
+
+APEX session state:
+  Session ID: 1008452421
+    State: SUCCESS
+  Session ID: 240068646
+    State: SUCCESS
+  Session ID: 1762132980
+    State: SUCCESS
+  Session ID: 1769097411
+    State: SUCCESS
+  Session ID: 21054229
+    State: SUCCESS
+  Session ID: 832548069
+    State: SUCCESS
+  Session ID: 6587888
+    State: SUCCESS
+  Session ID: 1122591806
+    State: SUCCESS
+  Session ID: 1836873140
+    State: SUCCESS
+  Session ID: 2099225552
+    State: SUCCESS
+  Session ID: 193089595
+    State: SUCCESS
+  Session ID: 1446824050
+    State: SUCCESS
+  Session ID: 530398377
+    State: SUCCESS
+  Session ID: 445095064
+    State: SUCCESS
+  Session ID: 700684377
+    State: SUCCESS
+  Session ID: 47232758
+    State: SUCCESS
+  Session ID: 1792432415
+    State: SUCCESS
+  Session ID: 1704042407
+    State: SUCCESS
+  Session ID: 57188923
+    State: SUCCESS
+  Session ID: 180921703
+    State: SUCCESS
+
+Active APEX packages:
+
+
+Inactive APEX packages:
+
+
+Factory APEX packages:
+
+
