@@ -47,6 +47,10 @@ class MainActivity : FlutterActivity() {
                         startMeshBackgroundService()
                         result.success(true)
                     }
+                    "requestSchedulerTick" -> {
+                        requestSchedulerTick()
+                        result.success(true)
+                    }
                     "stopBackgroundService" -> {
                         stopMeshBackgroundService()
                         result.success(true)
@@ -197,6 +201,22 @@ class MainActivity : FlutterActivity() {
             Log.d("MainActivity", "Background service stopped")
         } catch (e: Exception) {
             Log.e("MainActivity", "Error stopping background service: ${e.message}", e)
+        }
+    }
+
+    private fun requestSchedulerTick() {
+        try {
+            val intent = Intent(this, MeshBackgroundService::class.java).apply {
+                action = MeshBackgroundService.SCHEDULER_TICK_ACTION
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(intent)
+            } else {
+                startService(intent)
+            }
+            Log.d("MainActivity", "Scheduler tick requested")
+        } catch (e: Exception) {
+            Log.e("MainActivity", "Error requesting scheduler tick: ${e.message}", e)
         }
     }
 

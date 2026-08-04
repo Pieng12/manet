@@ -27,6 +27,8 @@ void main() {
 
   SOSMessage existingMessage({
     int? updatedAt,
+    int hopCount = 1,
+    SOSMessageStatus status = SOSMessageStatus.active,
     int relayCount = 0,
     int lastRelayedAt = 0,
     int? ackReceivedAt,
@@ -39,9 +41,10 @@ void main() {
       content: 'SOS',
       latitude: -6.2,
       longitude: 106.8,
-      status: SOSMessageStatus.active,
+      status: status,
       createdAt: updatedAt ?? now,
       updatedAt: updatedAt ?? now,
+      hopCount: hopCount,
       relayCount: relayCount,
       lastRelayedAt: lastRelayedAt,
       ackReceivedAt: ackReceivedAt,
@@ -72,6 +75,91 @@ void main() {
     expect(decision.shouldStore, false);
     expect(decision.shouldRelay, false);
     expect(decision.reason, ForwardingDecisionReason.dropDuplicate);
+  });
+
+  test('same timestamp and status with lower hop updates best hop', () {
+    const policy = ForwardingPolicy();
+
+    final decision = policy.decideSos(
+      packet: sosPacket(timestampMs: now, hopCount: 1),
+      nowMs: now,
+      existingMessage: existingMessage(updatedAt: now, hopCount: 4),
+    );
+
+    expect(decision.shouldStore, true);
+    expect(decision.reason, ForwardingDecisionReason.relayAccepted);
+    expect(decision.nextHopCount, 2);
+  });
+
+  test('status change on same second is not treated as duplicate', () {
+    const policy = ForwardingPolicy();
+
+    final decision = policy.decideSos(
+      packet: sosPacket(timestampMs: now, status: SOSMessageStatus.cancelled),
+      nowMs: now,
+      existingMessage: existingMessage(
+        updatedAt: now,
+        status: SOSMessageStatus.active,
+      ),
+    );
+
+    expect(decision.shouldStore, true);
+    expect(decision.reason, ForwardingDecisionReason.relayAccepted);
+  });
+
+  test('same identity still ignores BLE address and drops non-better hop', () {
+    const policy = ForwardingPolicy();
+
+    final decision = policy.decideSos(
+      packet: sosPacket(timestampMs: now, hopCount: 4),
+      nowMs: now,
+      existingMessage: existingMessage(updatedAt: now, hopCount: 2),
+    );
+
+    expect(decision.shouldStore, false);
+    expect(decision.reason, ForwardingDecisionReason.dropDuplicate);
+  });
+
+  test('invalid latitude longitude hop and future timestamp are rejected', () {
+    const policy = ForwardingPolicy();
+
+    final invalidLatitude = policy.decideSos(
+      packet: BlePacket(
+        kind: BlePacketKind.sos,
+        senderCrc: senderCrc,
+        timestampMs: now,
+        latitude: 91,
+        longitude: 106.8,
+        status: SOSMessageStatus.active,
+      ),
+      nowMs: now,
+    );
+    final invalidLongitude = policy.decideSos(
+      packet: BlePacket(
+        kind: BlePacketKind.sos,
+        senderCrc: senderCrc,
+        timestampMs: now,
+        latitude: -6.2,
+        longitude: 181,
+        status: SOSMessageStatus.active,
+      ),
+      nowMs: now,
+    );
+    final futureTimestamp = policy.decideSos(
+      packet: sosPacket(
+        timestampMs: now + MeshConfig.maxClockSkew.inMilliseconds + 1,
+      ),
+      nowMs: now,
+    );
+    final invalidHop = policy.decideSos(
+      packet: sosPacket(hopCount: MeshConfig.maxProtocolHop + 1),
+      nowMs: now,
+    );
+
+    expect(invalidLatitude.reason, ForwardingDecisionReason.dropInvalid);
+    expect(invalidLongitude.reason, ForwardingDecisionReason.dropInvalid);
+    expect(futureTimestamp.reason, ForwardingDecisionReason.dropInvalid);
+    expect(invalidHop.reason, ForwardingDecisionReason.dropInvalid);
   });
 
   test('expired packet is stored but not relayed', () {

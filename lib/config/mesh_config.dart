@@ -39,6 +39,7 @@ class MeshConfig {
   static const Duration relayJitterMin = Duration(milliseconds: 300);
   static const Duration relayJitterMax = Duration(milliseconds: 1500);
   static const Duration gatewayHealthTimeout = Duration(seconds: 5);
+  static const Duration maxClockSkew = Duration(minutes: 5);
   static const int gatewayHealthMaxRetry = 2;
 
   static const bool scanAllAdvertisements = false;

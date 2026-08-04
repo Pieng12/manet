@@ -51,10 +51,20 @@ CREATE TABLE relay_queue (
   next_eligible_at INTEGER NOT NULL DEFAULT 0,
   relay_count INTEGER NOT NULL DEFAULT 0,
   last_relayed_at INTEGER NOT NULL DEFAULT 0,
+  queue_state TEXT NOT NULL DEFAULT 'queued',
   payload_base64 TEXT NULL,
   UNIQUE(message_id, packet_type)
 );
 ''';
+
+const Map<String, String> relayQueueColumnDefinitions = {
+  'priority': 'INTEGER NOT NULL DEFAULT 0',
+  'next_eligible_at': 'INTEGER NOT NULL DEFAULT 0',
+  'relay_count': 'INTEGER NOT NULL DEFAULT 0',
+  'last_relayed_at': 'INTEGER NOT NULL DEFAULT 0',
+  'queue_state': "TEXT NOT NULL DEFAULT 'queued'",
+  'payload_base64': 'TEXT NULL',
+};
 
 const String createExperimentSessionsTableSql = '''
 CREATE TABLE experiment_sessions (

@@ -8,7 +8,7 @@ import 'package:pkmproject/database_schema.dart'; // Import our SQL schema
 import 'package:pkmproject/models/sos_message.dart'; // Import the SOSMessage model
 
 class DatabaseHelper {
-  static const int databaseVersion = 5;
+  static const int databaseVersion = 6;
 
   static final DatabaseHelper _instance = DatabaseHelper._internal();
   static Database? _database;
@@ -87,6 +87,7 @@ class DatabaseHelper {
         }
         await ensureSosMessageColumns(db);
         await ensureRelayQueueTable(db);
+        await ensureRelayQueueColumns(db);
         await ensureExperimentTables(db);
       },
     );
@@ -113,6 +114,11 @@ class DatabaseHelper {
     if (oldVersion < 5) {
       await ensureExperimentTables(db);
     }
+
+    if (oldVersion < 6) {
+      await ensureRelayQueueTable(db);
+      await ensureRelayQueueColumns(db);
+    }
   }
 
   static Future<void> ensureExperimentTables(Database db) async {
@@ -136,6 +142,17 @@ class DatabaseHelper {
     if (tables.isEmpty) {
       await db.execute(createRelayQueueTableSql);
     }
+    await ensureRelayQueueColumns(db);
+  }
+
+  static Future<void> ensureRelayQueueColumns(Database db) async {
+    final existingColumns = await _tableColumnNames(db, 'relay_queue');
+    for (final entry in relayQueueColumnDefinitions.entries) {
+      if (existingColumns.contains(entry.key)) continue;
+      await db.execute(
+        'ALTER TABLE relay_queue ADD COLUMN ${entry.key} ${entry.value}',
+      );
+    }
   }
 
   static Future<void> ensureSosMessageColumns(Database db) async {
@@ -149,7 +166,14 @@ class DatabaseHelper {
   }
 
   static Future<Set<String>> _sosMessageColumnNames(Database db) async {
-    final columns = await db.rawQuery('PRAGMA table_info(sos_messages)');
+    return _tableColumnNames(db, 'sos_messages');
+  }
+
+  static Future<Set<String>> _tableColumnNames(
+    Database db,
+    String tableName,
+  ) async {
+    final columns = await db.rawQuery('PRAGMA table_info($tableName)');
     return columns.map((column) => column['name'] as String).toSet();
   }
 
@@ -185,14 +209,31 @@ class DatabaseHelper {
 
   Future<List<SOSMessage>> getUnsyncedMessages() async {
     final db = await database;
+    final now = DateTime.now().millisecondsSinceEpoch;
     final List<Map<String, dynamic>> maps = await db.query(
       'sos_messages',
-      where: 'is_synced = ? AND expires_at > ? AND local_state != ?',
-      whereArgs: [0, DateTime.now().millisecondsSinceEpoch, 'expired'],
+      where:
+          'is_synced = ? AND expires_at > ? AND local_state NOT IN (?, ?, ?) '
+          'AND ack_received_at IS NULL AND from_server = ?',
+      whereArgs: [0, now, 'expired', 'acked', 'synced', 0],
     );
     return List.generate(maps.length, (i) {
       return SOSMessage.fromDbMap(maps[i]);
     });
+  }
+
+  Future<List<SOSMessage>> getGatewayUploadCandidates({int? nowMs}) async {
+    final db = await database;
+    final now = nowMs ?? DateTime.now().millisecondsSinceEpoch;
+    final maps = await db.query(
+      'sos_messages',
+      where:
+          'is_synced = ? AND ack_received_at IS NULL AND expires_at > ? '
+          'AND from_server = ? AND local_state NOT IN (?, ?, ?)',
+      whereArgs: [0, now, 0, 'expired', 'acked', 'synced'],
+      orderBy: 'updated_at DESC',
+    );
+    return maps.map(SOSMessage.fromDbMap).toList();
   }
 
   Future<int> updateSyncStatus(String uuid) async {
@@ -389,6 +430,30 @@ class DatabaseHelper {
   Future<void> replaceWithLatestMessage(SOSMessage message) async {
     final db = await database;
     await db.transaction((txn) async {
+      final existingRows = message.senderCrc != null
+          ? await txn.query(
+              'sos_messages',
+              columns: ['id'],
+              where: 'sender_id = ? OR sender_crc = ?',
+              whereArgs: [message.senderId, message.senderCrc],
+            )
+          : await txn.query(
+              'sos_messages',
+              columns: ['id'],
+              where: 'sender_id = ?',
+              whereArgs: [message.senderId],
+            );
+
+      for (final row in existingRows) {
+        final existingId = row['id'] as String?;
+        if (existingId == null || existingId == message.id) continue;
+        await txn.delete(
+          'relay_queue',
+          where: 'message_id = ?',
+          whereArgs: [existingId],
+        );
+      }
+
       // Delete any existing record that matches the sender_id or sender_crc
       if (message.senderCrc != null) {
         await txn.delete(

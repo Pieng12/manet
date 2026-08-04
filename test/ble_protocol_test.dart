@@ -299,6 +299,59 @@ void main() {
     expect(BlePacket.unpack(payload), isNull);
   });
 
+  test('rejects payload with invalid length', () {
+    expect(BlePacket.unpack(Uint8List(BlePacket.length + 1)), isNull);
+    expect(BlePacket.unpack(Uint8List(BlePacket.length - 1)), isNull);
+  });
+
+  test('rejects invalid coordinates and future timestamps', () {
+    final updatedAt = reference.millisecondsSinceEpoch;
+    final invalidLatitude = SOSMessage(
+      id: 'invalid-lat',
+      senderId: 'device-a',
+      senderCrc: crc32('device-a'),
+      content: 'SOS',
+      latitude: 91,
+      longitude: 106.8,
+      status: SOSMessageStatus.active,
+      createdAt: updatedAt,
+      updatedAt: updatedAt,
+    );
+    final invalidHop = SOSMessage(
+      id: 'invalid-hop',
+      senderId: 'device-a',
+      senderCrc: crc32('device-a'),
+      content: 'SOS',
+      latitude: -6.2,
+      longitude: 106.8,
+      status: SOSMessageStatus.active,
+      createdAt: updatedAt,
+      updatedAt: updatedAt,
+      hopCount: MeshConfig.maxProtocolHop + 1,
+    );
+    final futureMessage = SOSMessage(
+      id: 'future',
+      senderId: 'device-a',
+      senderCrc: crc32('device-a'),
+      content: 'SOS',
+      latitude: -6.2,
+      longitude: 106.8,
+      status: SOSMessageStatus.active,
+      createdAt: updatedAt + MeshConfig.maxClockSkew.inMilliseconds + 1000,
+      updatedAt: updatedAt + MeshConfig.maxClockSkew.inMilliseconds + 1000,
+    );
+
+    expect(() => BlePacket.packSos(invalidLatitude), throwsArgumentError);
+    expect(() => BlePacket.packSos(invalidHop), throwsRangeError);
+    expect(
+      BlePacket.unpack(
+        BlePacket.packSos(futureMessage),
+        referenceTime: reference,
+      ),
+      isNull,
+    );
+  });
+
   test('ACK timestamp rule keeps newer local messages alive', () {
     final localUpdatedAt = reference.add(const Duration(seconds: 10));
     final oldAck = reference;

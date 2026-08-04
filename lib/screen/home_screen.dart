@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:pkmproject/models/sos_message.dart';
 import 'package:pkmproject/services/ble_advertiser_service.dart';
 import 'package:pkmproject/services/ble_relay_service.dart';
+import 'package:pkmproject/services/background_service_manager.dart';
 import 'package:pkmproject/services/database_helper.dart';
 import 'package:pkmproject/services/experiment_logger.dart';
 import 'package:pkmproject/services/location_service.dart';
@@ -83,9 +84,13 @@ class _HomeScreenState extends State<HomeScreen>
     _dbHelper.initialize().catchError((e) {
       _log('Database init error: $e');
     });
-    _bleRelayService.start().catchError((e) {
-      _log('BLE relay start error: $e');
-    });
+    BackgroundServiceManager.startBackgroundService()
+        .then((_) {
+          return BackgroundServiceManager.requestSchedulerTick();
+        })
+        .catchError((e) {
+          _log('BLE relay command error: $e');
+        });
   }
 
   void _clearLogs() {
@@ -175,8 +180,7 @@ class _HomeScreenState extends State<HomeScreen>
       activeSOS.updatedAt = DateTime.now().millisecondsSinceEpoch;
       activeSOS.isSynced = 0;
 
-      await _dbHelper.replaceWithLatestMessage(activeSOS);
-      await _bleAdvertiserService.startAdvertising(sosMessage: activeSOS);
+      await _bleRelayService.activateForMessage(activeSOS);
       await WorkManagerService.registerSyncTask();
       await _syncService.initiateFullSync();
       _log('SOS cancellation broadcast via BLE.');
@@ -348,11 +352,13 @@ class _HomeScreenState extends State<HomeScreen>
   Future<void> _toggleBleRelay() async {
     try {
       if (_isBleScanningRunning || _isBleAdvertisingRunning) {
-        await _bleRelayService.stop();
+        await NativeBridgeService.stopBleWakeUpScan();
+        await BackgroundServiceManager.stopBackgroundService();
         _log('BLE relay stopped.');
         if (mounted) ResqFeedback.info(context, 'Relay BLE dihentikan.');
       } else {
-        await _bleRelayService.start();
+        await BackgroundServiceManager.startBackgroundService();
+        await BackgroundServiceManager.requestSchedulerTick();
         _log('BLE relay started.');
         if (mounted) {
           ResqFeedback.success(context, 'Relay BLE aktif memantau sekitar.');

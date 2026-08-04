@@ -8,6 +8,7 @@ import 'package:pkmproject/screen/permission_screen.dart';
 import 'package:pkmproject/screen/splash_screen.dart';
 import 'package:pkmproject/services/android_permission_service.dart';
 import 'package:pkmproject/services/background_service_manager.dart';
+import 'package:pkmproject/services/ble_advertiser_service.dart';
 import 'package:pkmproject/services/ble_relay_service.dart';
 import 'package:pkmproject/services/database_helper.dart';
 import 'package:pkmproject/services/demo_seed_service.dart';
@@ -63,8 +64,7 @@ Future<void> _initializeCoreServices() async {
     try {
       await BackgroundServiceManager.startBackgroundService();
       await BackgroundServiceManager.requestIgnoreBatteryOptimizations();
-      await BleRelayService().start();
-      await BleRelayService().recoverPersistedRelayState();
+      await BackgroundServiceManager.requestSchedulerTick();
     } catch (e) {
       debugPrint('[main] Background service init error: $e');
     }
@@ -159,6 +159,7 @@ void backgroundServiceMain() {
 
   const backgroundChannel = MethodChannel('com.example.pkmproject/mesh');
   final lastProcessedPayloads = <String, int>{};
+  BleAdvertiserService().claimSchedulerOwnership();
 
   DatabaseHelper().database.then((_) async {
     await SyncService().initializeIdentity();
@@ -188,6 +189,12 @@ void backgroundServiceMain() {
       case "recoverPersistedRelayState":
         debugPrint("[backgroundServiceMain] Recovering persisted relay state");
         await BleRelayService().recoverPersistedRelayState();
+        break;
+      case "schedulerTick":
+        debugPrint("[backgroundServiceMain] Scheduler tick requested");
+        await BleAdvertiserService().advertiseLatestOrStop(
+          preemptCurrent: true,
+        );
         break;
       case "blePayloadReceived":
         final args = Map<String, dynamic>.from(call.arguments as Map);

@@ -10,11 +10,15 @@ import 'package:uuid/uuid.dart';
 class ExperimentEventTypes {
   static const sosCreated = 'SOS_CREATED';
   static const bleAdvertiseRequested = 'BLE_ADVERTISE_REQUESTED';
+  static const bleAdvertiseStarted = 'BLE_ADVERTISE_STARTED';
+  static const bleAdvertiseFailed = 'BLE_ADVERTISE_FAILED';
   static const blePacketReceived = 'BLE_PACKET_RECEIVED';
   static const blePacketStored = 'BLE_PACKET_STORED';
   static const blePacketDuplicate = 'BLE_PACKET_DUPLICATE';
   static const bleRelayQueued = 'BLE_RELAY_QUEUED';
+  static const bleRelayStarted = 'BLE_RELAY_STARTED';
   static const bleRelayDropped = 'BLE_RELAY_DROPPED';
+  static const messageExpired = 'MESSAGE_EXPIRED';
   static const ackReceived = 'ACK_RECEIVED';
   static const ackAccepted = 'ACK_ACCEPTED';
   static const gatewayDetected = 'GATEWAY_DETECTED';

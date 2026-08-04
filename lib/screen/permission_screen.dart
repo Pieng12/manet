@@ -4,7 +4,6 @@ import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:pkmproject/services/android_permission_service.dart';
 import 'package:pkmproject/services/background_service_manager.dart';
-import 'package:pkmproject/services/ble_relay_service.dart';
 import 'package:pkmproject/widgets/resq_ui.dart';
 
 class PermissionScreen extends StatefulWidget {
@@ -116,7 +115,7 @@ class _PermissionScreenState extends State<PermissionScreen>
     try {
       await BackgroundServiceManager.startBackgroundService();
       await BackgroundServiceManager.requestIgnoreBatteryOptimizations();
-      await BleRelayService().start();
+      await BackgroundServiceManager.requestSchedulerTick();
     } catch (e) {
       debugPrint("Error starting rescue services after permission grant: $e");
       if (mounted) {

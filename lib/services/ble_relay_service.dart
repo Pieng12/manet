@@ -123,7 +123,11 @@ class BleRelayService {
     if (message.isExpired) {
       _log('Stored expired SOS ${message.id}; advertising skipped.');
     } else {
-      await _advertiser.startAdvertising(sosMessage: message);
+      await _advertiser.enqueueSosForAdvertising(
+        message,
+        nextEligibleAt: DateTime.now().millisecondsSinceEpoch,
+        preemptCurrent: true,
+      );
     }
     await WorkManagerService.registerSyncTask();
     await _tryGatewaySync();
@@ -213,7 +217,11 @@ class BleRelayService {
       return true;
     }
 
-    await _advertiser.startAdvertising(sosMessage: latest);
+    await _advertiser.enqueueSosForAdvertising(
+      latest,
+      nextEligibleAt: DateTime.now().millisecondsSinceEpoch,
+      preemptCurrent: true,
+    );
     _log(
       'ACK ignored for sender CRC $senderCrc because local message is newer',
     );
@@ -351,13 +359,14 @@ class BleRelayService {
     }
 
     message.hopCount = decision.nextHopCount ?? message.hopCount;
-    message.localState = decision.shouldRelay ? 'relayed' : message.localState;
-    if (decision.shouldRelay) {
-      message.lastRelayedAt = now;
-      message.relayCount = (existing?.relayCount ?? 0) + 1;
-    } else if (existing != null) {
+    if (decision.shouldRelay ||
+        decision.reason == ForwardingDecisionReason.dropCooldown) {
+      message.localState = 'queued';
+    }
+    if (existing != null) {
       message.relayCount = existing.relayCount;
       message.duplicateCount = existing.duplicateCount;
+      message.lastRelayedAt = existing.lastRelayedAt;
     }
 
     await _dbHelper.replaceWithLatestMessage(message);
@@ -372,6 +381,40 @@ class BleRelayService {
       detail: {'local_state': message.localState},
     );
     await WorkManagerService.registerSyncTask();
+
+    if (decision.reason == ForwardingDecisionReason.dropExpired) {
+      await _experimentLogger.logEvent(
+        eventType: ExperimentEventTypes.messageExpired,
+        deviceId: SyncService().deviceId,
+        messageId: message.id,
+        senderCrc: packet.senderCrc,
+        hopCount: packet.hopCount,
+        rssi: rssi,
+        payloadHash: packet.identity,
+      );
+    }
+
+    if (decision.reason == ForwardingDecisionReason.dropCooldown &&
+        decision.nextEligibleAt != null) {
+      await _relayQueue.enqueueSos(
+        message,
+        nextEligibleAt: decision.nextEligibleAt,
+      );
+      await _experimentLogger.logEvent(
+        eventType: ExperimentEventTypes.bleRelayQueued,
+        deviceId: SyncService().deviceId,
+        messageId: message.id,
+        senderCrc: message.senderCrc,
+        hopCount: message.hopCount,
+        rssi: rssi,
+        payloadHash: packet.identity,
+        detail: {'deferred': true, 'next_eligible_at': decision.nextEligibleAt},
+      );
+      await _advertiser.advertiseLatestOrStop();
+      _log('${decision.reason.code} ${packet.identity}');
+      await _tryGatewaySync();
+      return;
+    }
 
     if (!decision.shouldRelay) {
       await _experimentLogger.logEvent(
@@ -389,7 +432,10 @@ class BleRelayService {
       return;
     }
 
-    await _advertiser.startAdvertising(sosMessage: message);
+    await _relayQueue.enqueueSos(
+      message,
+      nextEligibleAt: _relayQueue.sosCooldownEligibleAt(now),
+    );
     await _experimentLogger.logEvent(
       eventType: ExperimentEventTypes.bleRelayQueued,
       deviceId: SyncService().deviceId,
@@ -399,6 +445,7 @@ class BleRelayService {
       rssi: rssi,
       payloadHash: packet.identity,
     );
+    await _advertiser.advertiseLatestOrStop();
     _log('${decision.reason.code} ${packet.identity} hop=${message.hopCount}');
     await _tryGatewaySync();
   }

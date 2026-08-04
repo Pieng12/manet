@@ -44,6 +44,9 @@ class BlePacket {
 
   static Uint8List packSos(SOSMessage message, {int? hopCount}) {
     final effectiveHopCount = hopCount ?? message.hopCount;
+    _validateHop(effectiveHopCount);
+    _validateCoordinateRange(message.latitude, -90.0, 90.0, 'latitude');
+    _validateCoordinateRange(message.longitude, -180.0, 180.0, 'longitude');
     final buffer = ByteData(length);
     _writeHeader(buffer);
     final senderCrc = message.senderCrc ?? crc32(message.senderId);
@@ -67,6 +70,7 @@ class BlePacket {
     bool fromServer = true,
     int hopCount = 0,
   }) {
+    _validateHop(hopCount);
     final buffer = ByteData(length);
     _writeHeader(buffer);
     buffer.setUint32(2, senderCrc & 0xFFFFFFFF, Endian.big);
@@ -83,7 +87,7 @@ class BlePacket {
   }
 
   static BlePacket? unpack(Uint8List payload, {DateTime? referenceTime}) {
-    if (payload.length < length) return null;
+    if (payload.length != length) return null;
 
     final buffer = ByteData.view(payload.buffer, payload.offsetInBytes, length);
     if (buffer.getUint8(0) != 0x52 || buffer.getUint8(1) != 0x4D) {
@@ -91,7 +95,14 @@ class BlePacket {
     }
 
     final senderCrc = buffer.getUint32(2, Endian.big);
-    final timestampMs = _readTimestamp(buffer, referenceTime: referenceTime);
+    final effectiveReferenceTime = referenceTime ?? DateTime.now();
+    final timestampMs = _readTimestamp(
+      buffer,
+      referenceTime: effectiveReferenceTime,
+    );
+    if (!_isTimestampPlausible(timestampMs, effectiveReferenceTime)) {
+      return null;
+    }
     final statusIndex = buffer.getUint8(15);
     if (statusIndex >= SOSMessageStatus.values.length) return null;
 
@@ -113,6 +124,10 @@ class BlePacket {
 
     final latitude = _readCoordinate(buffer, 9, -90.0, 10000.0);
     final longitude = _readCoordinate(buffer, 12, -180.0, 10000.0);
+    if (!_isCoordinateInRange(latitude, -90.0, 90.0) ||
+        !_isCoordinateInRange(longitude, -180.0, 180.0)) {
+      return null;
+    }
     return BlePacket(
       kind: BlePacketKind.sos,
       senderCrc: senderCrc,
@@ -128,6 +143,39 @@ class BlePacket {
   static void _writeHeader(ByteData buffer) {
     buffer.setUint8(0, 0x52);
     buffer.setUint8(1, 0x4D);
+  }
+
+  static void _validateHop(int hopCount) {
+    if (hopCount < 0 || hopCount > MeshConfig.maxProtocolHop) {
+      throw RangeError.range(
+        hopCount,
+        0,
+        MeshConfig.maxProtocolHop,
+        'hopCount',
+      );
+    }
+  }
+
+  static void _validateCoordinateRange(
+    double value,
+    double min,
+    double max,
+    String name,
+  ) {
+    if (!_isCoordinateInRange(value, min, max)) {
+      throw ArgumentError.value(value, name, 'must be between $min and $max');
+    }
+  }
+
+  static bool _isCoordinateInRange(double value, double min, double max) {
+    return value.isFinite && value >= min && value <= max;
+  }
+
+  static bool _isTimestampPlausible(int timestampMs, DateTime referenceTime) {
+    final maxFutureMs =
+        referenceTime.millisecondsSinceEpoch +
+        MeshConfig.maxClockSkew.inMilliseconds;
+    return timestampMs <= maxFutureMs;
   }
 
   static void _writeTimestamp(ByteData buffer, int timestampMs) {

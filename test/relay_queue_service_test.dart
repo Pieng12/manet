@@ -1,10 +1,13 @@
 import 'dart:convert';
+import 'dart:math';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pkmproject/config/mesh_config.dart';
 import 'package:pkmproject/database_schema.dart';
+import 'package:pkmproject/models/forwarding_decision.dart';
 import 'package:pkmproject/models/sos_message.dart';
 import 'package:pkmproject/services/ble_protocol.dart';
+import 'package:pkmproject/services/forwarding_policy.dart';
 import 'package:pkmproject/services/relay_queue_service.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
@@ -18,7 +21,7 @@ void main() {
     db = await databaseFactoryFfi.openDatabase(inMemoryDatabasePath);
     await db.execute(createSosMessagesTableSql);
     await db.execute(createRelayQueueTableSql);
-    queue = RelayQueueService(database: db);
+    queue = RelayQueueService(database: db, random: Random(1));
     now = DateTime.utc(2026, 8, 4, 12).millisecondsSinceEpoch;
   });
 
@@ -66,26 +69,126 @@ void main() {
     expect(selected.toSet(), {'a', 'b', 'c'});
   });
 
-  test('round robin returns oldest relayed item after slot cooldown', () async {
-    final messages = [message('a'), message('b'), message('c')];
-    for (final item in messages) {
-      await insertMessage(item);
-      await queue.enqueueSos(item);
-    }
+  test(
+    'round robin returns oldest relayed item after relay cooldown and jitter',
+    () async {
+      final messages = [message('a'), message('b'), message('c')];
+      for (final item in messages) {
+        await insertMessage(item);
+        await queue.enqueueSos(item);
+      }
 
-    final first = await queue.nextEligible(now);
-    await queue.markRelayed(first!, nowMs: now);
-    final second = await queue.nextEligible(now);
-    await queue.markRelayed(second!, nowMs: now + 1);
-    final third = await queue.nextEligible(now);
-    await queue.markRelayed(third!, nowMs: now + 2);
+      final first = await queue.nextEligible(now);
+      await queue.markRelayed(first!, nowMs: now);
+      final second = await queue.nextEligible(now);
+      await queue.markRelayed(second!, nowMs: now + 1);
+      final third = await queue.nextEligible(now);
+      await queue.markRelayed(third!, nowMs: now + 2);
 
-    final afterSlot = now + MeshConfig.relaySlotDuration.inMilliseconds;
-    final next = await queue.nextEligible(afterSlot);
+      final afterSlot = now + MeshConfig.relaySlotDuration.inMilliseconds;
+      expect(await queue.nextEligible(afterSlot), isNull);
 
-    expect(next, isNotNull);
-    expect(next!.messageId, first.messageId);
+      final afterCooldown =
+          now +
+          MeshConfig.relayCooldown.inMilliseconds +
+          MeshConfig.relayJitterMax.inMilliseconds +
+          1;
+      final next = await queue.nextEligible(afterCooldown);
+
+      expect(next, isNotNull);
+      expect(next!.messageId, first.messageId);
+    },
+  );
+
+  test('advertising start does not increment relay counters', () async {
+    final sos = message('stateful');
+    await insertMessage(sos);
+    await queue.enqueueSos(sos);
+
+    final item = await queue.nextEligible(now);
+    await queue.markAdvertisingStarted(item!, nowMs: now);
+
+    final queued = await queue.getItem(sos.id, 'sos');
+    final stored = SOSMessage.fromDbMap(
+      (await db.query(
+        'sos_messages',
+        where: 'id = ?',
+        whereArgs: [sos.id],
+      )).single,
+    );
+
+    expect(queued!.queueState, RelayQueueService.stateAdvertising);
+    expect(queued.relayCount, 0);
+    expect(stored.relayCount, 0);
+    expect(stored.lastRelayedAt, 0);
   });
+
+  test(
+    'advertising success increments queue and SOS counters with cooldown jitter',
+    () async {
+      final sos = message('success');
+      await insertMessage(sos);
+      await queue.enqueueSos(sos);
+
+      final item = await queue.nextEligible(now);
+      await queue.markAdvertisingStarted(item!, nowMs: now);
+      await queue.markAdvertisingSucceeded(item, nowMs: now);
+
+      final queued = await queue.getItem(sos.id, 'sos');
+      final stored = SOSMessage.fromDbMap(
+        (await db.query(
+          'sos_messages',
+          where: 'id = ?',
+          whereArgs: [sos.id],
+        )).single,
+      );
+
+      expect(queued!.queueState, RelayQueueService.stateRelayed);
+      expect(queued.relayCount, 1);
+      expect(stored.relayCount, 1);
+      expect(stored.lastRelayedAt, now);
+      expect(
+        queued.nextEligibleAt,
+        greaterThanOrEqualTo(
+          now +
+              MeshConfig.relayCooldown.inMilliseconds +
+              MeshConfig.relayJitterMin.inMilliseconds,
+        ),
+      );
+      expect(
+        queued.nextEligibleAt,
+        lessThanOrEqualTo(
+          now +
+              MeshConfig.relayCooldown.inMilliseconds +
+              MeshConfig.relayJitterMax.inMilliseconds,
+        ),
+      );
+    },
+  );
+
+  test(
+    'max relay count removes item after native success reaches limit',
+    () async {
+      final sos = message('max-relay')
+        ..relayCount = MeshConfig.maxRelayCount - 1;
+      await insertMessage(sos);
+      await queue.enqueueSos(sos);
+
+      final item = await queue.nextEligible(now);
+      await queue.markAdvertisingStarted(item!, nowMs: now);
+      await queue.markAdvertisingSucceeded(item, nowMs: now);
+
+      expect(await queue.getItem(sos.id, 'sos'), isNull);
+      final stored = SOSMessage.fromDbMap(
+        (await db.query(
+          'sos_messages',
+          where: 'id = ?',
+          whereArgs: [sos.id],
+        )).single,
+      );
+      expect(stored.relayCount, MeshConfig.maxRelayCount);
+    },
+  );
 
   test('ACK gets priority over SOS queue items', () async {
     final sos = message('sos-1');
@@ -157,6 +260,35 @@ void main() {
     await queue.enqueueSos(sos);
 
     expect(await queue.queueSize(), 1);
+  });
+
+  test('DROP_COOLDOWN decision is stored as deferred queue item', () async {
+    final sos = message('cooldown');
+    sos.lastRelayedAt = now - const Duration(seconds: 2).inMilliseconds;
+    await insertMessage(sos);
+
+    final packet = BlePacket(
+      kind: BlePacketKind.sos,
+      senderCrc: sos.senderCrc!,
+      timestampMs: sos.updatedAt + 1000,
+      latitude: sos.latitude,
+      longitude: sos.longitude,
+      status: sos.status,
+      hopCount: 0,
+    );
+    final decision = const ForwardingPolicy().decideSos(
+      packet: packet,
+      nowMs: now,
+      existingMessage: sos,
+    );
+
+    expect(decision.reason, ForwardingDecisionReason.dropCooldown);
+    await queue.enqueueSos(sos, nextEligibleAt: decision.nextEligibleAt);
+
+    final item = await queue.getItem(sos.id, 'sos');
+    expect(item, isNotNull);
+    expect(item!.nextEligibleAt, decision.nextEligibleAt);
+    expect(await queue.nextEligible(now), isNull);
   });
 
   test('queue state persists across service instances', () async {

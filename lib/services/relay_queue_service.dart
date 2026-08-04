@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math';
 
 import 'package:pkmproject/config/mesh_config.dart';
 import 'package:pkmproject/models/relay_queue_item.dart';
@@ -8,12 +9,32 @@ import 'package:pkmproject/services/database_helper.dart';
 import 'package:sqflite/sqflite.dart';
 
 class RelayQueueService {
-  RelayQueueService({Database? database, DatabaseHelper? databaseHelper})
-    : _database = database,
-      _databaseHelper = databaseHelper ?? DatabaseHelper();
+  RelayQueueService({
+    Database? database,
+    DatabaseHelper? databaseHelper,
+    Random? random,
+  }) : _database = database,
+       _databaseHelper = databaseHelper ?? DatabaseHelper(),
+       _random = random ?? Random();
 
   final Database? _database;
   final DatabaseHelper _databaseHelper;
+  final Random _random;
+
+  static const String stateQueued = 'queued';
+  static const String stateAdvertising = 'advertising';
+  static const String stateRelayed = 'relayed';
+  static const String stateFailed = 'failed';
+
+  int sosCooldownEligibleAt(int nowMs) {
+    final jitterRange =
+        MeshConfig.relayJitterMax.inMilliseconds -
+        MeshConfig.relayJitterMin.inMilliseconds;
+    final jitter =
+        MeshConfig.relayJitterMin.inMilliseconds +
+        (jitterRange <= 0 ? 0 : _random.nextInt(jitterRange + 1));
+    return nowMs + MeshConfig.relayCooldown.inMilliseconds + jitter;
+  }
 
   static String ackMessageId({
     required int senderCrc,
@@ -41,6 +62,9 @@ class RelayQueueService {
         packetType: 'sos',
         priority: priority,
         nextEligibleAt: nextEligibleAt ?? 0,
+        relayCount: message.relayCount,
+        lastRelayedAt: message.lastRelayedAt,
+        queueState: stateQueued,
       ),
     );
   }
@@ -57,6 +81,7 @@ class RelayQueueService {
         packetType: 'ack',
         priority: priority,
         nextEligibleAt: nextEligibleAt ?? 0,
+        queueState: stateQueued,
         payloadBase64: payloadBase64,
       ),
     );
@@ -65,11 +90,12 @@ class RelayQueueService {
   Future<RelayQueueItem?> nextEligible(int nowMs) async {
     await removeExpiredSos(nowMs);
     await removeExpiredAcks(nowMs);
+    await removeMaxRelayCountItems();
     final db = await _db;
     final rows = await db.query(
       'relay_queue',
-      where: 'next_eligible_at <= ?',
-      whereArgs: [nowMs],
+      where: 'next_eligible_at <= ? AND relay_count < ? AND queue_state != ?',
+      whereArgs: [nowMs, MeshConfig.maxRelayCount, 'disabled'],
       orderBy: 'priority DESC, relay_count ASC, last_relayed_at ASC, id ASC',
       limit: 1,
     );
@@ -89,7 +115,7 @@ class RelayQueueService {
     return RelayQueueItem.fromDbMap(rows.first);
   }
 
-  Future<void> markRelayed(
+  Future<void> markAdvertisingStarted(
     RelayQueueItem item, {
     required int nowMs,
     Duration slotDuration = MeshConfig.relaySlotDuration,
@@ -98,12 +124,105 @@ class RelayQueueService {
     await db.update(
       'relay_queue',
       {
-        'relay_count': item.relayCount + 1,
-        'last_relayed_at': nowMs,
+        'queue_state': stateAdvertising,
         'next_eligible_at': nowMs + slotDuration.inMilliseconds,
       },
       where: 'message_id = ? AND packet_type = ?',
       whereArgs: [item.messageId, item.packetType],
+    );
+  }
+
+  Future<void> markAdvertisingSucceeded(
+    RelayQueueItem item, {
+    required int nowMs,
+    Duration slotDuration = MeshConfig.relaySlotDuration,
+  }) async {
+    final db = await _db;
+    await db.transaction((txn) async {
+      final rows = await txn.query(
+        'relay_queue',
+        where: 'message_id = ? AND packet_type = ?',
+        whereArgs: [item.messageId, item.packetType],
+        limit: 1,
+      );
+      if (rows.isEmpty) return;
+
+      final current = RelayQueueItem.fromDbMap(rows.first);
+      final nextRelayCount = current.relayCount + 1;
+      final reachedLimit = nextRelayCount >= MeshConfig.maxRelayCount;
+      final nextEligibleAt = item.isSos
+          ? sosCooldownEligibleAt(nowMs)
+          : nowMs + slotDuration.inMilliseconds;
+
+      if (reachedLimit) {
+        await txn.delete(
+          'relay_queue',
+          where: 'message_id = ? AND packet_type = ?',
+          whereArgs: [item.messageId, item.packetType],
+        );
+      } else {
+        await txn.update(
+          'relay_queue',
+          {
+            'relay_count': nextRelayCount,
+            'last_relayed_at': nowMs,
+            'next_eligible_at': nextEligibleAt,
+            'queue_state': stateRelayed,
+          },
+          where: 'message_id = ? AND packet_type = ?',
+          whereArgs: [item.messageId, item.packetType],
+        );
+      }
+
+      if (item.isSos) {
+        await txn.rawUpdate(
+          '''
+UPDATE sos_messages
+SET relay_count = relay_count + 1,
+    last_relayed_at = ?,
+    local_state = CASE
+      WHEN local_state IN ('acked', 'synced', 'expired') THEN local_state
+      ELSE 'relayed'
+    END
+WHERE id = ?
+''',
+          [nowMs, item.messageId],
+        );
+      }
+    });
+    if (_database == null) {
+      await _databaseHelper.refreshMessages();
+    }
+  }
+
+  Future<void> markAdvertisingFailed(
+    RelayQueueItem item, {
+    required int nowMs,
+    Duration retryDelay = MeshConfig.relayCooldown,
+  }) async {
+    final db = await _db;
+    await db.update(
+      'relay_queue',
+      {
+        'queue_state': stateFailed,
+        'next_eligible_at': item.isSos
+            ? sosCooldownEligibleAt(nowMs)
+            : nowMs + retryDelay.inMilliseconds,
+      },
+      where: 'message_id = ? AND packet_type = ?',
+      whereArgs: [item.messageId, item.packetType],
+    );
+  }
+
+  Future<void> markRelayed(
+    RelayQueueItem item, {
+    required int nowMs,
+    Duration slotDuration = MeshConfig.relaySlotDuration,
+  }) {
+    return markAdvertisingSucceeded(
+      item,
+      nowMs: nowMs,
+      slotDuration: slotDuration,
     );
   }
 
@@ -127,6 +246,15 @@ class RelayQueueService {
 
   Future<int> removeExpiredSos(int nowMs) async {
     final db = await _db;
+    await db.rawUpdate(
+      '''
+UPDATE sos_messages
+SET local_state = 'expired'
+WHERE expires_at <= ?
+AND local_state NOT IN ('acked', 'synced', 'expired')
+''',
+      [nowMs],
+    );
     return db.rawDelete(
       '''
 DELETE FROM relay_queue
@@ -157,7 +285,10 @@ AND message_id IN (
 
       BlePacket? packet;
       try {
-        packet = BlePacket.unpack(base64Decode(payload));
+        packet = BlePacket.unpack(
+          base64Decode(payload),
+          referenceTime: DateTime.fromMillisecondsSinceEpoch(nowMs),
+        );
       } catch (_) {
         packet = null;
       }
@@ -168,6 +299,15 @@ AND message_id IN (
       }
     }
     return removed;
+  }
+
+  Future<int> removeMaxRelayCountItems() async {
+    final db = await _db;
+    return db.delete(
+      'relay_queue',
+      where: 'relay_count >= ?',
+      whereArgs: [MeshConfig.maxRelayCount],
+    );
   }
 
   Future<List<RelayQueueItem>> getAllItems() async {
@@ -208,6 +348,7 @@ AND message_id IN (
             ? item.priority
             : current.priority,
         'next_eligible_at': item.nextEligibleAt,
+        'queue_state': item.queueState,
         'payload_base64': item.payloadBase64 ?? current.payloadBase64,
       },
       where: 'message_id = ? AND packet_type = ?',

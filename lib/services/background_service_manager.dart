@@ -51,4 +51,12 @@ class BackgroundServiceManager {
       return false;
     }
   }
+
+  static Future<void> requestSchedulerTick() async {
+    try {
+      await platform.invokeMethod('requestSchedulerTick');
+    } catch (e) {
+      print('[BackgroundServiceManager] Error requesting scheduler tick: $e');
+    }
+  }
 }

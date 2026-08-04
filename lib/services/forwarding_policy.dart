@@ -27,6 +27,10 @@ class ForwardingPolicy {
     if (packet.isAck ||
         packet.latitude == null ||
         packet.longitude == null ||
+        !_isCoordinateValid(packet.latitude!, -90.0, 90.0) ||
+        !_isCoordinateValid(packet.longitude!, -180.0, 180.0) ||
+        packet.timestampMs > nowMs + MeshConfig.maxClockSkew.inMilliseconds ||
+        packet.hopCount < 0 ||
         packet.hopCount > MeshConfig.maxProtocolHop) {
       return const ForwardingDecision(
         shouldStore: false,
@@ -123,6 +127,17 @@ class ForwardingPolicy {
 
   bool _isDuplicateOrOlder(BlePacket packet, SOSMessage? message) {
     if (message == null) return false;
-    return message.updatedAt >= packet.timestampMs;
+    if (message.updatedAt > packet.timestampMs) return true;
+    if (message.updatedAt < packet.timestampMs) return false;
+    if (message.status != packet.status) return false;
+
+    final incomingBestHop = (packet.hopCount + 1).clamp(0, maxHop);
+    if (incomingBestHop < message.hopCount) return false;
+
+    return true;
+  }
+
+  bool _isCoordinateValid(double value, double min, double max) {
+    return value.isFinite && value >= min && value <= max;
   }
 }

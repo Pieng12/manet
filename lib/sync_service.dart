@@ -42,6 +42,40 @@ class SyncService {
   String _deviceId = 'device-${Uuid().v4().substring(0, 8)}';
   String get deviceId => _deviceId;
 
+  static bool isServerBackoffActive(DateTime? backoffUntil, DateTime now) {
+    return backoffUntil != null && now.isBefore(backoffUntil);
+  }
+
+  static DateTime? clearBackoffIfElapsed(DateTime? backoffUntil, DateTime now) {
+    if (backoffUntil == null || !now.isBefore(backoffUntil)) return null;
+    return backoffUntil;
+  }
+
+  static List<SOSMessage> filterGatewayUploadCandidates(
+    Iterable<SOSMessage> messages, {
+    required int nowMs,
+  }) {
+    final latestByDevice = <String, SOSMessage>{};
+    for (final message in messages) {
+      if (message.isSynced != 0 ||
+          message.ackReceivedAt != null ||
+          message.fromServer ||
+          message.expiresAt <= nowMs ||
+          message.localState == 'expired' ||
+          message.localState == 'acked' ||
+          message.localState == 'synced') {
+        continue;
+      }
+
+      final key = message.senderCrc?.toString() ?? message.senderId;
+      final existing = latestByDevice[key];
+      if (existing == null || message.updatedAt > existing.updatedAt) {
+        latestByDevice[key] = message;
+      }
+    }
+    return latestByDevice.values.toList();
+  }
+
   Future<void> initializeIdentity() async {
     try {
       final prefs = await SharedPreferences.getInstance();
@@ -90,17 +124,15 @@ class SyncService {
       return;
     }
 
-    final backoffUntil = _serverBackoffUntil;
-    if (backoffUntil != null && DateTime.now().isBefore(backoffUntil)) {
-      print('[SyncService] Full sync skipped: server backoff is active');
-      return;
+    final now = DateTime.now();
+    _serverBackoffUntil = clearBackoffIfElapsed(_serverBackoffUntil, now);
+    if (isServerBackoffActive(_serverBackoffUntil, now)) {
+      print('[SyncService] Upload skipped: server backoff is active');
     }
 
     print('[SyncService] Full sync initiated');
-    await _uploadLatestLocalStates();
-    if (_serverBackoffUntil != null) {
-      await _bleAdvertiser.advertiseLatestOrStop();
-      return;
+    if (_serverBackoffUntil == null) {
+      await _uploadLatestLocalStates();
     }
     await _downloadServerStates();
     await _bleAdvertiser.advertiseLatestOrStop();
@@ -109,19 +141,13 @@ class SyncService {
   }
 
   Future<void> _uploadLatestLocalStates() async {
-    final allLocalMessages = await _databaseHelper.getAllMessages();
+    final allLocalMessages = await _databaseHelper.getGatewayUploadCandidates();
     if (allLocalMessages.isEmpty) return;
 
-    final latestByDevice = <String, SOSMessage>{};
-    for (final message in allLocalMessages) {
-      final key = message.senderCrc?.toString() ?? message.senderId;
-      final existing = latestByDevice[key];
-      if (existing == null || message.updatedAt > existing.updatedAt) {
-        latestByDevice[key] = message;
-      }
-    }
-
-    final messagesToSync = latestByDevice.values.toList();
+    final messagesToSync = filterGatewayUploadCandidates(
+      allLocalMessages,
+      nowMs: DateTime.now().millisecondsSinceEpoch,
+    );
     if (messagesToSync.isEmpty) return;
 
     try {
@@ -134,6 +160,7 @@ class SyncService {
       final response = await ApiService.uploadData(
         messagesToSync.map((message) => message.toApiJson()).toList(),
       );
+      _serverBackoffUntil = null;
       gatewayUploadCompletedAt = DateTime.now().millisecondsSinceEpoch;
       await _experimentLogger.logEvent(
         eventType: ExperimentEventTypes.gatewayUploadSucceeded,
@@ -180,6 +207,7 @@ class SyncService {
 
     try {
       final response = await ApiService.downloadData(since);
+      _serverBackoffUntil = null;
 
       final ackData = _extractList(response['ack_data']);
       for (final rawAck in ackData) {
@@ -264,7 +292,11 @@ class SyncService {
       return;
     }
 
-    await _bleAdvertiser.startAdvertising(sosMessage: localMessage);
+    await _bleAdvertiser.enqueueSosForAdvertising(
+      localMessage,
+      nextEligibleAt: DateTime.now().millisecondsSinceEpoch,
+      preemptCurrent: true,
+    );
     print('[SyncService] Ignored older ACK for ${localMessage.id}');
   }
 

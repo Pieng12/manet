@@ -38,6 +38,7 @@ class MeshBackgroundService : Service() {
         const val CONNECTIVITY_CHANGED_ACTION = "com.example.pkmproject.CONNECTIVITY_CHANGED"
         const val BOOT_RECOVERY_ACTION = "com.example.pkmproject.BOOT_RECOVERY"
         const val TASK_REMOVED_RECOVERY_ACTION = "com.example.pkmproject.TASK_REMOVED_RECOVERY"
+        const val SCHEDULER_TICK_ACTION = "com.example.pkmproject.SCHEDULER_TICK"
         var serviceStarted = false
     }
 
@@ -106,6 +107,9 @@ class MeshBackgroundService : Service() {
                 BOOT_RECOVERY_ACTION, TASK_REMOVED_RECOVERY_ACTION -> {
                     NativeBleManager.startBleScan(this)
                     sendWakeUpToFlutter("recoverPersistedRelayState", null, null, 0)
+                }
+                SCHEDULER_TICK_ACTION -> {
+                    sendWakeUpToFlutter("schedulerTick", null, null, 0)
                 }
             }
         }
@@ -290,6 +294,10 @@ class MeshBackgroundService : Service() {
                         result.success(NativeBleManager.stopBleScan(this))
                     }
                     "startBackgroundService" -> {
+                        result.success(true)
+                    }
+                    "requestSchedulerTick" -> {
+                        sendWakeUpToFlutter("schedulerTick", null, null, 0)
                         result.success(true)
                     }
                     "requestIgnoreBatteryOptimizations" -> {
