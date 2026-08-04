@@ -2,6 +2,7 @@ import 'package:pkmproject/config/mesh_config.dart';
 import 'package:pkmproject/models/forwarding_decision.dart';
 import 'package:pkmproject/models/sos_message.dart';
 import 'package:pkmproject/services/ble_protocol.dart';
+import 'package:pkmproject/utils/sos_status_priority.dart';
 
 class ForwardingPolicy {
   const ForwardingPolicy({
@@ -42,7 +43,7 @@ class ForwardingPolicy {
       );
     }
 
-    if (_isAcked(existingMessage)) {
+    if (_isSuppressedByAck(existingMessage, packet)) {
       return const ForwardingDecision(
         shouldStore: false,
         shouldRelay: false,
@@ -78,6 +79,15 @@ class ForwardingPolicy {
       );
     }
 
+    if (_hasNewerTimestamp(packet, existingMessage)) {
+      return ForwardingDecision(
+        shouldStore: true,
+        shouldRelay: true,
+        reason: ForwardingDecisionReason.relayAccepted,
+        nextHopCount: nextHopCount,
+      );
+    }
+
     final lastRelayedAt = existingMessage?.lastRelayedAt ?? 0;
     final backoff = adaptiveBackoffForRelayCount(
       existingMessage?.relayCount ?? 0,
@@ -99,11 +109,21 @@ class ForwardingPolicy {
     );
   }
 
-  bool _isAcked(SOSMessage? message) {
+  bool _isSuppressedByAck(SOSMessage? message, BlePacket packet) {
     if (message == null) return false;
-    return message.localState == 'acked' ||
+    final hasAckState =
+        message.localState == 'acked' ||
         message.localState == 'synced' ||
         message.ackReceivedAt != null;
+    if (!hasAckState) return false;
+    final ackTimestamp = message.ackReceivedAt;
+    if (ackTimestamp == null) return false;
+    return ackTimestamp >= packet.timestampMs;
+  }
+
+  bool _hasNewerTimestamp(BlePacket packet, SOSMessage? message) {
+    if (message == null) return false;
+    return packet.timestampMs > message.updatedAt;
   }
 
   bool _isDuplicateOrOlder(BlePacket packet, SOSMessage? message) {
@@ -111,7 +131,8 @@ class ForwardingPolicy {
     if (message.updatedAt > packet.timestampMs) return true;
     if (message.updatedAt < packet.timestampMs) return false;
     if (message.status != packet.status) {
-      return _statusPriority(packet.status) <= _statusPriority(message.status);
+      return sosStatusPriority(packet.status) <=
+          sosStatusPriority(message.status);
     }
 
     final incomingBestHop = _saturateHop(packet.hopCount + 1);
@@ -140,13 +161,5 @@ class ForwardingPolicy {
 
   bool _isCoordinateValid(double value, double min, double max) {
     return value.isFinite && value >= min && value <= max;
-  }
-
-  int _statusPriority(SOSMessageStatus status) {
-    return switch (status) {
-      SOSMessageStatus.active => 0,
-      SOSMessageStatus.cancelled => 1,
-      SOSMessageStatus.resolved => 1,
-    };
   }
 }

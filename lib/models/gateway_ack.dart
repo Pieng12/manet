@@ -1,4 +1,5 @@
 import 'package:pkmproject/models/sos_message.dart';
+import 'package:pkmproject/utils/sos_status_priority.dart';
 
 class GatewayAck {
   final int senderCrc;
@@ -25,8 +26,8 @@ class GatewayAck {
     }
 
     final status = _statusFrom(json['status']);
-    if (status == SOSMessageStatus.active) {
-      throw const FormatException('ACK status ACTIVE is invalid');
+    if (!isValidAckStatus(status)) {
+      throw const FormatException('ACK status must be CANCELLED or RESOLVED');
     }
 
     return GatewayAck(
@@ -39,11 +40,14 @@ class GatewayAck {
   }
 
   static SOSMessageStatus _statusFrom(dynamic value) {
-    final raw = value?.toString().toUpperCase() ?? 'RESOLVED';
-    return SOSMessageStatus.values.firstWhere(
-      (status) => status.name.toUpperCase() == raw,
-      orElse: () => SOSMessageStatus.resolved,
-    );
+    final raw = value?.toString().trim().toUpperCase();
+    if (raw == null || raw.isEmpty) {
+      throw const FormatException('ACK status is required');
+    }
+    for (final status in SOSMessageStatus.values) {
+      if (status.name.toUpperCase() == raw) return status;
+    }
+    throw FormatException('Unknown ACK status: $raw');
   }
 
   static int? _intFrom(dynamic value) {

@@ -6,6 +6,7 @@ import 'package:pkmproject/models/relay_queue_item.dart';
 import 'package:pkmproject/models/sos_message.dart';
 import 'package:pkmproject/services/ble_protocol.dart';
 import 'package:pkmproject/services/database_helper.dart';
+import 'package:pkmproject/utils/sos_status_priority.dart';
 import 'package:sqflite/sqflite.dart';
 
 class RelayQueueService {
@@ -98,37 +99,128 @@ class RelayQueueService {
         packet.status == SOSMessageStatus.active) {
       return 0;
     }
-
-    final stored = await DatabaseHelper.upsertAckTombstoneInDb(
-      db,
-      senderCrc: packet.senderCrc,
-      ackTimestampMs: packet.timestampMs,
-      status: packet.status,
-      payloadBase64: payloadBase64,
-    );
-    if (!stored) return 0;
+    final ackPacket = packet;
 
     final compactMessageId = ackMessageId(
-      senderCrc: packet.senderCrc,
-      ackTimestampMs: packet.timestampMs,
-      statusIndex: packet.status.index,
+      senderCrc: ackPacket.senderCrc,
+      ackTimestampMs: ackPacket.timestampMs,
+      statusIndex: ackPacket.status.index,
     );
-    await db.delete(
-      'relay_queue',
-      where: "packet_type = 'ack' AND message_id LIKE ? AND message_id != ?",
-      whereArgs: ['ack-${packet.senderCrc}%', compactMessageId],
-    );
+    final now = DateTime.now().millisecondsSinceEpoch;
 
-    return _upsert(
-      RelayQueueItem(
-        messageId: compactMessageId,
-        packetType: 'ack',
-        priority: priority,
-        nextEligibleAt: nextEligibleAt ?? 0,
-        queueState: stateQueued,
+    return db.transaction((txn) async {
+      final existingTombstone = await txn.query(
+        'ack_tombstones',
+        where: 'sender_crc = ?',
+        whereArgs: [ackPacket.senderCrc],
+        limit: 1,
+      );
+      final replacesPrevious = _incomingAckReplacesTombstone(
+        existingTombstone.isEmpty ? null : existingTombstone.first,
+        ackPacket,
+      );
+      final stored = await DatabaseHelper.upsertAckTombstoneInDb(
+        txn,
+        senderCrc: ackPacket.senderCrc,
+        ackTimestampMs: ackPacket.timestampMs,
+        status: ackPacket.status,
         payloadBase64: payloadBase64,
-      ),
-    );
+      );
+      if (!stored) return 0;
+
+      await _compactAckQueueInExecutor(
+        txn,
+        senderCrc: ackPacket.senderCrc,
+        compactMessageId: compactMessageId,
+      );
+
+      return _upsertInExecutor(
+        txn,
+        RelayQueueItem(
+          messageId: compactMessageId,
+          packetType: 'ack',
+          priority: priority,
+          nextEligibleAt: nextEligibleAt ?? (replacesPrevious ? now : 0),
+          queueState: stateQueued,
+          payloadBase64: payloadBase64,
+        ),
+        resetMetrics: replacesPrevious,
+      );
+    });
+  }
+
+  Future<int> recoverAckQueueFromTombstones({int? nowMs}) async {
+    final db = await _db;
+    final now = nowMs ?? DateTime.now().millisecondsSinceEpoch;
+    return db.transaction((txn) async {
+      final tombstones = await txn.query('ack_tombstones');
+      var restored = 0;
+      for (final tombstone in tombstones) {
+        final senderCrc = tombstone['sender_crc'] as int?;
+        final ackTimestampMs = tombstone['ack_timestamp_ms'] as int?;
+        final statusIndex = tombstone['status'] as int?;
+        if (senderCrc == null ||
+            ackTimestampMs == null ||
+            statusIndex == null ||
+            statusIndex < 0 ||
+            statusIndex >= SOSMessageStatus.values.length) {
+          continue;
+        }
+        final status = SOSMessageStatus.values[statusIndex];
+        if (!isValidAckStatus(status)) continue;
+
+        final payloadBase64 = _payloadForTombstone(
+          tombstone,
+          senderCrc: senderCrc,
+          ackTimestampMs: ackTimestampMs,
+          status: status,
+        );
+        final compactMessageId = ackMessageId(
+          senderCrc: senderCrc,
+          ackTimestampMs: ackTimestampMs,
+          statusIndex: status.index,
+        );
+        await _compactAckQueueInExecutor(
+          txn,
+          senderCrc: senderCrc,
+          compactMessageId: compactMessageId,
+        );
+
+        final existing = await txn.query(
+          'relay_queue',
+          where: 'message_id = ? AND packet_type = ?',
+          whereArgs: [compactMessageId, 'ack'],
+          limit: 1,
+        );
+        final existingPayload = existing.isEmpty
+            ? null
+            : existing.first['payload_base64'] as String?;
+        if (existing.isNotEmpty &&
+            _isAckPayloadMatching(
+              existingPayload,
+              senderCrc: senderCrc,
+              ackTimestampMs: ackTimestampMs,
+              status: status,
+            )) {
+          continue;
+        }
+
+        await _upsertInExecutor(
+          txn,
+          RelayQueueItem(
+            messageId: compactMessageId,
+            packetType: 'ack',
+            priority: 100,
+            nextEligibleAt: now,
+            queueState: stateQueued,
+            payloadBase64: payloadBase64,
+          ),
+          resetMetrics: existing.isEmpty,
+        );
+        restored++;
+      }
+      return restored;
+    });
   }
 
   Future<RelayQueueItem?> nextEligible(int nowMs) async {
@@ -333,6 +425,14 @@ WHERE id = ?
 
   Future<int> _upsert(RelayQueueItem item) async {
     final db = await _db;
+    return _upsertInExecutor(db, item);
+  }
+
+  Future<int> _upsertInExecutor(
+    DatabaseExecutor db,
+    RelayQueueItem item, {
+    bool resetMetrics = false,
+  }) async {
     final existing = await db.query(
       'relay_queue',
       where: 'message_id = ? AND packet_type = ?',
@@ -365,10 +465,91 @@ WHERE id = ?
         'next_eligible_at': item.nextEligibleAt,
         'queue_state': item.queueState,
         'payload_base64': item.payloadBase64 ?? current.payloadBase64,
+        if (resetMetrics) 'relay_count': 0,
+        if (resetMetrics) 'last_relayed_at': 0,
       },
       where: 'message_id = ? AND packet_type = ?',
       whereArgs: [item.messageId, item.packetType],
     );
+  }
+
+  Future<void> _compactAckQueueInExecutor(
+    DatabaseExecutor db, {
+    required int senderCrc,
+    required String compactMessageId,
+  }) async {
+    await db.delete(
+      'relay_queue',
+      where:
+          "packet_type = 'ack' AND message_id != ? AND "
+          "(message_id = ? OR message_id LIKE ?)",
+      whereArgs: [compactMessageId, 'ack-$senderCrc', 'ack-$senderCrc-%'],
+    );
+  }
+
+  bool _incomingAckReplacesTombstone(
+    Map<String, dynamic>? existing,
+    BlePacket incoming,
+  ) {
+    if (existing == null) return true;
+    final existingTimestamp = existing['ack_timestamp_ms'] as int? ?? 0;
+    if (incoming.timestampMs > existingTimestamp) return true;
+    if (incoming.timestampMs < existingTimestamp) return false;
+
+    final existingStatusIndex = existing['status'] as int? ?? -1;
+    final existingStatus =
+        existingStatusIndex >= 0 &&
+            existingStatusIndex < SOSMessageStatus.values.length
+        ? SOSMessageStatus.values[existingStatusIndex]
+        : SOSMessageStatus.cancelled;
+    return sosStatusPriority(incoming.status) >
+        sosStatusPriority(existingStatus);
+  }
+
+  String _payloadForTombstone(
+    Map<String, dynamic> tombstone, {
+    required int senderCrc,
+    required int ackTimestampMs,
+    required SOSMessageStatus status,
+  }) {
+    final payloadBase64 = tombstone['payload_base64'] as String?;
+    if (_isAckPayloadMatching(
+      payloadBase64,
+      senderCrc: senderCrc,
+      ackTimestampMs: ackTimestampMs,
+      status: status,
+    )) {
+      return payloadBase64!;
+    }
+    return base64Encode(
+      BlePacket.packAck(
+        senderCrc: senderCrc,
+        ackTimestampMs: ackTimestampMs,
+        status: status,
+      ),
+    );
+  }
+
+  bool _isAckPayloadMatching(
+    String? payloadBase64, {
+    required int senderCrc,
+    required int ackTimestampMs,
+    required SOSMessageStatus status,
+  }) {
+    if (payloadBase64 == null) return false;
+    try {
+      final packet = BlePacket.unpack(
+        base64Decode(payloadBase64),
+        referenceTime: DateTime.fromMillisecondsSinceEpoch(ackTimestampMs),
+      );
+      return packet != null &&
+          packet.isAck &&
+          packet.senderCrc == senderCrc &&
+          packet.timestampMs == ackTimestampMs &&
+          packet.status == status;
+    } catch (_) {
+      return false;
+    }
   }
 
   int? _ackTimestampFromPayload(String? payloadBase64) {

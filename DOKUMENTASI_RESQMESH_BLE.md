@@ -186,6 +186,11 @@ Saat SOS diterima, tombstone dicek sebelum pesan disimpan atau masuk relay. Jika
 di-relay. SOS dengan timestamp yang lebih baru dari tombstone tetap diterima
 sebagai state baru.
 
+Saat startup atau recovery service, `RelayQueueService` membaca seluruh
+`ack_tombstones` dan membangun ulang ACK queue item yang hilang. Untuk state
+lokal, timestamp dibuat monotonic per sender pada resolusi detik agar state baru
+tidak memakai timestamp BLE yang sama dengan ACK atau state sebelumnya.
+
 ## Database Lokal
 
 Skema saat ini mencakup:

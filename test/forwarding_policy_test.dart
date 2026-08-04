@@ -225,10 +225,11 @@ void main() {
     final lastRelayedAt = now - const Duration(seconds: 2).inMilliseconds;
 
     final decision = policy.decideSos(
-      packet: sosPacket(timestampMs: now + 1000),
+      packet: sosPacket(timestampMs: now, hopCount: 0),
       nowMs: now,
       existingMessage: existingMessage(
-        updatedAt: now - 1000,
+        updatedAt: now,
+        hopCount: 3,
         lastRelayedAt: lastRelayedAt,
       ),
     );
@@ -242,15 +243,15 @@ void main() {
     );
   });
 
-  test('acked local message suppresses relay', () {
+  test('acked local message suppresses older SOS', () {
     const policy = ForwardingPolicy();
 
     final decision = policy.decideSos(
-      packet: sosPacket(timestampMs: now + 1000),
+      packet: sosPacket(timestampMs: now),
       nowMs: now,
       existingMessage: existingMessage(
-        updatedAt: now - 1000,
-        ackReceivedAt: now - 500,
+        updatedAt: now,
+        ackReceivedAt: now,
         localState: 'acked',
       ),
     );
@@ -258,6 +259,59 @@ void main() {
     expect(decision.shouldStore, false);
     expect(decision.shouldRelay, false);
     expect(decision.reason, ForwardingDecisionReason.dropAcked);
+  });
+
+  test('old SOS ACKed then newer SOS is accepted', () {
+    const policy = ForwardingPolicy();
+
+    final decision = policy.decideSos(
+      packet: sosPacket(timestampMs: now + 1000),
+      nowMs: now + 1000,
+      existingMessage: existingMessage(
+        updatedAt: now,
+        ackReceivedAt: now,
+        localState: 'acked',
+      ),
+    );
+
+    expect(decision.shouldStore, true);
+    expect(decision.shouldRelay, true);
+    expect(decision.reason, ForwardingDecisionReason.relayAccepted);
+  });
+
+  test('newer ACTIVE bypasses old backoff', () {
+    const policy = ForwardingPolicy();
+
+    final decision = policy.decideSos(
+      packet: sosPacket(timestampMs: now + 2000),
+      nowMs: now + 2000,
+      existingMessage: existingMessage(
+        updatedAt: now,
+        lastRelayedAt: now + 1000,
+        relayCount: 5,
+      ),
+    );
+
+    expect(decision.shouldStore, true);
+    expect(decision.shouldRelay, true);
+    expect(decision.nextEligibleAt, isNull);
+    expect(decision.reason, ForwardingDecisionReason.relayAccepted);
+  });
+
+  test('RESOLVED wins over CANCELLED at the same timestamp', () {
+    const policy = ForwardingPolicy();
+
+    final decision = policy.decideSos(
+      packet: sosPacket(timestampMs: now, status: SOSMessageStatus.resolved),
+      nowMs: now,
+      existingMessage: existingMessage(
+        updatedAt: now,
+        status: SOSMessageStatus.cancelled,
+      ),
+    );
+
+    expect(decision.shouldStore, true);
+    expect(decision.reason, ForwardingDecisionReason.relayAccepted);
   });
 
   test('own packet is dropped', () {

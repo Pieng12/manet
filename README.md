@@ -114,7 +114,12 @@ ACK valid disimpan sebagai tombstone persisten terbaru per `sender_crc` dan
 disebarkan kembali lewat BLE sebagai persistent anti-message. ACK tidak memakai
 hard hop limit atau TTL 2 menit, tetap diprioritaskan di queue, dikompaksi agar
 hanya ACK terbaru per sender yang aktif, dan menghentikan SOS saat
-`ack_timestamp >= sos_timestamp`. ACK dengan status `ACTIVE` ditolak.
+`ack_timestamp >= sos_timestamp`. Saat startup, tombstone dipakai untuk
+membangun ulang ACK queue yang hilang. ACK dengan status selain `CANCELLED` atau
+`RESOLVED` ditolak.
+
+State lokal baru dibuat monotonic per sender pada resolusi detik, sehingga SOS
+baru tidak memakai timestamp BLE yang sama dengan ACK atau state sebelumnya.
 
 ## Format Payload 17 Byte
 

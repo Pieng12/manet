@@ -6,6 +6,7 @@ import 'package:path/path.dart';
 import 'package:pkmproject/config/mesh_config.dart';
 import 'package:pkmproject/database_schema.dart'; // Import our SQL schema
 import 'package:pkmproject/models/sos_message.dart'; // Import the SOSMessage model
+import 'package:pkmproject/utils/sos_status_priority.dart';
 
 class DatabaseHelper {
   static const int databaseVersion = 7;
@@ -313,13 +314,13 @@ class DatabaseHelper {
   }
 
   static Future<bool> upsertAckTombstoneInDb(
-    Database db, {
+    DatabaseExecutor db, {
     required int senderCrc,
     required int ackTimestampMs,
     required SOSMessageStatus status,
     String? payloadBase64,
   }) async {
-    if (status == SOSMessageStatus.active) return false;
+    if (!isValidAckStatus(status)) return false;
 
     final existing = await db.query(
       'ack_tombstones',
@@ -328,16 +329,33 @@ class DatabaseHelper {
       limit: 1,
     );
 
+    String? payloadToStore = payloadBase64;
     if (existing.isNotEmpty) {
-      final existingTimestamp = existing.first['ack_timestamp_ms'] as int? ?? 0;
+      final existingRow = existing.first;
+      final existingTimestamp = existingRow['ack_timestamp_ms'] as int? ?? 0;
+      final existingStatusIndex = existingRow['status'] as int? ?? -1;
+      final existingStatus =
+          existingStatusIndex >= 0 &&
+              existingStatusIndex < SOSMessageStatus.values.length
+          ? SOSMessageStatus.values[existingStatusIndex]
+          : SOSMessageStatus.cancelled;
       if (existingTimestamp > ackTimestampMs) return false;
+      if (existingTimestamp == ackTimestampMs &&
+          sosStatusPriority(existingStatus) > sosStatusPriority(status)) {
+        return false;
+      }
+      if (payloadToStore == null &&
+          existingTimestamp == ackTimestampMs &&
+          existingStatus == status) {
+        payloadToStore = existingRow['payload_base64'] as String?;
+      }
     }
 
     await db.insert('ack_tombstones', {
       'sender_crc': senderCrc,
       'ack_timestamp_ms': ackTimestampMs,
       'status': status.index,
-      'payload_base64': payloadBase64,
+      'payload_base64': payloadToStore,
       'updated_at': DateTime.now().millisecondsSinceEpoch,
     }, conflictAlgorithm: ConflictAlgorithm.replace);
     return true;
@@ -349,7 +367,7 @@ class DatabaseHelper {
   }
 
   static Future<int?> latestAckTimestampForSenderCrcInDb(
-    Database db,
+    DatabaseExecutor db,
     int senderCrc,
   ) async {
     final rows = await db.query(
@@ -376,7 +394,7 @@ class DatabaseHelper {
   }
 
   static Future<bool> isSuppressedByAckTombstoneInDb(
-    Database db, {
+    DatabaseExecutor db, {
     required int senderCrc,
     required int sosTimestampMs,
   }) async {
@@ -385,6 +403,66 @@ class DatabaseHelper {
       senderCrc,
     );
     return ackTimestamp != null && ackTimestamp >= sosTimestampMs;
+  }
+
+  Future<void> ensureMonotonicStateTimestamp(SOSMessage message) async {
+    final db = await database;
+    await ensureMonotonicStateTimestampInDb(db, message);
+  }
+
+  static Future<void> ensureMonotonicStateTimestampInDb(
+    DatabaseExecutor db,
+    SOSMessage message,
+  ) async {
+    final latestTimestamp = await _latestTimestampForSenderInDb(db, message);
+    if (latestTimestamp == null) return;
+
+    final latestSecond = latestTimestamp ~/ 1000;
+    if (message.updatedAt ~/ 1000 > latestSecond) return;
+
+    final originalUpdatedAt = message.updatedAt;
+    message.updatedAt = (latestSecond + 1) * 1000;
+    if (message.createdAt == originalUpdatedAt) {
+      message.createdAt = message.updatedAt;
+    }
+  }
+
+  static Future<int?> _latestTimestampForSenderInDb(
+    DatabaseExecutor db,
+    SOSMessage message,
+  ) async {
+    int? latest;
+    final existingRows = message.senderCrc != null
+        ? await db.query(
+            'sos_messages',
+            columns: ['updated_at'],
+            where: 'sender_id = ? OR sender_crc = ?',
+            whereArgs: [message.senderId, message.senderCrc],
+            orderBy: 'updated_at DESC',
+            limit: 1,
+          )
+        : await db.query(
+            'sos_messages',
+            columns: ['updated_at'],
+            where: 'sender_id = ?',
+            whereArgs: [message.senderId],
+            orderBy: 'updated_at DESC',
+            limit: 1,
+          );
+    if (existingRows.isNotEmpty) {
+      latest = existingRows.first['updated_at'] as int?;
+    }
+
+    if (message.senderCrc != null) {
+      final ackTimestamp = await latestAckTimestampForSenderCrcInDb(
+        db,
+        message.senderCrc!,
+      );
+      if (ackTimestamp != null && (latest == null || ackTimestamp > latest)) {
+        latest = ackTimestamp;
+      }
+    }
+    return latest;
   }
 
   Future<int> upsertMessage(SOSMessage message) async {
@@ -459,21 +537,17 @@ class DatabaseHelper {
         'sos_messages',
         where: 'sender_id = ? OR sender_crc = ?',
         whereArgs: [senderId, senderCrc],
-        orderBy: 'updated_at DESC',
-        limit: 1,
       );
     } else {
       maps = await db.query(
         'sos_messages',
         where: 'sender_id = ?',
         whereArgs: [senderId],
-        orderBy: 'updated_at DESC',
-        limit: 1,
       );
     }
 
     if (maps.isEmpty) return null;
-    return SOSMessage.fromDbMap(maps.first);
+    return maps.map(SOSMessage.fromDbMap).reduce(_newerMessage);
   }
 
   Future<SOSMessage?> getMessageById(String messageId) async {
@@ -526,9 +600,12 @@ class DatabaseHelper {
 
     final latestExisting = existingMessages
         .map((m) => SOSMessage.fromDbMap(m))
-        .reduce((a, b) => a.updatedAt > b.updatedAt ? a : b);
+        .reduce(_newerMessage);
 
-    return incomingMessage.updatedAt > latestExisting.updatedAt;
+    return incomingMessage.updatedAt > latestExisting.updatedAt ||
+        (incomingMessage.updatedAt == latestExisting.updatedAt &&
+            sosStatusPriority(incomingMessage.status) >
+                sosStatusPriority(latestExisting.status));
   }
 
   Future<void> replaceWithLatestMessage(SOSMessage message) async {
@@ -569,8 +646,8 @@ class DatabaseHelper {
         if (latestExisting == null ||
             candidate.updatedAt > latestExisting.updatedAt ||
             (candidate.updatedAt == latestExisting.updatedAt &&
-                _statusPriority(candidate.status) >
-                    _statusPriority(latestExisting.status))) {
+                sosStatusPriority(candidate.status) >
+                    sosStatusPriority(latestExisting.status))) {
           latestExisting = candidate;
         }
       }
@@ -578,15 +655,15 @@ class DatabaseHelper {
       if (latestExisting != null) {
         if (latestExisting.updatedAt > message.updatedAt ||
             (latestExisting.updatedAt == message.updatedAt &&
-                _statusPriority(latestExisting.status) >
-                    _statusPriority(message.status))) {
+                sosStatusPriority(latestExisting.status) >
+                    sosStatusPriority(message.status))) {
           return;
         }
 
         if (message.updatedAt > latestExisting.updatedAt ||
             (message.updatedAt == latestExisting.updatedAt &&
-                _statusPriority(message.status) >
-                    _statusPriority(latestExisting.status))) {
+                sosStatusPriority(message.status) >
+                    sosStatusPriority(latestExisting.status))) {
           message.relayCount = 0;
           message.lastRelayedAt = 0;
         }
@@ -696,11 +773,10 @@ class DatabaseHelper {
     _messageStreamController.close();
   }
 
-  static int _statusPriority(SOSMessageStatus status) {
-    return switch (status) {
-      SOSMessageStatus.active => 0,
-      SOSMessageStatus.cancelled => 1,
-      SOSMessageStatus.resolved => 1,
-    };
+  static SOSMessage _newerMessage(SOSMessage a, SOSMessage b) {
+    if (a.updatedAt != b.updatedAt) {
+      return a.updatedAt > b.updatedAt ? a : b;
+    }
+    return sosStatusPriority(a.status) >= sosStatusPriority(b.status) ? a : b;
   }
 }

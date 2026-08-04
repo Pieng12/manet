@@ -223,6 +223,7 @@ void main() {
     await queue.enqueueAck(
       messageId: 'ack-12345-$now',
       payloadBase64: base64Encode(ackPayload),
+      nextEligibleAt: now,
     );
 
     final next = await queue.nextEligible(now);
@@ -256,6 +257,7 @@ void main() {
       await queue.enqueueAck(
         messageId: 'ack-$crc-$now',
         payloadBase64: base64Encode(ackPayload),
+        nextEligibleAt: now,
       );
     }
 
@@ -361,6 +363,7 @@ void main() {
     await queue.enqueueAck(
       messageId: 'ack-12345-$oldAckTimestamp-2',
       payloadBase64: base64Encode(ackPayload),
+      nextEligibleAt: now,
     );
 
     final next = await queue.nextEligible(now);
@@ -434,6 +437,171 @@ void main() {
     );
   });
 
+  test('new SOS after tombstone remains relay eligible', () async {
+    await DatabaseHelper.upsertAckTombstoneInDb(
+      db,
+      senderCrc: 12345,
+      ackTimestampMs: now,
+      status: SOSMessageStatus.resolved,
+    );
+
+    final sos = message(
+      'new-after-ack',
+      senderCrc: 12345,
+      updatedAt: now + 1000,
+    );
+    await insertMessage(sos);
+    await queue.enqueueSos(sos, nextEligibleAt: now);
+
+    expect(
+      await DatabaseHelper.isSuppressedByAckTombstoneInDb(
+        db,
+        senderCrc: 12345,
+        sosTimestampMs: sos.updatedAt,
+      ),
+      false,
+    );
+    final next = await queue.nextEligible(now);
+    expect(next, isNotNull);
+    expect(next!.messageId, sos.id);
+  });
+
+  test(
+    'crash recovery rebuilds ACK queue from tombstone without queue',
+    () async {
+      await DatabaseHelper.upsertAckTombstoneInDb(
+        db,
+        senderCrc: 24680,
+        ackTimestampMs: now,
+        status: SOSMessageStatus.resolved,
+      );
+
+      expect(await queue.queueSize(), 0);
+      final restored = await queue.recoverAckQueueFromTombstones(nowMs: now);
+
+      expect(restored, 1);
+      final item = await queue.getItem('ack-24680', 'ack');
+      expect(item, isNotNull);
+      expect(item!.payloadBase64, isNotNull);
+      final packet = BlePacket.unpack(
+        base64Decode(item.payloadBase64!),
+        referenceTime: DateTime.fromMillisecondsSinceEpoch(now),
+      );
+      expect(packet, isNotNull);
+      expect(packet!.senderCrc, 24680);
+      expect(packet.status, SOSMessageStatus.resolved);
+    },
+  );
+
+  test('duplicate ACK restores missing queue item', () async {
+    final payload = BlePacket.packAck(senderCrc: 13579, ackTimestampMs: now);
+    await queue.enqueueAck(
+      messageId: 'ack-13579-first',
+      payloadBase64: base64Encode(payload),
+    );
+    await db.delete('relay_queue', where: "packet_type = 'ack'");
+
+    final inserted = await queue.enqueueAck(
+      messageId: 'ack-13579-duplicate',
+      payloadBase64: base64Encode(payload),
+    );
+
+    expect(inserted, greaterThan(0));
+    expect(await queue.getItem('ack-13579', 'ack'), isNotNull);
+    expect(await queue.queueSize(), 1);
+  });
+
+  test('SOS and ACK in the same second are not wrongly suppressed', () async {
+    await DatabaseHelper.upsertAckTombstoneInDb(
+      db,
+      senderCrc: 11223,
+      ackTimestampMs: now,
+      status: SOSMessageStatus.resolved,
+    );
+    final sameSecondSos = now + 500;
+
+    expect(
+      await DatabaseHelper.isSuppressedByAckTombstoneInDb(
+        db,
+        senderCrc: 11223,
+        sosTimestampMs: sameSecondSos,
+      ),
+      false,
+    );
+
+    final sos = message(
+      'same-second-new',
+      senderCrc: 11223,
+      updatedAt: sameSecondSos,
+    );
+    await DatabaseHelper.ensureMonotonicStateTimestampInDb(db, sos);
+
+    expect(sos.updatedAt, now + 1000);
+  });
+
+  test(
+    'new ACK resets queue relay metrics and becomes immediately eligible',
+    () async {
+      final oldPayload = BlePacket.packAck(
+        senderCrc: 99887,
+        ackTimestampMs: now,
+      );
+      await queue.enqueueAck(
+        messageId: 'ack-99887-old',
+        payloadBase64: base64Encode(oldPayload),
+      );
+      final oldItem = (await queue.getItem('ack-99887', 'ack'))!;
+      await queue.markAdvertisingStarted(oldItem, nowMs: now);
+      await queue.markAdvertisingSucceeded(oldItem, nowMs: now);
+
+      final before = DateTime.now().millisecondsSinceEpoch;
+      final newPayload = BlePacket.packAck(
+        senderCrc: 99887,
+        ackTimestampMs: now + 1000,
+      );
+      await queue.enqueueAck(
+        messageId: 'ack-99887-new',
+        payloadBase64: base64Encode(newPayload),
+      );
+      final after = DateTime.now().millisecondsSinceEpoch;
+
+      final item = (await queue.getItem('ack-99887', 'ack'))!;
+      expect(item.relayCount, 0);
+      expect(item.lastRelayedAt, 0);
+      expect(item.nextEligibleAt, inInclusiveRange(before, after));
+      expect(item.queueState, RelayQueueService.stateQueued);
+    },
+  );
+
+  test(
+    'same timestamp tombstone upsert keeps existing payload when new payload is null',
+    () async {
+      final payload = base64Encode(
+        BlePacket.packAck(
+          senderCrc: 55667,
+          ackTimestampMs: now,
+          status: SOSMessageStatus.cancelled,
+        ),
+      );
+      await DatabaseHelper.upsertAckTombstoneInDb(
+        db,
+        senderCrc: 55667,
+        ackTimestampMs: now,
+        status: SOSMessageStatus.cancelled,
+        payloadBase64: payload,
+      );
+      await DatabaseHelper.upsertAckTombstoneInDb(
+        db,
+        senderCrc: 55667,
+        ackTimestampMs: now,
+        status: SOSMessageStatus.cancelled,
+      );
+
+      final tombstone = (await db.query('ack_tombstones')).single;
+      expect(tombstone['payload_base64'], payload);
+    },
+  );
+
   test('newer or terminal state resets relay metadata', () async {
     final active = message('state-active', senderCrc: 777, updatedAt: now)
       ..relayCount = 7
@@ -486,6 +654,31 @@ void main() {
     },
   );
 
+  test('RESOLVED replaces CANCELLED at same timestamp in database', () async {
+    final cancelled = message(
+      'cancelled-state',
+      senderCrc: 889,
+      updatedAt: now,
+      status: SOSMessageStatus.cancelled,
+    );
+    await insertMessage(cancelled);
+
+    final resolved = message(
+      'resolved-state',
+      senderCrc: 889,
+      updatedAt: now,
+      status: SOSMessageStatus.resolved,
+    );
+    await DatabaseHelper.replaceWithLatestMessageInDb(db, resolved);
+
+    final stored = SOSMessage.fromDbMap(
+      (await db.query('sos_messages')).single,
+    );
+
+    expect(stored.id, 'resolved-state');
+    expect(stored.status, SOSMessageStatus.resolved);
+  });
+
   test('duplicate queue item is not inserted twice', () async {
     final sos = message('same');
     await insertMessage(sos);
@@ -497,13 +690,14 @@ void main() {
 
   test('DROP_COOLDOWN decision is stored as deferred queue item', () async {
     final sos = message('cooldown');
+    sos.hopCount = 3;
     sos.lastRelayedAt = now - const Duration(seconds: 2).inMilliseconds;
     await insertMessage(sos);
 
     final packet = BlePacket(
       kind: BlePacketKind.sos,
       senderCrc: sos.senderCrc!,
-      timestampMs: sos.updatedAt + 1000,
+      timestampMs: sos.updatedAt,
       latitude: sos.latitude,
       longitude: sos.longitude,
       status: sos.status,

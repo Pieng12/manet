@@ -113,4 +113,22 @@ void main() {
       throwsFormatException,
     );
   });
+
+  test('gateway ACK contract rejects missing or unknown status', () {
+    expect(
+      () => GatewayAck.fromJson({
+        'sender_crc': 12345,
+        'ack_timestamp': '2026-08-04T05:00:00Z',
+      }),
+      throwsFormatException,
+    );
+    expect(
+      () => GatewayAck.fromJson({
+        'sender_crc': 12345,
+        'ack_timestamp': '2026-08-04T05:00:00Z',
+        'status': 'DONE',
+      }),
+      throwsFormatException,
+    );
+  });
 }

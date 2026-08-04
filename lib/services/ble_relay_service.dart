@@ -17,6 +17,7 @@ import 'package:pkmproject/services/relay_queue_service.dart';
 import 'package:pkmproject/services/workmanager_service.dart';
 import 'package:pkmproject/sync_service.dart';
 import 'package:pkmproject/utils/hash_utils.dart';
+import 'package:pkmproject/utils/sos_status_priority.dart';
 
 class BleRelayService {
   static final BleRelayService _instance = BleRelayService._internal();
@@ -90,12 +91,14 @@ class BleRelayService {
   Future<void> start() async {
     await BackgroundServiceManager.startBackgroundService();
     await NativeBridgeService.startBleWakeUpScan();
+    await _relayQueue.recoverAckQueueFromTombstones();
     await _advertiser.flushPendingAck();
     _log('BLE relay started');
   }
 
   Future<void> recoverPersistedRelayState() async {
     await NativeBridgeService.startBleWakeUpScan();
+    await _relayQueue.recoverAckQueueFromTombstones();
     await _advertiser.advertiseLatestOrStop();
     await _experimentLogger.logEvent(
       eventType: ExperimentEventTypes.relayStateRecovered,
@@ -115,6 +118,7 @@ class BleRelayService {
   }
 
   Future<void> activateForMessage(SOSMessage message) async {
+    await _dbHelper.ensureMonotonicStateTimestamp(message);
     await _dbHelper.replaceWithLatestMessage(message);
     await start();
     await _advertiser.enqueueSosForAdvertising(
@@ -240,22 +244,15 @@ class BleRelayService {
     if (existing == null) return true;
     if (incoming.updatedAt > existing.updatedAt) return true;
     if (incoming.updatedAt < existing.updatedAt) return false;
-    return _statusPriority(incoming.status) > _statusPriority(existing.status);
-  }
-
-  int _statusPriority(SOSMessageStatus status) {
-    return switch (status) {
-      SOSMessageStatus.active => 0,
-      SOSMessageStatus.cancelled => 1,
-      SOSMessageStatus.resolved => 1,
-    };
+    return sosStatusPriority(incoming.status) >
+        sosStatusPriority(existing.status);
   }
 
   int _priorityForStatus(SOSMessageStatus status) {
     return switch (status) {
       SOSMessageStatus.active => 0,
       SOSMessageStatus.cancelled => 50,
-      SOSMessageStatus.resolved => 50,
+      SOSMessageStatus.resolved => 60,
     };
   }
 
