@@ -179,7 +179,8 @@ void main() {
   );
 
   test('relay count does not remove persistent SOS at any count', () async {
-    final sos = message('max-relay')..relayCount = MeshConfig.maxRelayCount - 1;
+    final sos = message('max-relay')
+      ..relayCount = MeshConfig.relayCountMetricSample - 1;
     await insertMessage(sos);
     await queue.enqueueSos(sos);
 
@@ -195,7 +196,7 @@ void main() {
         whereArgs: [sos.id],
       )).single,
     );
-    expect(stored.relayCount, MeshConfig.maxRelayCount);
+    expect(stored.relayCount, MeshConfig.relayCountMetricSample);
   });
 
   test('adaptive backoff increases but never disables message', () async {
@@ -387,31 +388,37 @@ void main() {
     expect(next, isNotNull);
   });
 
-  test('basic and controlled produce different schedules', () {
-    final basic = RelayQueueService(
-      database: db,
-      random: Random(1),
-      mode: ForwardingMode.basicFlooding,
-    );
-    final controlled = RelayQueueService(
-      database: db,
-      random: Random(1),
-      mode: ForwardingMode.controlledFlooding,
-    );
+  test(
+    'basic flooding and controlled epidemic produce different schedules',
+    () {
+      final basic = RelayQueueService(
+        database: db,
+        random: Random(1),
+        mode: ForwardingMode.basicFlooding,
+      );
+      final controlled = RelayQueueService(
+        database: db,
+        random: Random(1),
+        mode: ForwardingMode.controlledEpidemic,
+      );
 
-    final basicNext = basic.sosCooldownEligibleAt(now, relayCount: 5);
-    final controlledNext = controlled.sosCooldownEligibleAt(now, relayCount: 5);
+      final basicNext = basic.sosCooldownEligibleAt(now, relayCount: 5);
+      final controlledNext = controlled.sosCooldownEligibleAt(
+        now,
+        relayCount: 5,
+      );
 
-    expect(basicNext, isNot(controlledNext));
-    expect(
-      basicNext,
-      lessThan(
-        now +
-            MeshConfig.adaptiveBackoffBase.inMilliseconds +
-            MeshConfig.relayJitterMax.inMilliseconds,
-      ),
-    );
-  });
+      expect(basicNext, isNot(controlledNext));
+      expect(
+        basicNext,
+        lessThan(
+          now +
+              MeshConfig.adaptiveBackoffBase.inMilliseconds +
+              MeshConfig.relayJitterMax.inMilliseconds,
+        ),
+      );
+    },
+  );
 
   test('ACK tombstone suppresses older SOS but not newer SOS', () async {
     await DatabaseHelper.upsertAckTombstoneInDb(
@@ -1031,19 +1038,22 @@ void main() {
     },
   );
 
-  test('basic and controlled use different actual slot durations', () {
-    final basic = RelayQueueService(
-      database: db,
-      mode: ForwardingMode.basicFlooding,
-    );
-    final controlled = RelayQueueService(
-      database: db,
-      mode: ForwardingMode.controlledFlooding,
-    );
+  test(
+    'basic flooding and controlled epidemic use different slot durations',
+    () {
+      final basic = RelayQueueService(
+        database: db,
+        mode: ForwardingMode.basicFlooding,
+      );
+      final controlled = RelayQueueService(
+        database: db,
+        mode: ForwardingMode.controlledEpidemic,
+      );
 
-    expect(basic.slotDurationForMode(), MeshConfig.basicFloodingSlotDuration);
-    expect(controlled.slotDurationForMode(), MeshConfig.relaySlotDuration);
-  });
+      expect(basic.slotDurationForMode(), MeshConfig.basicFloodingSlotDuration);
+      expect(controlled.slotDurationForMode(), MeshConfig.relaySlotDuration);
+    },
+  );
 
   test('ACK fairness yields SOS after maximum consecutive ACK slots', () async {
     final sos = message('fairness-sos', senderCrc: 9100);

@@ -45,7 +45,7 @@ class SOSMessage {
     required this.updatedAt,
     this.isSynced = 0,
     this.hopCount = 0,
-    this.maxHop = MeshConfig.defaultMaxHop,
+    this.maxHop = MeshConfig.legacyHopMetadata,
     int? expiresAt,
     int? firstSeenAt,
     this.lastRelayedAt = 0,
@@ -109,7 +109,7 @@ class SOSMessage {
       updatedAt: map['updated_at'],
       isSynced: map['is_synced'],
       hopCount: map['hop_count'] ?? 0,
-      maxHop: map['max_hop'] ?? MeshConfig.defaultMaxHop,
+      maxHop: map['max_hop'] ?? MeshConfig.legacyHopMetadata,
       expiresAt:
           map['expires_at'] ??
           createdAt + MeshConfig.defaultMessageLifetime.inMilliseconds,

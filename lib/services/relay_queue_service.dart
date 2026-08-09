@@ -18,6 +18,7 @@ enum RelaySchedulerState {
   waitingNextSlot,
   failedRetryable,
   failedPermission,
+  failedBluetoothDisabled,
   failedUnsupported,
 }
 
@@ -569,11 +570,18 @@ WHERE id = ?
       'relay_queue',
       {
         'queue_state': stateFailed,
-        'next_eligible_at': sosCooldownEligibleAt(
-          nowMs,
-          relayCount: item.relayCount,
-        ),
+        'next_eligible_at': nowMs + retryDelay.inMilliseconds,
       },
+      where: 'message_id = ? AND packet_type = ?',
+      whereArgs: [item.messageId, item.packetType],
+    );
+  }
+
+  Future<void> markAdvertisingBlocked(RelayQueueItem item) async {
+    final db = await _db;
+    await db.update(
+      'relay_queue',
+      {'queue_state': stateFailed},
       where: 'message_id = ? AND packet_type = ?',
       whereArgs: [item.messageId, item.packetType],
     );

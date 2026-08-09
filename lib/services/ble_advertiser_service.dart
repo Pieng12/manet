@@ -31,6 +31,7 @@ class BleAdvertiserService {
     'RESQMESH_BLE_DEBUG_VISIBLE',
     defaultValue: false,
   );
+  static const Duration minTransientRetryDelay = Duration(seconds: 15);
 
   final DatabaseHelper _dbHelper = DatabaseHelper();
   final RelayQueueService _relayQueue = RelayQueueService();
@@ -50,6 +51,7 @@ class BleAdvertiserService {
   bool _isSelecting = false;
   Timer? _queueWakeTimer;
   RelaySchedulerState _schedulerState = RelaySchedulerState.stopped;
+  int _transientFailureCount = 0;
   bool get isSchedulerOwner => _isSchedulerOwner;
   RelaySchedulerState get schedulerState => _schedulerState;
   String? get currentAdvertisedMessageId => _currentAdvertisedMessageId;
@@ -191,6 +193,7 @@ class BleAdvertiserService {
   Future<void> _scheduleNextQueueWake() async {
     _cancelQueueWakeTimer();
     await _publishPendingRelayWork();
+    if (_isBlockedSchedulerState) return;
     if (_isAdvertising) {
       _setSchedulerState(RelaySchedulerState.advertising);
       return;
@@ -247,12 +250,93 @@ class BleAdvertiserService {
     });
   }
 
+  bool get _isBlockedSchedulerState =>
+      _schedulerState == RelaySchedulerState.failedPermission ||
+      _schedulerState == RelaySchedulerState.failedBluetoothDisabled ||
+      _schedulerState == RelaySchedulerState.failedUnsupported;
+
+  void _enterBlockedState(RelaySchedulerState state) {
+    _cancelQueueWakeTimer();
+    _setSchedulerState(state);
+    _experimentLogger.logEvent(
+      eventType: ExperimentEventTypes.schedulerBlocked,
+      deviceId: 'unknown',
+      detail: {'scheduler_state': state.name},
+    );
+  }
+
+  Duration _nextTransientRetryDelay() {
+    return transientRetryDelayForAttempt(_transientFailureCount++);
+  }
+
+  void _resetTransientRetry() {
+    _transientFailureCount = 0;
+  }
+
+  Future<String?> _lastNativeAdvertiseErrorCode() async {
+    final status = await nativeAdvertisingStatus();
+    return status['errorCode'] as String?;
+  }
+
+  RelaySchedulerState? _blockedStateForNativeError(String? errorCode) {
+    return blockedStateForNativeAdvertiseError(errorCode);
+  }
+
+  static Duration transientRetryDelayForAttempt(int failureCount) {
+    final shift = failureCount.clamp(0, 8);
+    final seconds = minTransientRetryDelay.inSeconds * (1 << shift);
+    return Duration(seconds: seconds > 300 ? 300 : seconds);
+  }
+
+  static RelaySchedulerState? blockedStateForNativeAdvertiseError(
+    String? errorCode,
+  ) {
+    return switch (errorCode) {
+      'MISSING_PERMISSION' => RelaySchedulerState.failedPermission,
+      'BLUETOOTH_UNAVAILABLE' ||
+      'BLUETOOTH_DISABLED' => RelaySchedulerState.failedBluetoothDisabled,
+      'FEATURE_UNSUPPORTED' => RelaySchedulerState.failedUnsupported,
+      _ => null,
+    };
+  }
+
   Future<void> startAdvertising({SOSMessage? sosMessage}) async {
     if (sosMessage != null) {
       await enqueueSosForAdvertising(sosMessage, preemptCurrent: true);
       return;
     }
     await advertiseLatestOrStop(preemptCurrent: true);
+  }
+
+  Future<void> resumeAfterEnvironmentChange() async {
+    await _experimentLogger.logEvent(
+      eventType: ExperimentEventTypes.schedulerEnvironmentResumed,
+      deviceId: 'unknown',
+      detail: {'previous_state': _schedulerState.name},
+    );
+    _resetTransientRetry();
+    if (!_isSchedulerOwner) {
+      await BackgroundServiceManager.requestSchedulerTick();
+      return;
+    }
+    await advertiseLatestOrStop(preemptCurrent: true);
+  }
+
+  Future<bool> advertiseOneHeadlessSlot() async {
+    final wasOwner = _isSchedulerOwner;
+    claimSchedulerOwnership();
+    await advertiseLatestOrStop(
+      preemptCurrent: true,
+      continueScheduling: false,
+    );
+    final started = await isNativeAdvertising();
+    if (started) {
+      await Future<void>.delayed(_relayQueue.slotDurationForMode());
+      await stopAdvertising();
+    }
+    if (!wasOwner) releaseSchedulerOwnership();
+    await _publishPendingRelayWork();
+    return started;
   }
 
   Future<void> enqueueSosForAdvertising(
@@ -295,6 +379,7 @@ class BleAdvertiserService {
   Future<void> advertiseLatestOrStop({
     bool preemptCurrent = false,
     Duration? ackSlotDuration,
+    bool continueScheduling = true,
   }) async {
     if (!_isSchedulerOwner) {
       await BackgroundServiceManager.requestSchedulerTick();
@@ -328,7 +413,7 @@ class BleAdvertiserService {
       if (_isAdvertising) {
         if (!preemptCurrent && await isNativeAdvertising()) {
           _setSchedulerState(RelaySchedulerState.advertising);
-          _startSlotTimer();
+          if (continueScheduling) _startSlotTimer();
           return;
         }
         await stopAdvertising();
@@ -338,8 +423,7 @@ class BleAdvertiserService {
         print(
           "[BleAdvertiserService] BLE advertising permissions not granted.",
         );
-        _setSchedulerState(RelaySchedulerState.failedPermission);
-        await _scheduleNextQueueWake();
+        _enterBlockedState(RelaySchedulerState.failedPermission);
         return;
       }
 
@@ -348,6 +432,7 @@ class BleAdvertiserService {
         await _startQueuedAck(
           queued!,
           duration: ackSlotDuration ?? _relayQueue.slotDurationForMode(),
+          continueScheduling: continueScheduling,
         );
         return;
       }
@@ -358,7 +443,7 @@ class BleAdvertiserService {
         await _scheduleNextQueueWake();
         return;
       }
-      await _startQueuedSos(queued!);
+      await _startQueuedSos(queued!, continueScheduling: continueScheduling);
     } finally {
       _isSelecting = false;
     }
@@ -432,14 +517,17 @@ class BleAdvertiserService {
         'packet_type': item.packetType,
         'relay_count': item.relayCount,
         'queue_state': item.queueState,
-        'forwarding_mode': MeshConfig.forwardingMode.name,
+        'forwarding_mode': MeshConfig.forwardingMode.logValue,
         'ack_queue_size': await _relayQueue.queueSizeByType('ack'),
         'sos_queue_size': await _relayQueue.queueSizeByType('sos'),
       },
     );
   }
 
-  Future<void> _startQueuedSos(_QueuedAdvertisement queued) async {
+  Future<void> _startQueuedSos(
+    _QueuedAdvertisement queued, {
+    bool continueScheduling = true,
+  }) async {
     final message = queued.message;
     if (message == null) return;
 
@@ -478,6 +566,7 @@ class BleAdvertiserService {
           nowMs: succeededAt,
           slotDuration: _relayQueue.slotDurationForMode(),
         );
+        _resetTransientRetry();
         await _experimentLogger.logEvent(
           eventType: ExperimentEventTypes.bleAdvertiseStarted,
           deviceId: 'unknown',
@@ -494,8 +583,12 @@ class BleAdvertiserService {
           hopCount: message.hopCount,
           payloadHash: payloadHash,
         );
-        _startSlotTimer();
-        await _scheduleNextQueueWake();
+        if (continueScheduling) {
+          _startSlotTimer();
+          await _scheduleNextQueueWake();
+        } else {
+          await _publishPendingRelayWork();
+        }
         print(
           "[BleAdvertiserService] Started native BLE SOS advertising (${payload.length} bytes).",
         );
@@ -505,10 +598,17 @@ class BleAdvertiserService {
       print("[BleAdvertiserService] Native advertising unavailable: $e");
     }
 
-    await _relayQueue.markAdvertisingFailed(
-      queued.item,
-      nowMs: DateTime.now().millisecondsSinceEpoch,
-    );
+    final errorCode = await _lastNativeAdvertiseErrorCode();
+    final blockedState = _blockedStateForNativeError(errorCode);
+    if (blockedState == null) {
+      await _relayQueue.markAdvertisingFailed(
+        queued.item,
+        nowMs: DateTime.now().millisecondsSinceEpoch,
+        retryDelay: _nextTransientRetryDelay(),
+      );
+    } else {
+      await _relayQueue.markAdvertisingBlocked(queued.item);
+    }
     await _experimentLogger.logEvent(
       eventType: ExperimentEventTypes.bleAdvertiseFailed,
       deviceId: 'unknown',
@@ -517,14 +617,19 @@ class BleAdvertiserService {
       hopCount: message.hopCount,
       payloadHash: payloadHash,
     );
-    _setSchedulerState(RelaySchedulerState.failedRetryable);
-    await _scheduleNextQueueWake();
+    if (blockedState != null) {
+      _enterBlockedState(blockedState);
+    } else {
+      _setSchedulerState(RelaySchedulerState.failedRetryable);
+      await _scheduleNextQueueWake();
+    }
     _markAdvertisingInactive();
   }
 
   Future<void> _startQueuedAck(
     _QueuedAdvertisement queued, {
     Duration duration = MeshConfig.ackAdvertiseDuration,
+    bool continueScheduling = true,
   }) async {
     final payloadBase64 = queued.payload;
     if (payloadBase64 == null) return;
@@ -555,6 +660,7 @@ class BleAdvertiserService {
           nowMs: DateTime.now().millisecondsSinceEpoch,
           slotDuration: duration,
         );
+        _resetTransientRetry();
         await _experimentLogger.logEvent(
           eventType: ExperimentEventTypes.bleAdvertiseStarted,
           deviceId: 'unknown',
@@ -572,20 +678,31 @@ class BleAdvertiserService {
           detail: {'kind': 'ack'},
         );
         print("[BleAdvertiserService] Started queued BLE ACK advertising.");
-        _ackRestoreTimer = Timer(duration, () {
-          advertiseLatestOrStop(preemptCurrent: true);
-        });
-        await _scheduleNextQueueWake();
+        if (continueScheduling) {
+          _ackRestoreTimer = Timer(duration, () {
+            advertiseLatestOrStop(preemptCurrent: true);
+          });
+          await _scheduleNextQueueWake();
+        } else {
+          await _publishPendingRelayWork();
+        }
         return;
       }
     } catch (e) {
       print("[BleAdvertiserService] Queued ACK advertising failed: $e");
     }
 
-    await _relayQueue.markAdvertisingFailed(
-      queued.item,
-      nowMs: DateTime.now().millisecondsSinceEpoch,
-    );
+    final errorCode = await _lastNativeAdvertiseErrorCode();
+    final blockedState = _blockedStateForNativeError(errorCode);
+    if (blockedState == null) {
+      await _relayQueue.markAdvertisingFailed(
+        queued.item,
+        nowMs: DateTime.now().millisecondsSinceEpoch,
+        retryDelay: _nextTransientRetryDelay(),
+      );
+    } else {
+      await _relayQueue.markAdvertisingBlocked(queued.item);
+    }
     await _experimentLogger.logEvent(
       eventType: ExperimentEventTypes.bleAdvertiseFailed,
       deviceId: 'unknown',
@@ -595,8 +712,12 @@ class BleAdvertiserService {
       detail: {'kind': 'ack'},
     );
     await _persistPendingAck(payload);
-    _setSchedulerState(RelaySchedulerState.failedRetryable);
-    await _scheduleNextQueueWake();
+    if (blockedState != null) {
+      _enterBlockedState(blockedState);
+    } else {
+      _setSchedulerState(RelaySchedulerState.failedRetryable);
+      await _scheduleNextQueueWake();
+    }
   }
 
   void _markAdvertisingInactive() {

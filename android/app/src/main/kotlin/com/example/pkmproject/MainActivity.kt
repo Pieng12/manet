@@ -33,6 +33,8 @@ class MainActivity : FlutterActivity() {
             } else if (state == BluetoothAdapter.STATE_ON) {
                 Log.d("MainActivity", "Bluetooth turned on. Restarting BLE scan.")
                 NativeBleManager.startBleScan(appContext)
+                NativeBleInboxWorker.enqueueIfPendingAndPermitted(appContext)
+                requestSchedulerTick()
             }
         }
     }
@@ -92,6 +94,9 @@ class MainActivity : FlutterActivity() {
                     "failBleInboxItem" -> {
                         val id = call.argument<String>("id")
                         result.success(id != null && NativeBleInbox.fail(this, id))
+                    }
+                    "resumePendingNativeBleInbox" -> {
+                        result.success(NativeBleInboxWorker.enqueueIfPendingAndPermitted(this))
                     }
                     "getBleCapabilities" -> {
                         result.success(bleCapabilities())
@@ -169,6 +174,10 @@ class MainActivity : FlutterActivity() {
     override fun onResume() {
         super.onResume()
         registerBleStateReceiver()
+        if (NativeBlePermissions.hasRequiredRuntimePermissions(this)) {
+            NativeBleInboxWorker.enqueueIfPendingAndPermitted(this)
+            requestSchedulerTick()
+        }
     }
 
     override fun onPause() {
@@ -228,7 +237,9 @@ class MainActivity : FlutterActivity() {
             "lastErrorCode" to (advertiseStatus["errorCode"] ?: scanStatus["lastScanErrorCode"]),
             "foregroundServiceActive" to MeshBackgroundService.serviceStarted,
             "pendingNativeInbox" to NativeBleInbox.pendingCount(this),
-            "relayModeEnabled" to servicePrefs().getBoolean(KEY_RELAY_MODE_ENABLED, true)
+            "nativeInboxPermissionBlockedAt" to NativeBleInbox.permissionBlockedAt(this),
+            "relayModeEnabled" to servicePrefs().getBoolean(KEY_RELAY_MODE_ENABLED, true),
+            "nativeManufacturerId" to NativeBleConfig.MANUFACTURER_ID
         )
     }
 

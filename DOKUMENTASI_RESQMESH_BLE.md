@@ -21,11 +21,11 @@ Konfigurasi runtime utama berada di `lib/config/mesh_config.dart`.
 | --- | --- | --- |
 | `RESQMESH_MODE` | `offline` | Mode aplikasi: `offline` atau `gateway`. |
 | `RESQMESH_API_BASE_URL` | backend default | Base URL API saat mode gateway. |
-| `RESQMESH_FORWARDING_MODE` | `controlled` | `controlled` atau `basic`. |
+| `RESQMESH_FORWARDING_MODE` | `controlled_epidemic` | `controlled_epidemic` atau `basic`. |
 | `protocolLength` | `17` | Panjang payload BLE. |
 | `manufacturerId` | `0xFFFF` | Manufacturer ID penelitian internal. |
-| `defaultMaxHop` | `5` | Nilai legacy/metadata, bukan cutoff relay aktif. |
-| `maxAckHop` | `5` | Nilai legacy/metadata, bukan cutoff ACK aktif. |
+| `legacyHopMetadata` | `5` | Nilai legacy/metadata, bukan cutoff relay aktif. |
+| `legacyAckHopMetadata` | `5` | Nilai legacy/metadata, bukan cutoff ACK aktif. |
 | `defaultMessageLifetime` | `6 jam` | Nilai legacy/metadata, bukan cutoff SOS aktif. |
 | `ackLifetime` | `2 menit` | Nilai legacy/metadata, bukan TTL ACK aktif. |
 | `basicFloodingInterval` | `2 detik` | Interval tetap basic flooding sebelum jitter. |
@@ -72,7 +72,9 @@ andal dikerjakan di sisi Android:
 - `NativeBleInbox.kt`: persistent inbox native untuk packet pending saat Flutter
   engine belum siap.
 - `NativeBleInboxWorker.kt`: fallback WorkManager untuk recovery inbox Android
-  12+ ketika foreground service start dari receiver ditolak.
+  12+ ketika foreground service start dari receiver ditolak. Worker ini
+  menjalankan Dart headless untuk memproses inbox dan tidak memulai foreground
+  service baru sebagai fallback.
 
 Fallback sukses palsu untuk advertising tidak digunakan. Jika native advertising
 tidak tersedia atau gagal, compatibility state harus menandai perangkat tidak
@@ -82,6 +84,14 @@ Foreground service BLE memakai tipe `connectedDevice` saja. Internet sync tidak
 dikerjakan sebagai beban panjang di service BLE; gateway upload/download
 dijadwalkan melalui WorkManager unique work `resqmeshGatewaySync` dengan
 constraint network dan exponential backoff.
+
+Native inbox hanya di-ack setelah Dart mengembalikan hasil eksplisit:
+`accepted`, `duplicate`, `stale`, `suppressedByAck`, atau `invalid`. Hasil
+`failedRetryable` tetap berada di inbox sebagai item gagal agar WorkManager bisa
+mencoba lagi.
+Exact payload yang sudah `processed` tetap dideduplikasi selama retention
+native inbox sehingga object SharedPreferences tidak tumbuh linear saat packet
+17-byte yang sama diulang lama.
 
 ## Format Payload BLE 17 Byte
 
@@ -160,7 +170,10 @@ permanen. `RelayQueueService.earliestNextEligibleAt()` mengambil waktu minimum
 `next_eligible_at` dari queue aktif, lalu `BleAdvertiserService` memasang wake
 timer. State scheduler yang dilaporkan adalah `stopped`, `selecting`,
 `advertising`, `waitingNextSlot`, `failedRetryable`, `failedPermission`, atau
-`failedUnsupported`.
+`failedBluetoothDisabled`, atau `failedUnsupported`. Permission hilang,
+Bluetooth mati, dan advertiser unsupported adalah state blocked event-driven;
+scheduler tidak memasang wake timer zero-delay. Kegagalan transient memakai
+exponential retry mulai 15 detik dan dibatasi 5 menit.
 
 Advertiser native memakai generation ID agar callback lama setelah timeout atau
 restart tidak merusak state advertiser baru. Dart melakukan reconciliation jika

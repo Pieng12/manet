@@ -10,7 +10,7 @@ Mode offline BLE:
 ```bash
 flutter run \
   --dart-define=RESQMESH_MODE=offline \
-  --dart-define=RESQMESH_FORWARDING_MODE=controlled
+  --dart-define=RESQMESH_FORWARDING_MODE=controlled_epidemic
 ```
 
 Mode gateway:
@@ -19,7 +19,7 @@ Mode gateway:
 flutter run \
   --dart-define=RESQMESH_MODE=gateway \
   --dart-define=RESQMESH_API_BASE_URL=https://example.com/api \
-  --dart-define=RESQMESH_FORWARDING_MODE=controlled
+  --dart-define=RESQMESH_FORWARDING_MODE=controlled_epidemic
 ```
 
 Pembanding basic flooding:
@@ -63,6 +63,7 @@ Event minimal yang sudah dicatat:
 - `BLE_PACKET_RECEIVED`
 - `BLE_PACKET_STORED`
 - `BLE_PACKET_DUPLICATE`
+- `BLE_PACKET_STALE`
 - `BLE_RELAY_QUEUED`
 - `BLE_RELAY_DROPPED`
 - `ACK_RECEIVED`
@@ -79,6 +80,13 @@ Event minimal yang sudah dicatat:
 - `SOS_QUEUE_RECOVERED`
 - `ACK_QUEUE_RECOVERED`
 - `SCHEDULER_PACKET_SELECTED`
+- `SCHEDULER_BLOCKED`
+- `SCHEDULER_ENVIRONMENT_RESUMED`
+- `HEADLESS_RELAY_ATTEMPTED`
+- `HEADLESS_RELAY_STARTED`
+- `HEADLESS_RELAY_FAILED`
+- `NATIVE_INBOX_WORKER_STARTED`
+- `NATIVE_INBOX_WORKER_COMPLETED`
 - `GATEWAY_DETECTED`
 - `GATEWAY_UPLOAD_STARTED`
 - `GATEWAY_UPLOAD_SUCCEEDED`
@@ -122,7 +130,7 @@ advertising.
 
 Timestamp BLE memakai presisi satu detik. Gunakan timestamp canonical dari
 payload/identity saat menghitung duplicate, ACK tombstone, dan recovery queue.
-Mode `basic` memakai slot aktual 2 detik, sedangkan `controlled` memakai slot
+Mode `basic` memakai slot aktual 2 detik, sedangkan `controlled_epidemic` memakai slot
 default 5 detik plus adaptive backoff.
 
 ## Catatan P5 untuk Uji Perangkat Fisik
@@ -137,10 +145,10 @@ flutter pub get
 dart format --output=none --set-exit-if-changed .
 flutter analyze
 flutter test
-flutter build apk --debug --dart-define=RESQMESH_MODE=offline --dart-define=RESQMESH_FORWARDING_MODE=controlled --dart-define=RESQMESH_BLE_DEBUG_VISIBLE=true
+flutter build apk --debug --dart-define=RESQMESH_MODE=offline --dart-define=RESQMESH_FORWARDING_MODE=controlled_epidemic --dart-define=RESQMESH_BLE_DEBUG_VISIBLE=true
 flutter build apk --debug --dart-define=RESQMESH_MODE=offline --dart-define=RESQMESH_FORWARDING_MODE=basic --dart-define=RESQMESH_BLE_DEBUG_VISIBLE=true
-flutter build apk --debug --dart-define=RESQMESH_MODE=gateway --dart-define=RESQMESH_FORWARDING_MODE=controlled --dart-define=RESQMESH_API_BASE_URL=https://example.com/api
-flutter build apk --release --dart-define=RESQMESH_MODE=offline --dart-define=RESQMESH_FORWARDING_MODE=controlled
+flutter build apk --debug --dart-define=RESQMESH_MODE=gateway --dart-define=RESQMESH_FORWARDING_MODE=controlled_epidemic --dart-define=RESQMESH_API_BASE_URL=https://example.com/api
+flutter build apk --release --dart-define=RESQMESH_MODE=offline --dart-define=RESQMESH_FORWARDING_MODE=controlled_epidemic
 ```
 
 Event P5 yang perlu diperhatikan: `QUEUE_WAKE_SCHEDULED`,
@@ -149,3 +157,8 @@ Event P5 yang perlu diperhatikan: `QUEUE_WAKE_SCHEDULED`,
 `BLE_STATE_RECONCILED`, `BLE_SCAN_FAILED`, `BLUETOOTH_DISABLED`,
 `BLUETOOTH_REENABLED`, `BOOT_RECOVERY_STARTED`, dan
 `BOOT_RECOVERY_COMPLETED`.
+
+Untuk P7, native-only cases seperti processed exact duplicate dan permission
+blocked worker perlu dibuktikan melalui logcat, diagnostics
+`nativeInboxPermissionBlockedAt`, dan native inbox metadata karena Dart/SQLite
+experiment logger tidak selalu berjalan pada saat permission belum tersedia.

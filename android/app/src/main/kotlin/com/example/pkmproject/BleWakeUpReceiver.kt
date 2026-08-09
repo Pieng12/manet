@@ -111,7 +111,12 @@ class BleWakeUpReceiver : BroadcastReceiver() {
             payload,
             android.util.Base64.NO_WRAP
         )
-        val inboxId = NativeBleInbox.store(context, payload, deviceAddress, rssi)
+        val storeResult = NativeBleInbox.store(context, payload, deviceAddress, rssi)
+        if (!storeResult.shouldScheduleWorker) {
+            Log.i(TAG, "Exact BLE payload already processed; worker recovery not scheduled")
+            return
+        }
+        val inboxId = storeResult.id
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && !MeshBackgroundService.serviceStarted) {
             val pendingResult = goAsync()
@@ -149,6 +154,7 @@ class BleWakeUpReceiver : BroadcastReceiver() {
             NativeBleInboxWorker.enqueue(context)
             Log.e(TAG, "Foreground service start illegal state; inbox worker scheduled", e)
         } catch (e: Exception) {
+            NativeBleInboxWorker.enqueue(context)
             Log.e(TAG, "Failed to start wake-up service: ${e.message}", e)
         }
     }

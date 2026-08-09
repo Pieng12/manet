@@ -52,7 +52,8 @@ class MeshBackgroundService : Service() {
                 BluetoothAdapter.STATE_ON -> {
                     Log.i(tag, "Bluetooth re-enabled; restarting scan and scheduler recovery")
                     NativeBleManager.startBleScan(this@MeshBackgroundService)
-                    sendWakeUpToFlutter("recoverPersistedRelayState", null, null, 0)
+                    NativeBleInboxWorker.enqueueIfPendingAndPermitted(this@MeshBackgroundService)
+                    sendWakeUpToFlutter("environmentResumed", null, null, 0)
                 }
             }
         }
@@ -330,6 +331,9 @@ class MeshBackgroundService : Service() {
                         val id = call.argument<String>("id")
                         result.success(id != null && NativeBleInbox.fail(this, id))
                     }
+                    "resumePendingNativeBleInbox" -> {
+                        result.success(NativeBleInboxWorker.enqueueIfPendingAndPermitted(this))
+                    }
                     "hasPendingRelayWork" -> {
                         result.success(hasPendingRelayWork())
                     }
@@ -559,7 +563,9 @@ class MeshBackgroundService : Service() {
             "lastErrorCode" to (advertiseStatus["errorCode"] ?: scanStatus["lastScanErrorCode"]),
             "foregroundServiceActive" to serviceStarted,
             "pendingNativeInbox" to NativeBleInbox.pendingCount(this),
-            "relayModeEnabled" to servicePrefs().getBoolean(KEY_RELAY_MODE_ENABLED, true)
+            "nativeInboxPermissionBlockedAt" to NativeBleInbox.permissionBlockedAt(this),
+            "relayModeEnabled" to servicePrefs().getBoolean(KEY_RELAY_MODE_ENABLED, true),
+            "nativeManufacturerId" to NativeBleConfig.MANUFACTURER_ID
         )
     }
 

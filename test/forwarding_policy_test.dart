@@ -52,7 +52,7 @@ void main() {
     );
   }
 
-  test('new controlled flooding packet is accepted for relay', () {
+  test('new controlled epidemic packet is accepted for relay', () {
     const policy = ForwardingPolicy();
 
     final decision = policy.decideSos(packet: sosPacket(), nowMs: now);
@@ -63,7 +63,7 @@ void main() {
     expect(decision.reason, ForwardingDecisionReason.relayAccepted);
   });
 
-  test('duplicate or older packet is dropped', () {
+  test('exact duplicate packet is dropped as duplicate', () {
     const policy = ForwardingPolicy();
 
     final decision = policy.decideSos(
@@ -75,6 +75,20 @@ void main() {
     expect(decision.shouldStore, false);
     expect(decision.shouldRelay, false);
     expect(decision.reason, ForwardingDecisionReason.dropDuplicate);
+  });
+
+  test('older packet is dropped as stale', () {
+    const policy = ForwardingPolicy();
+
+    final decision = policy.decideSos(
+      packet: sosPacket(timestampMs: now - 1000),
+      nowMs: now,
+      existingMessage: existingMessage(updatedAt: now),
+    );
+
+    expect(decision.shouldStore, false);
+    expect(decision.shouldRelay, false);
+    expect(decision.reason, ForwardingDecisionReason.dropStale);
   });
 
   test('same timestamp and status with lower hop updates best hop', () {
@@ -120,7 +134,7 @@ void main() {
     );
 
     expect(decision.shouldStore, false);
-    expect(decision.reason, ForwardingDecisionReason.dropDuplicate);
+    expect(decision.reason, ForwardingDecisionReason.dropStale);
   });
 
   test('CANCELLED is not delayed by ACTIVE backoff', () {
@@ -220,7 +234,7 @@ void main() {
     expect(decision.reason, ForwardingDecisionReason.relayAccepted);
   });
 
-  test('controlled flooding defers packet during relay cooldown', () {
+  test('controlled epidemic defers packet during relay cooldown', () {
     const policy = ForwardingPolicy();
     final lastRelayedAt = now - const Duration(seconds: 2).inMilliseconds;
 
@@ -314,6 +328,33 @@ void main() {
     expect(decision.reason, ForwardingDecisionReason.relayAccepted);
   });
 
+  test(
+    'same timestamp lower status is stale and equal terminal state is duplicate',
+    () {
+      const policy = ForwardingPolicy();
+
+      final staleActive = policy.decideSos(
+        packet: sosPacket(timestampMs: now, status: SOSMessageStatus.active),
+        nowMs: now,
+        existingMessage: existingMessage(
+          updatedAt: now,
+          status: SOSMessageStatus.cancelled,
+        ),
+      );
+      final duplicateCancelled = policy.decideSos(
+        packet: sosPacket(timestampMs: now, status: SOSMessageStatus.cancelled),
+        nowMs: now,
+        existingMessage: existingMessage(
+          updatedAt: now,
+          status: SOSMessageStatus.cancelled,
+        ),
+      );
+
+      expect(staleActive.reason, ForwardingDecisionReason.dropStale);
+      expect(duplicateCancelled.reason, ForwardingDecisionReason.dropDuplicate);
+    },
+  );
+
   test('own packet is dropped', () {
     const policy = ForwardingPolicy();
 
@@ -336,7 +377,7 @@ void main() {
       nowMs: now,
       existingMessage: existingMessage(
         updatedAt: now - 1000,
-        relayCount: MeshConfig.maxRelayCount,
+        relayCount: MeshConfig.relayCountMetricSample,
       ),
     );
 
@@ -345,7 +386,7 @@ void main() {
     expect(decision.reason, ForwardingDecisionReason.relayAccepted);
   });
 
-  test('basic flooding ignores controlled cooldown and max relay count', () {
+  test('basic flooding ignores controlled backoff and relay count metric', () {
     const policy = ForwardingPolicy(mode: ForwardingMode.basicFlooding);
 
     final decision = policy.decideSos(
@@ -353,7 +394,7 @@ void main() {
       nowMs: now,
       existingMessage: existingMessage(
         updatedAt: now - 1000,
-        relayCount: MeshConfig.maxRelayCount,
+        relayCount: MeshConfig.relayCountMetricSample,
         lastRelayedAt: now - const Duration(seconds: 2).inMilliseconds,
       ),
     );

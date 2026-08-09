@@ -3,6 +3,7 @@ name: Flutter CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 jobs:
   test:
@@ -29,3 +30,10 @@ jobs:
 
       - name: Test
         run: flutter test
+
+      - name: Build debug APK
+        run: flutter build apk --debug
+
+      - name: Native unit tests
+        working-directory: android
+        run: ./gradlew :app:testDebugUnitTest

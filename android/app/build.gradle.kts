@@ -13,12 +13,6 @@ if (keystorePropertiesFile.exists()) {
     keystorePropertiesFile.inputStream().use { keystoreProperties.load(it) }
 }
 
-val resqMeshManufacturerId =
-    providers.gradleProperty("RESQMESH_MANUFACTURER_ID")
-        .orElse(providers.environmentVariable("RESQMESH_MANUFACTURER_ID"))
-        .orElse("0xFFFF")
-        .get()
-
 android {
     namespace = "id.ac.usu.resqmesh"
     compileSdk = 36
@@ -39,11 +33,6 @@ android {
         targetSdk = 36
         versionCode = flutter.versionCode
         versionName = flutter.versionName
-        buildConfigField("int", "RESQMESH_MANUFACTURER_ID", resqMeshManufacturerId)
-    }
-
-    buildFeatures {
-        buildConfig = true
     }
 
     signingConfigs {
@@ -68,6 +57,8 @@ android {
 
 dependencies {
     implementation("androidx.work:work-runtime-ktx:2.9.0")
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303")
 }
 
 flutter {

@@ -2,6 +2,7 @@ enum ForwardingDecisionReason {
   relayAccepted('RELAY_ACCEPTED'),
   dropInvalid('DROP_INVALID'),
   dropDuplicate('DROP_DUPLICATE'),
+  dropStale('DROP_STALE'),
   dropCooldown('DROP_COOLDOWN'),
   dropAcked('DROP_ACKED'),
   dropOwnPacket('DROP_OWN_PACKET');

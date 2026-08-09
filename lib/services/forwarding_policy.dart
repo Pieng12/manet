@@ -51,11 +51,12 @@ class ForwardingPolicy {
       );
     }
 
-    if (_isDuplicateOrOlder(packet, existingMessage)) {
-      return const ForwardingDecision(
+    final staleOrDuplicate = _staleOrDuplicateReason(packet, existingMessage);
+    if (staleOrDuplicate != null) {
+      return ForwardingDecision(
         shouldStore: false,
         shouldRelay: false,
-        reason: ForwardingDecisionReason.dropDuplicate,
+        reason: staleOrDuplicate,
       );
     }
 
@@ -126,19 +127,26 @@ class ForwardingPolicy {
     return packet.timestampMs > message.updatedAt;
   }
 
-  bool _isDuplicateOrOlder(BlePacket packet, SOSMessage? message) {
-    if (message == null) return false;
-    if (message.updatedAt > packet.timestampMs) return true;
-    if (message.updatedAt < packet.timestampMs) return false;
+  ForwardingDecisionReason? _staleOrDuplicateReason(
+    BlePacket packet,
+    SOSMessage? message,
+  ) {
+    if (message == null) return null;
+    if (message.updatedAt > packet.timestampMs) {
+      return ForwardingDecisionReason.dropStale;
+    }
+    if (message.updatedAt < packet.timestampMs) return null;
     if (message.status != packet.status) {
       return sosStatusPriority(packet.status) <=
-          sosStatusPriority(message.status);
+              sosStatusPriority(message.status)
+          ? ForwardingDecisionReason.dropStale
+          : null;
     }
 
     final incomingBestHop = _saturateHop(packet.hopCount + 1);
-    if (incomingBestHop < message.hopCount) return false;
+    if (incomingBestHop < message.hopCount) return null;
 
-    return true;
+    return ForwardingDecisionReason.dropDuplicate;
   }
 
   Duration adaptiveBackoffForRelayCount(int relayCount) {

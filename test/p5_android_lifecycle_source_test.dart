@@ -55,7 +55,7 @@ void main() {
     expect(manager, contains('byteArrayOf(0x52, 0x4D)'));
     expect(manager, contains('byteArrayOf(0xFF.toByte(), 0xFF.toByte())'));
     expect(manager, contains('setPackage(context.packageName)'));
-    expect(config, contains('BuildConfig.RESQMESH_MANUFACTURER_ID'));
+    expect(config, contains('const val MANUFACTURER_ID = 0xFFFF'));
   });
 
   test('native inbox and diagnostics method channel are wired', () {

@@ -46,10 +46,18 @@ menangani BLE scan, BLE advertising, native inbox, recovery, dan wake scheduler.
 Upload/download gateway berjalan melalui WorkManager dengan constraint network,
 bukan sebagai pekerjaan panjang di foreground service BLE.
 
+Pada Android 12+, packet yang diterima saat foreground service tidak boleh
+dimulai tetap tersimpan di native inbox. Recovery dilakukan oleh WorkManager
+yang menjalankan Dart headless, memproses packet ke SQLite/relay queue, lalu
+baru meng-ack item native jika hasilnya selesai non-retryable.
+
 Scheduler BLE dimiliki oleh background Dart isolate. UI isolate hanya mengirim
 command dan membaca state. Saat queue belum eligible, `RelayQueueService`
 menyediakan `earliestNextEligibleAt()` dan `BleAdvertiserService` memasang wake
 timer menuju `next_eligible_at`; jika queue kosong tidak ada timer dibuat.
+Permission hilang, Bluetooth mati, dan advertiser unsupported menjadi blocked
+state event-driven tanpa zero-delay retry loop; kegagalan transient memakai
+retry/backoff 15 detik sampai 5 menit.
 
 ## Alur SOS
 
@@ -73,13 +81,13 @@ disaturasi pada 63 agar tidak overflow kembali ke 0.
 
 Mode forwarding:
 
-- `controlled` default: scheduler `RelayQueueService` memakai dedup, fairness,
+- `controlled_epidemic` default: scheduler `RelayQueueService` memakai dedup, fairness,
   adaptive exponential backoff, cooldown, dan jitter.
 - `basic`: scheduler memakai interval dan slot aktual 2 detik plus jitter
   sebagai pembanding eksperimen yang lebih agresif.
 
 ```bash
-flutter run --dart-define=RESQMESH_FORWARDING_MODE=controlled
+flutter run --dart-define=RESQMESH_FORWARDING_MODE=controlled_epidemic
 flutter run --dart-define=RESQMESH_FORWARDING_MODE=basic
 ```
 
@@ -109,6 +117,8 @@ GET /health
 
 Upload membawa identitas idempotency berbasis `local_message_id`,
 `sender_device_id`, `sender_crc`, dan `updated_at`.
+Scheduling gateway dimiliki WorkManager unique work; listener Dart hanya
+menjadwalkan work saat konektivitas tersedia atau user meminta sync manual.
 
 Respons ACK server:
 
@@ -178,8 +188,8 @@ flutter pub get
 dart format --output=none --set-exit-if-changed .
 flutter analyze
 flutter test
-flutter build apk --debug --dart-define=RESQMESH_MODE=offline --dart-define=RESQMESH_FORWARDING_MODE=controlled --dart-define=RESQMESH_BLE_DEBUG_VISIBLE=true
-flutter build apk --release --dart-define=RESQMESH_MODE=offline --dart-define=RESQMESH_FORWARDING_MODE=controlled
+flutter build apk --debug --dart-define=RESQMESH_MODE=offline --dart-define=RESQMESH_FORWARDING_MODE=controlled_epidemic --dart-define=RESQMESH_BLE_DEBUG_VISIBLE=true
+flutter build apk --release --dart-define=RESQMESH_MODE=offline --dart-define=RESQMESH_FORWARDING_MODE=controlled_epidemic
 ```
 
 ## Cara Memulai Sesi Eksperimen
@@ -200,6 +210,7 @@ menghasilkan file JSON dan CSV untuk session aktif.
 
 - [`DOKUMENTASI_RESQMESH_BLE.md`](DOKUMENTASI_RESQMESH_BLE.md)
 - [`docs/background_recovery_test_plan.md`](docs/background_recovery_test_plan.md)
+- [`docs/p7_physical_background_validation.md`](docs/p7_physical_background_validation.md)
 - [`docs/experiment_protocol.md`](docs/experiment_protocol.md)
 - [`docs/device_compatibility.md`](docs/device_compatibility.md)
 - [`docs/known_limitations.md`](docs/known_limitations.md)

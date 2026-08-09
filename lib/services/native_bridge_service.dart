@@ -107,4 +107,16 @@ class NativeBridgeService {
       print("Failed to fail native BLE inbox item: '${e.message}'.");
     }
   }
+
+  static Future<bool> resumePendingNativeBleInbox() async {
+    try {
+      return await _platform.invokeMethod<bool>(
+            'resumePendingNativeBleInbox',
+          ) ??
+          false;
+    } on PlatformException catch (e) {
+      print("Failed to resume native BLE inbox recovery: '${e.message}'.");
+      return false;
+    }
+  }
 }

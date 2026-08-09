@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:pkmproject/models/sos_message.dart';
+import 'package:pkmproject/config/mesh_config.dart';
 import 'package:pkmproject/services/ble_advertiser_service.dart';
 import 'package:pkmproject/services/ble_relay_service.dart';
 import 'package:pkmproject/services/database_helper.dart';
@@ -400,6 +401,10 @@ class _MeshMonitorScreenState extends State<MeshMonitorScreen>
   }
 
   Widget _buildDiagnosticsCard() {
+    final nativeManufacturerId = _bleCapabilities['nativeManufacturerId'];
+    final manufacturerMismatch =
+        nativeManufacturerId is int &&
+        nativeManufacturerId != MeshConfig.manufacturerId;
     final entries = <String, String>{
       'Android SDK': '${_bleCapabilities['sdkInt'] ?? '-'}',
       'Device':
@@ -419,7 +424,16 @@ class _MeshMonitorScreenState extends State<MeshMonitorScreen>
       'Foreground Service':
           '${_bleCapabilities['foregroundServiceActive'] ?? '-'}',
       'Pending Inbox': '${_bleCapabilities['pendingNativeInbox'] ?? '-'}',
+      'Inbox Permission Blocked':
+          '${_bleCapabilities['nativeInboxPermissionBlockedAt'] ?? '-'}',
       'Relay Mode': '${_bleCapabilities['relayModeEnabled'] ?? '-'}',
+      'Dart Manufacturer ID':
+          '0x${MeshConfig.manufacturerId.toRadixString(16).toUpperCase()}',
+      'Native Manufacturer ID': nativeManufacturerId is int
+          ? '0x${nativeManufacturerId.toRadixString(16).toUpperCase()}'
+          : '-',
+      'Manufacturer Mismatch': '$manufacturerMismatch',
+      'Forwarding Mode': MeshConfig.forwardingMode.logValue,
       'Last Native Error': '${_bleCapabilities['lastErrorCode'] ?? '-'}',
     };
     return Card(

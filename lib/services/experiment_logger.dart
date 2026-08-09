@@ -15,6 +15,7 @@ class ExperimentEventTypes {
   static const blePacketReceived = 'BLE_PACKET_RECEIVED';
   static const blePacketStored = 'BLE_PACKET_STORED';
   static const blePacketDuplicate = 'BLE_PACKET_DUPLICATE';
+  static const blePacketStale = 'BLE_PACKET_STALE';
   static const bleRelayQueued = 'BLE_RELAY_QUEUED';
   static const bleRelayStarted = 'BLE_RELAY_STARTED';
   static const bleRelayDropped = 'BLE_RELAY_DROPPED';
@@ -45,9 +46,19 @@ class ExperimentEventTypes {
   static const queueWakeCancelled = 'QUEUE_WAKE_CANCELLED';
   static const queueEmpty = 'QUEUE_EMPTY';
   static const waitingNextEligible = 'WAITING_NEXT_ELIGIBLE';
+  static const schedulerBlocked = 'SCHEDULER_BLOCKED';
+  static const schedulerEnvironmentResumed = 'SCHEDULER_ENVIRONMENT_RESUMED';
+  static const headlessRelayAttempted = 'HEADLESS_RELAY_ATTEMPTED';
+  static const headlessRelayStarted = 'HEADLESS_RELAY_STARTED';
+  static const headlessRelayFailed = 'HEADLESS_RELAY_FAILED';
   static const nativeInboxStored = 'NATIVE_INBOX_STORED';
   static const nativeInboxProcessed = 'NATIVE_INBOX_PROCESSED';
   static const nativeInboxFailed = 'NATIVE_INBOX_FAILED';
+  static const nativeInboxDuplicateProcessed =
+      'NATIVE_INBOX_DUPLICATE_PROCESSED';
+  static const nativeInboxWorkerStarted = 'NATIVE_INBOX_WORKER_STARTED';
+  static const nativeInboxWorkerCompleted = 'NATIVE_INBOX_WORKER_COMPLETED';
+  static const nativeInboxPermissionBlocked = 'NATIVE_INBOX_PERMISSION_BLOCKED';
   static const fgsStartRejected = 'FGS_START_REJECTED';
   static const fgsStarted = 'FGS_STARTED';
   static const fgsStopped = 'FGS_STOPPED';
@@ -104,8 +115,8 @@ class ExperimentLogger {
       deviceId: deviceId,
       deviceModel: deviceModel,
       androidVersion: androidVersion,
-      forwardingMode: MeshConfig.forwardingMode.name,
-      maxHop: MeshConfig.defaultMaxHop,
+      forwardingMode: MeshConfig.forwardingMode.logValue,
+      maxHop: MeshConfig.legacyHopMetadata,
       messageLifetimeMs: MeshConfig.defaultMessageLifetime.inMilliseconds,
       relayCooldownMs: MeshConfig.relayCooldown.inMilliseconds,
       startedAt: now,
