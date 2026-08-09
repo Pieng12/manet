@@ -532,6 +532,7 @@ class BleAdvertiserService {
     if (message == null) return;
 
     final now = DateTime.now().millisecondsSinceEpoch;
+    final originalNextEligibleAt = queued.item.nextEligibleAt;
     await _relayQueue.markAdvertisingStarted(
       queued.item,
       nowMs: now,
@@ -607,7 +608,10 @@ class BleAdvertiserService {
         retryDelay: _nextTransientRetryDelay(),
       );
     } else {
-      await _relayQueue.markAdvertisingBlocked(queued.item);
+      await _relayQueue.markAdvertisingBlocked(
+        queued.item,
+        restoreNextEligibleAt: originalNextEligibleAt,
+      );
     }
     await _experimentLogger.logEvent(
       eventType: ExperimentEventTypes.bleAdvertiseFailed,
@@ -642,6 +646,7 @@ class BleAdvertiserService {
 
     _ackRestoreTimer?.cancel();
     _stopSlotTimer();
+    final originalNextEligibleAt = queued.item.nextEligibleAt;
     await _relayQueue.markAdvertisingStarted(
       queued.item,
       nowMs: DateTime.now().millisecondsSinceEpoch,
@@ -701,7 +706,10 @@ class BleAdvertiserService {
         retryDelay: _nextTransientRetryDelay(),
       );
     } else {
-      await _relayQueue.markAdvertisingBlocked(queued.item);
+      await _relayQueue.markAdvertisingBlocked(
+        queued.item,
+        restoreNextEligibleAt: originalNextEligibleAt,
+      );
     }
     await _experimentLogger.logEvent(
       eventType: ExperimentEventTypes.bleAdvertiseFailed,

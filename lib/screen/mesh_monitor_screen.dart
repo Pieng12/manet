@@ -402,6 +402,8 @@ class _MeshMonitorScreenState extends State<MeshMonitorScreen>
 
   Widget _buildDiagnosticsCard() {
     final nativeManufacturerId = _bleCapabilities['nativeManufacturerId'];
+    final nativeInboxPermissionBlockedAt =
+        _bleCapabilities['nativeInboxPermissionBlockedAt'];
     final manufacturerMismatch =
         nativeManufacturerId is int &&
         nativeManufacturerId != MeshConfig.manufacturerId;
@@ -424,8 +426,9 @@ class _MeshMonitorScreenState extends State<MeshMonitorScreen>
       'Foreground Service':
           '${_bleCapabilities['foregroundServiceActive'] ?? '-'}',
       'Pending Inbox': '${_bleCapabilities['pendingNativeInbox'] ?? '-'}',
-      'Inbox Permission Blocked':
-          '${_bleCapabilities['nativeInboxPermissionBlockedAt'] ?? '-'}',
+      'Inbox Permission Blocked': _formatPermissionBlockedDiagnostic(
+        nativeInboxPermissionBlockedAt,
+      ),
       'Relay Mode': '${_bleCapabilities['relayModeEnabled'] ?? '-'}',
       'Dart Manufacturer ID':
           '0x${MeshConfig.manufacturerId.toRadixString(16).toUpperCase()}',
@@ -468,6 +471,12 @@ class _MeshMonitorScreenState extends State<MeshMonitorScreen>
         ),
       ),
     );
+  }
+
+  String _formatPermissionBlockedDiagnostic(Object? value) {
+    final timestamp = value is int ? value : int.tryParse('$value');
+    if (timestamp == null || timestamp <= 0) return 'No';
+    return DateTime.fromMillisecondsSinceEpoch(timestamp).toIso8601String();
   }
 
   Widget _buildLogsTab() {

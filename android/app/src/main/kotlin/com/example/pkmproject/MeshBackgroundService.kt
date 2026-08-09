@@ -334,6 +334,14 @@ class MeshBackgroundService : Service() {
                     "resumePendingNativeBleInbox" -> {
                         result.success(NativeBleInboxWorker.enqueueIfPendingAndPermitted(this))
                     }
+                    "clearNativeBleInboxPermissionBlocked" -> {
+                        if (NativeBlePermissions.hasRequiredRuntimePermissions(this)) {
+                            NativeBleInbox.clearPermissionBlocked(this)
+                            result.success(true)
+                        } else {
+                            result.success(false)
+                        }
+                    }
                     "hasPendingRelayWork" -> {
                         result.success(hasPendingRelayWork())
                     }

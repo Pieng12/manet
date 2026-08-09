@@ -98,6 +98,14 @@ class MainActivity : FlutterActivity() {
                     "resumePendingNativeBleInbox" -> {
                         result.success(NativeBleInboxWorker.enqueueIfPendingAndPermitted(this))
                     }
+                    "clearNativeBleInboxPermissionBlocked" -> {
+                        if (NativeBlePermissions.hasRequiredRuntimePermissions(this)) {
+                            NativeBleInbox.clearPermissionBlocked(this)
+                            result.success(true)
+                        } else {
+                            result.success(false)
+                        }
+                    }
                     "getBleCapabilities" -> {
                         result.success(bleCapabilities())
                     }

@@ -119,4 +119,18 @@ class NativeBridgeService {
       return false;
     }
   }
+
+  static Future<bool> clearNativeBleInboxPermissionBlocked() async {
+    try {
+      return await _platform.invokeMethod<bool>(
+            'clearNativeBleInboxPermissionBlocked',
+          ) ??
+          false;
+    } on PlatformException catch (e) {
+      print(
+        "Failed to clear native BLE inbox permission diagnostic: '${e.message}'.",
+      );
+      return false;
+    }
+  }
 }

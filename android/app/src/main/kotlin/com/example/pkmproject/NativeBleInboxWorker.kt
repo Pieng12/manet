@@ -30,6 +30,7 @@ class NativeBleInboxWorker(
             Log.w(TAG, "Permissions missing; BLE inbox recovery deferred")
             return Result.success()
         }
+        NativeBleInbox.clearPermissionBlocked(applicationContext)
 
         val completed = CountDownLatch(1)
         val success = AtomicBoolean(false)
@@ -112,6 +113,10 @@ class NativeBleInboxWorker(
                             "resumePendingNativeBleInbox" -> {
                                 result.success(enqueueIfPendingAndPermitted(applicationContext))
                             }
+                            "clearNativeBleInboxPermissionBlocked" -> {
+                                NativeBleInbox.clearPermissionBlocked(applicationContext)
+                                result.success(true)
+                            }
                             "nativeBleInboxWorkerComplete" -> {
                                 success.set(call.argument<Boolean>("success") == true)
                                 result.success(true)
@@ -190,11 +195,12 @@ class NativeBleInboxWorker(
 
         fun enqueueIfPendingAndPermitted(context: Context): Boolean {
             val appContext = context.applicationContext
-            if (NativeBleInbox.pendingCount(appContext) <= 0) return false
             if (!NativeBlePermissions.hasRequiredRuntimePermissions(appContext)) {
                 NativeBleInbox.markPermissionBlocked(appContext)
                 return false
             }
+            NativeBleInbox.clearPermissionBlocked(appContext)
+            if (NativeBleInbox.pendingCount(appContext) <= 0) return false
             enqueue(appContext)
             return true
         }

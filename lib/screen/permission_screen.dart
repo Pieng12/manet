@@ -117,6 +117,7 @@ class _PermissionScreenState extends State<PermissionScreen>
       await NativeBridgeService.setRelayModeEnabled(true);
       await BackgroundServiceManager.startBackgroundService();
       await BackgroundServiceManager.requestIgnoreBatteryOptimizations();
+      await NativeBridgeService.clearNativeBleInboxPermissionBlocked();
       await NativeBridgeService.resumePendingNativeBleInbox();
       await BackgroundServiceManager.requestSchedulerTick();
     } catch (e) {

@@ -31,9 +31,15 @@ void main() {
     final worker = read(
       'android/app/src/main/kotlin/com/example/pkmproject/NativeBleInboxWorker.kt',
     );
+    final inbox = read(
+      'android/app/src/main/kotlin/com/example/pkmproject/NativeBleInbox.kt',
+    );
 
     expect(worker, contains('NativeBleInbox.markPermissionBlocked'));
+    expect(worker, contains('NativeBleInbox.clearPermissionBlocked'));
     expect(worker, contains('return Result.success()'));
+    expect(inbox, contains('fun clearPermissionBlocked'));
+    expect(inbox, contains('.remove(KEY_PERMISSION_BLOCKED_AT)'));
     expect(
       worker,
       isNot(
@@ -42,6 +48,38 @@ void main() {
         ),
       ),
     );
+  });
+
+  test('valid permission recovery clears native inbox permission diagnostic', () {
+    final worker = read(
+      'android/app/src/main/kotlin/com/example/pkmproject/NativeBleInboxWorker.kt',
+    );
+    final mainActivity = read(
+      'android/app/src/main/kotlin/com/example/pkmproject/MainActivity.kt',
+    );
+    final service = read(
+      'android/app/src/main/kotlin/com/example/pkmproject/MeshBackgroundService.kt',
+    );
+    final permissionScreen = read('lib/screen/permission_screen.dart');
+    final monitor = read('lib/screen/mesh_monitor_screen.dart');
+
+    expect(
+      worker,
+      contains('NativeBleInbox.clearPermissionBlocked(appContext)'),
+    );
+    expect(
+      worker.indexOf('NativeBlePermissions.hasRequiredRuntimePermissions'),
+      lessThan(
+        worker.indexOf('NativeBleInbox.clearPermissionBlocked(appContext)'),
+      ),
+    );
+    expect(mainActivity, contains('clearNativeBleInboxPermissionBlocked'));
+    expect(service, contains('clearNativeBleInboxPermissionBlocked'));
+    expect(
+      permissionScreen,
+      contains('NativeBridgeService.clearNativeBleInboxPermissionBlocked()'),
+    );
+    expect(monitor, contains("return 'No';"));
   });
 
   test('all BLE wake foreground-service failures schedule worker recovery', () {

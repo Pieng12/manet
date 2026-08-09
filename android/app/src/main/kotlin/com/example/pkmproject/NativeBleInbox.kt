@@ -115,6 +115,14 @@ object NativeBleInbox {
     }
 
     @Synchronized
+    fun clearPermissionBlocked(context: Context) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .remove(KEY_PERMISSION_BLOCKED_AT)
+            .apply()
+    }
+
+    @Synchronized
     fun permissionBlockedAt(context: Context): Long {
         return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .getLong(KEY_PERMISSION_BLOCKED_AT, 0L)

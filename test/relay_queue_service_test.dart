@@ -871,7 +871,7 @@ void main() {
 
       expect(inserted, AckApplyResult.inserted);
       expect(upgraded, AckApplyResult.replacedHigherStatus);
-      expect(downgrade, AckApplyResult.duplicate);
+      expect(downgrade, AckApplyResult.rejectedOlder);
       expect(older, AckApplyResult.rejectedOlder);
       expect(tombstone['status'], SOSMessageStatus.resolved.index);
     },

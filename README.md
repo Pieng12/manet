@@ -16,8 +16,9 @@ sudah tersedia:
 - Persistent relay queue dengan prioritas ACK.
 - ACK gateway sebagai persistent anti-message.
 - Native Android BLE scan/advertising dengan manufacturer filter.
-- Background recovery setelah app removed, boot, service restart, Bluetooth
-  restart, dan reboot.
+- Mekanisme background recovery sudah diimplementasikan untuk app removed,
+  boot, service restart, Bluetooth restart, dan reboot; validasi perangkat
+  fisik untuk jalur ini masih berjalan.
 - Native persistent inbox agar packet BLE tidak hilang saat Flutter belum siap.
 - Gateway sync melalui WorkManager unique work `resqmeshGatewaySync`.
 - Experiment session, event log, RSSI capture, dan export CSV/JSON.
@@ -50,6 +51,8 @@ Pada Android 12+, packet yang diterima saat foreground service tidak boleh
 dimulai tetap tersimpan di native inbox. Recovery dilakukan oleh WorkManager
 yang menjalankan Dart headless, memproses packet ke SQLite/relay queue, lalu
 baru meng-ack item native jika hasilnya selesai non-retryable.
+Headless Worker relay support sudah diimplementasikan pada level source dan
+masih harus divalidasi di perangkat Android fisik.
 
 Scheduler BLE dimiliki oleh background Dart isolate. UI isolate hanya mengirim
 command dan membaca state. Saat queue belum eligible, `RelayQueueService`

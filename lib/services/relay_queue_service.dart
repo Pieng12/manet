@@ -577,11 +577,18 @@ WHERE id = ?
     );
   }
 
-  Future<void> markAdvertisingBlocked(RelayQueueItem item) async {
+  Future<void> markAdvertisingBlocked(
+    RelayQueueItem item, {
+    int? restoreNextEligibleAt,
+  }) async {
     final db = await _db;
+    final values = <String, Object?>{'queue_state': stateFailed};
+    if (restoreNextEligibleAt != null) {
+      values['next_eligible_at'] = restoreNextEligibleAt;
+    }
     await db.update(
       'relay_queue',
-      {'queue_state': stateFailed},
+      values,
       where: 'message_id = ? AND packet_type = ?',
       whereArgs: [item.messageId, item.packetType],
     );
@@ -767,6 +774,9 @@ WHERE id = ?
         : SOSMessageStatus.cancelled;
     if (sosStatusPriority(status) > sosStatusPriority(existingStatus)) {
       return AckApplyResult.replacedHigherStatus;
+    }
+    if (sosStatusPriority(status) < sosStatusPriority(existingStatus)) {
+      return AckApplyResult.rejectedOlder;
     }
     return AckApplyResult.duplicate;
   }

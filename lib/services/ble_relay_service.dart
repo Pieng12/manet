@@ -64,6 +64,28 @@ class BleRelayService {
     return packet.isAck;
   }
 
+  static BleProcessingResult processingResultForAckApplyResult(
+    AckApplyResult result,
+  ) {
+    return switch (result) {
+      AckApplyResult.duplicate => BleProcessingResult.duplicate,
+      AckApplyResult.rejectedOlder => BleProcessingResult.stale,
+      AckApplyResult.rejectedInvalid ||
+      AckApplyResult.rejectedFuture => BleProcessingResult.invalid,
+      _ => BleProcessingResult.accepted,
+    };
+  }
+
+  static String? genericAckPacketEventTypeForResult(AckApplyResult result) {
+    return switch (result) {
+      AckApplyResult.duplicate => ExperimentEventTypes.blePacketDuplicate,
+      AckApplyResult.rejectedOlder => ExperimentEventTypes.blePacketStale,
+      AckApplyResult.rejectedInvalid ||
+      AckApplyResult.rejectedFuture => ExperimentEventTypes.bleRelayDropped,
+      _ => null,
+    };
+  }
+
   static SOSMessage messageFromSosPacket(BlePacket packet, int receivedAtMs) {
     final expiresAt = sosExpiresAt(packet);
     final timestampMs = canonicalProtocolTimestamp(packet.timestampMs);
@@ -265,24 +287,25 @@ class BleRelayService {
       payloadHash: packet.identity,
     );
 
+    final genericAckEventType = genericAckPacketEventTypeForResult(result);
     if (!result.shouldRelay) {
-      await _experimentLogger.logEvent(
-        eventType: ExperimentEventTypes.blePacketDuplicate,
-        deviceId: SyncService().deviceId,
-        senderCrc: packet.senderCrc,
-        hopCount: packet.hopCount,
-        rssi: rssi,
-        payloadHash: packet.identity,
-        detail: {'kind': 'ack'},
-      );
+      if (genericAckEventType != null) {
+        await _experimentLogger.logEvent(
+          eventType: genericAckEventType,
+          deviceId: SyncService().deviceId,
+          senderCrc: packet.senderCrc,
+          hopCount: packet.hopCount,
+          rssi: rssi,
+          payloadHash: packet.identity,
+          detail: {
+            'kind': 'ack',
+            if (genericAckEventType == ExperimentEventTypes.bleRelayDropped)
+              'reason': result.name,
+          },
+        );
+      }
       _log('${result.name.toUpperCase()} ${packet.identity}');
-      return switch (result) {
-        AckApplyResult.duplicate => BleProcessingResult.duplicate,
-        AckApplyResult.rejectedOlder => BleProcessingResult.stale,
-        AckApplyResult.rejectedInvalid ||
-        AckApplyResult.rejectedFuture => BleProcessingResult.invalid,
-        _ => BleProcessingResult.duplicate,
-      };
+      return processingResultForAckApplyResult(result);
     }
 
     await _advertiser.advertiseLatestOrStop(preemptCurrent: true);

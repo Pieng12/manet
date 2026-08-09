@@ -122,12 +122,39 @@ void main() {
       await queue.enqueueSos(message, nextEligibleAt: now);
 
       final item = (await queue.nextEligible(now))!;
-      await queue.markAdvertisingBlocked(item);
+      final originalNextEligibleAt = item.nextEligibleAt;
+      await queue.markAdvertisingStarted(
+        item,
+        nowMs: now,
+        slotDuration: MeshConfig.relaySlotDuration,
+      );
+      final afterStart = (await queue.getItem(message.id, 'sos'))!;
+      expect(
+        afterStart.nextEligibleAt,
+        now + MeshConfig.relaySlotDuration.inMilliseconds,
+      );
+
+      await queue.markAdvertisingBlocked(
+        item,
+        restoreNextEligibleAt: originalNextEligibleAt,
+      );
 
       final blocked = (await queue.getItem(message.id, 'sos'))!;
+      final stored = SOSMessage.fromDbMap(
+        (await db.query(
+          'sos_messages',
+          where: 'id = ?',
+          whereArgs: [message.id],
+        )).single,
+      );
       expect(blocked.queueState, RelayQueueService.stateFailed);
       expect(blocked.nextEligibleAt, now);
-      expect((await queue.nextEligible(now + 10000))!.messageId, message.id);
+      expect(blocked.nextEligibleAt, lessThanOrEqualTo(originalNextEligibleAt));
+      expect(blocked.relayCount, 0);
+      expect(blocked.lastRelayedAt, 0);
+      expect(stored.relayCount, 0);
+      expect(stored.lastRelayedAt, 0);
+      expect((await queue.nextEligible(now + 1000))!.messageId, message.id);
     },
   );
 }
