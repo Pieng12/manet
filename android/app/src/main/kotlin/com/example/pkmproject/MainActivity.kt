@@ -228,7 +228,8 @@ class MainActivity : FlutterActivity() {
             "lastErrorCode" to (advertiseStatus["errorCode"] ?: scanStatus["lastScanErrorCode"]),
             "foregroundServiceActive" to MeshBackgroundService.serviceStarted,
             "pendingNativeInbox" to NativeBleInbox.pendingCount(this),
-            "relayModeEnabled" to servicePrefs().getBoolean(KEY_RELAY_MODE_ENABLED, true)
+            "relayModeEnabled" to servicePrefs().getBoolean(KEY_RELAY_MODE_ENABLED, true),
+            "nativeManufacturerId" to NativeBleConfig.MANUFACTURER_ID
         )
     }
 

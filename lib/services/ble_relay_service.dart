@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:pkmproject/config/mesh_config.dart';
 import 'package:pkmproject/models/ack_apply_result.dart';
+import 'package:pkmproject/models/ble_processing_result.dart';
 import 'package:pkmproject/models/forwarding_decision.dart';
 import 'package:pkmproject/models/sos_message.dart';
 import 'package:pkmproject/services/background_service_manager.dart';
@@ -84,7 +85,7 @@ class BleRelayService {
       updatedAt: timestampMs,
       isSynced: packet.fromServer ? 1 : 0,
       hopCount: nextHopCount,
-      maxHop: MeshConfig.defaultMaxHop,
+      maxHop: MeshConfig.legacyHopMetadata,
       expiresAt: expiresAt,
       firstSeenAt: receivedAtMs,
       localState: 'pending',
@@ -132,20 +133,27 @@ class BleRelayService {
     await _tryGatewaySync();
   }
 
-  Future<void> processIncomingBase64(String payloadBase64, {int? rssi}) async {
+  Future<BleProcessingResult> processIncomingBase64(
+    String payloadBase64, {
+    int? rssi,
+  }) async {
     try {
       final payload = base64Decode(payloadBase64);
-      await processIncomingPayload(Uint8List.fromList(payload), rssi: rssi);
-    } catch (e) {
+      return processIncomingPayload(Uint8List.fromList(payload), rssi: rssi);
+    } on FormatException catch (e) {
       _log('Invalid BLE payload: $e');
+      return BleProcessingResult.invalid;
     }
   }
 
-  Future<void> processIncomingPayload(Uint8List payload, {int? rssi}) async {
+  Future<BleProcessingResult> processIncomingPayload(
+    Uint8List payload, {
+    int? rssi,
+  }) async {
     final packet = BlePacket.unpack(payload);
     if (packet == null) {
       _log('Ignored non-ResQMesh BLE packet: ${_hex(payload)}');
-      return;
+      return BleProcessingResult.invalid;
     }
 
     _log('Received BLE payload ${_hex(payload)} -> ${_describePacket(packet)}');
@@ -159,10 +167,15 @@ class BleRelayService {
       detail: {'kind': packet.kind.name, 'status': packet.status.name},
     );
 
-    if (packet.isAck) {
-      await _processAck(packet, rssi: rssi);
-    } else {
-      await _processSos(packet, rssi: rssi);
+    try {
+      if (packet.isAck) {
+        return await _processAck(packet, rssi: rssi);
+      } else {
+        return await _processSos(packet, rssi: rssi);
+      }
+    } catch (e) {
+      _log('Retryable BLE processing failure for ${packet.identity}: $e');
+      return BleProcessingResult.failedRetryable;
     }
   }
 
@@ -198,7 +211,7 @@ class BleRelayService {
         sosStatusPriority(existing.status);
   }
 
-  Future<void> _processAck(BlePacket packet, {int? rssi}) async {
+  Future<BleProcessingResult> _processAck(BlePacket packet, {int? rssi}) async {
     if (packet.status == SOSMessageStatus.active) {
       await _experimentLogger.logEvent(
         eventType: ExperimentEventTypes.bleRelayDropped,
@@ -210,7 +223,7 @@ class BleRelayService {
         detail: {'reason': 'ACK_ACTIVE_REJECTED'},
       );
       _log('ACK_ACTIVE_REJECTED ${packet.identity}');
-      return;
+      return BleProcessingResult.invalid;
     }
 
     await _experimentLogger.logEvent(
@@ -263,7 +276,13 @@ class BleRelayService {
         detail: {'kind': 'ack'},
       );
       _log('${result.name.toUpperCase()} ${packet.identity}');
-      return;
+      return switch (result) {
+        AckApplyResult.duplicate => BleProcessingResult.duplicate,
+        AckApplyResult.rejectedOlder => BleProcessingResult.stale,
+        AckApplyResult.rejectedInvalid ||
+        AckApplyResult.rejectedFuture => BleProcessingResult.invalid,
+        _ => BleProcessingResult.duplicate,
+      };
     }
 
     await _advertiser.advertiseLatestOrStop(preemptCurrent: true);
@@ -280,9 +299,10 @@ class BleRelayService {
       detail: {'kind': 'ack'},
     );
     _log('ACK_RELAY_QUEUED ${packet.identity} hop=$nextAckHop');
+    return BleProcessingResult.accepted;
   }
 
-  Future<void> _processSos(BlePacket packet, {int? rssi}) async {
+  Future<BleProcessingResult> _processSos(BlePacket packet, {int? rssi}) async {
     final now = DateTime.now().millisecondsSinceEpoch;
     final suppressedByAck = await _dbHelper.isSuppressedByAckTombstone(
       senderCrc: packet.senderCrc,
@@ -299,7 +319,7 @@ class BleRelayService {
         detail: {'reason': 'ACK_TOMBSTONE_SUPPRESSED'},
       );
       _log('ACK_TOMBSTONE_SUPPRESSED ${packet.identity}');
-      return;
+      return BleProcessingResult.suppressedByAck;
     }
 
     final message = messageFromSosPacket(packet, now);
@@ -339,7 +359,14 @@ class BleRelayService {
         detail: {'reason': decision.reason.code},
       );
       _log('${decision.reason.code} ${packet.identity}');
-      return;
+      return switch (decision.reason) {
+        ForwardingDecisionReason.dropInvalid => BleProcessingResult.invalid,
+        ForwardingDecisionReason.dropAcked =>
+          BleProcessingResult.suppressedByAck,
+        ForwardingDecisionReason.dropOwnPacket ||
+        ForwardingDecisionReason.dropDuplicate => BleProcessingResult.duplicate,
+        _ => BleProcessingResult.stale,
+      };
     }
 
     message.hopCount = decision.nextHopCount ?? message.hopCount;
@@ -389,7 +416,7 @@ class BleRelayService {
     }
     if (!stored) {
       _log('SOS_TRANSACTION_SKIPPED ${packet.identity}');
-      return;
+      return BleProcessingResult.stale;
     }
     await _experimentLogger.logEvent(
       eventType: ExperimentEventTypes.sosTransactionCommitted,
@@ -432,7 +459,7 @@ class BleRelayService {
       await _advertiser.advertiseLatestOrStop();
       _log('${decision.reason.code} ${packet.identity}');
       await _tryGatewaySync();
-      return;
+      return BleProcessingResult.accepted;
     }
 
     if (!decision.shouldRelay) {
@@ -448,7 +475,7 @@ class BleRelayService {
       );
       _log('${decision.reason.code} ${packet.identity}');
       await _tryGatewaySync();
-      return;
+      return BleProcessingResult.accepted;
     }
 
     await _experimentLogger.logEvent(
@@ -463,6 +490,7 @@ class BleRelayService {
     await _advertiser.advertiseLatestOrStop();
     _log('${decision.reason.code} ${packet.identity} hop=${message.hopCount}');
     await _tryGatewaySync();
+    return BleProcessingResult.accepted;
   }
 
   Future<void> _tryGatewaySync() async {

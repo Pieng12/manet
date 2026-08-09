@@ -8,6 +8,15 @@ import org.json.JSONObject
 import java.security.MessageDigest
 import java.util.UUID
 
+data class NativeBlePacketMetadata(
+    val senderCrc: Long,
+    val timestampCompact: Int,
+    val status: Int,
+    val isAck: Boolean,
+    val fromServer: Boolean,
+    val hop: Int
+)
+
 object NativeBleInbox {
     private const val TAG = "NativeBleInbox"
     private const val PREFS = "resqmesh_native_ble_inbox"
@@ -27,7 +36,8 @@ object NativeBleInbox {
     ): String {
         cleanupProcessed(context, receivedAt)
         val payloadBase64 = Base64.encodeToString(payload, Base64.NO_WRAP)
-        val identity = packetIdentity(payload)
+        val identity = exactPayloadHash(payload)
+        val metadata = protocolMetadata(payload)
         val items = readItems(context)
 
         for (i in 0 until items.length()) {
@@ -51,6 +61,12 @@ object NativeBleInbox {
                 .put("attempt_count", 0)
                 .put("state", STATE_PENDING)
                 .put("identity", identity)
+                .put("sender_crc", metadata?.senderCrc ?: JSONObject.NULL)
+                .put("timestamp_compact", metadata?.timestampCompact ?: JSONObject.NULL)
+                .put("status", metadata?.status ?: JSONObject.NULL)
+                .put("is_ack", metadata?.isAck ?: JSONObject.NULL)
+                .put("from_server", metadata?.fromServer ?: JSONObject.NULL)
+                .put("hop", metadata?.hop ?: JSONObject.NULL)
         )
         writeItems(context, items)
         Log.i(TAG, "Stored pending BLE inbox item id=$id")
@@ -146,19 +162,30 @@ object NativeBleInbox {
             .apply()
     }
 
-    private fun packetIdentity(payload: ByteArray): String {
-        val digest = MessageDigest.getInstance("SHA-256")
-            .digest(payload)
-            .joinToString("") { "%02x".format(it) }
-        if (payload.size < NativeBleConfig.PROTOCOL_LENGTH_BYTES) return digest
-        val sender = u16(payload[2], payload[3])
-        val timestamp = u32(payload[4], payload[5], payload[6], payload[7])
-        val status = payload[16].toInt() and 0x03
-        return "$sender:$timestamp:$status:$digest"
+    fun protocolMetadata(payload: ByteArray): NativeBlePacketMetadata? {
+        if (payload.size != NativeBleConfig.PROTOCOL_LENGTH_BYTES) return null
+        if (payload[0] != 0x52.toByte() || payload[1] != 0x4D.toByte()) return null
+        val flags = payload[16].toInt() and 0xFF
+        return NativeBlePacketMetadata(
+            senderCrc = u32(payload[2], payload[3], payload[4], payload[5]),
+            timestampCompact = u24(payload[6], payload[7], payload[8]),
+            status = payload[15].toInt() and 0xFF,
+            isAck = (flags and 0x80) != 0,
+            fromServer = (flags and 0x40) != 0,
+            hop = flags and 0x3F
+        )
     }
 
-    private fun u16(high: Byte, low: Byte): Int {
-        return ((high.toInt() and 0xFF) shl 8) or (low.toInt() and 0xFF)
+    fun exactPayloadHash(payload: ByteArray): String {
+        return MessageDigest.getInstance("SHA-256")
+            .digest(payload)
+            .joinToString("") { "%02x".format(it) }
+    }
+
+    private fun u24(b0: Byte, b1: Byte, b2: Byte): Int {
+        return ((b0.toInt() and 0xFF) shl 16) or
+            ((b1.toInt() and 0xFF) shl 8) or
+            (b2.toInt() and 0xFF)
     }
 
     private fun u32(b0: Byte, b1: Byte, b2: Byte, b3: Byte): Long {

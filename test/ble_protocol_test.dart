@@ -109,7 +109,7 @@ void main() {
       status: SOSMessageStatus.active,
       createdAt: updatedAt,
       updatedAt: updatedAt,
-      hopCount: MeshConfig.defaultMaxHop - 1,
+      hopCount: MeshConfig.legacyHopMetadata - 1,
     );
     final packet = BlePacket.unpack(
       BlePacket.packSos(message),
@@ -125,7 +125,7 @@ void main() {
       BleRelayService.canRelaySosPacket(packet, relayed.firstSeenAt),
       true,
     );
-    expect(relayed.hopCount, MeshConfig.defaultMaxHop);
+    expect(relayed.hopCount, MeshConfig.legacyHopMetadata);
   });
 
   test('SOS at hop 63 is relayed with saturated hop 63', () {
@@ -196,7 +196,7 @@ void main() {
       createdAt: updatedAt,
       updatedAt: updatedAt,
       hopCount: 3,
-      maxHop: MeshConfig.defaultMaxHop,
+      maxHop: MeshConfig.legacyHopMetadata,
       expiresAt: expiresAt,
       firstSeenAt: updatedAt + 500,
       relayCount: 2,
@@ -206,7 +206,7 @@ void main() {
     final reloaded = SOSMessage.fromDbMap(message.toDbMap());
 
     expect(reloaded.hopCount, 3);
-    expect(reloaded.maxHop, MeshConfig.defaultMaxHop);
+    expect(reloaded.maxHop, MeshConfig.legacyHopMetadata);
     expect(reloaded.expiresAt, expiresAt);
     expect(reloaded.firstSeenAt, updatedAt + 500);
     expect(reloaded.relayCount, 2);
@@ -296,7 +296,7 @@ void main() {
     final maxHopPayload = BlePacket.packAck(
       senderCrc: 12345,
       ackTimestampMs: ackTimestamp,
-      hopCount: MeshConfig.maxAckHop + 1,
+      hopCount: MeshConfig.legacyAckHopMetadata + 1,
     );
     final maxHopPacket = BlePacket.unpack(
       maxHopPayload,
@@ -447,7 +447,7 @@ CREATE TABLE sos_messages (
     expect(rows, hasLength(1));
     expect(rows.single['id'], 'legacy-1');
     expect(rows.single['hop_count'], 0);
-    expect(rows.single['max_hop'], MeshConfig.defaultMaxHop);
+    expect(rows.single['max_hop'], MeshConfig.legacyHopMetadata);
     expect(
       rows.single['expires_at'],
       createdAt + MeshConfig.defaultMessageLifetime.inMilliseconds,

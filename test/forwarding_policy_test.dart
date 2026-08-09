@@ -52,7 +52,7 @@ void main() {
     );
   }
 
-  test('new controlled flooding packet is accepted for relay', () {
+  test('new controlled epidemic packet is accepted for relay', () {
     const policy = ForwardingPolicy();
 
     final decision = policy.decideSos(packet: sosPacket(), nowMs: now);
@@ -220,7 +220,7 @@ void main() {
     expect(decision.reason, ForwardingDecisionReason.relayAccepted);
   });
 
-  test('controlled flooding defers packet during relay cooldown', () {
+  test('controlled epidemic defers packet during relay cooldown', () {
     const policy = ForwardingPolicy();
     final lastRelayedAt = now - const Duration(seconds: 2).inMilliseconds;
 
@@ -336,7 +336,7 @@ void main() {
       nowMs: now,
       existingMessage: existingMessage(
         updatedAt: now - 1000,
-        relayCount: MeshConfig.maxRelayCount,
+        relayCount: MeshConfig.relayCountMetricSample,
       ),
     );
 
@@ -345,7 +345,7 @@ void main() {
     expect(decision.reason, ForwardingDecisionReason.relayAccepted);
   });
 
-  test('basic flooding ignores controlled cooldown and max relay count', () {
+  test('basic flooding ignores controlled backoff and relay count metric', () {
     const policy = ForwardingPolicy(mode: ForwardingMode.basicFlooding);
 
     final decision = policy.decideSos(
@@ -353,7 +353,7 @@ void main() {
       nowMs: now,
       existingMessage: existingMessage(
         updatedAt: now - 1000,
-        relayCount: MeshConfig.maxRelayCount,
+        relayCount: MeshConfig.relayCountMetricSample,
         lastRelayedAt: now - const Duration(seconds: 2).inMilliseconds,
       ),
     );

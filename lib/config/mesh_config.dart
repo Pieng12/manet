@@ -1,4 +1,11 @@
-enum ForwardingMode { basicFlooding, controlledFlooding }
+enum ForwardingMode {
+  basicFlooding('basic_flooding'),
+  controlledEpidemic('controlled_epidemic');
+
+  const ForwardingMode(this.logValue);
+
+  final String logValue;
+}
 
 enum ResqMeshMode { offline, gateway }
 
@@ -18,18 +25,19 @@ class MeshConfig {
 
   static const String forwardingModeName = String.fromEnvironment(
     'RESQMESH_FORWARDING_MODE',
-    defaultValue: 'controlled',
+    defaultValue: 'controlled_epidemic',
   );
-  static const ForwardingMode forwardingMode = forwardingModeName == 'basic'
+  static const ForwardingMode forwardingMode =
+      forwardingModeName == 'basic' || forwardingModeName == 'basic_flooding'
       ? ForwardingMode.basicFlooding
-      : ForwardingMode.controlledFlooding;
+      : ForwardingMode.controlledEpidemic;
 
   static const int protocolLength = 17;
   static const int manufacturerId = 0xFFFF;
-  static const int defaultMaxHop = 5;
-  static const int maxAckHop = 5;
+  static const int legacyHopMetadata = 5;
+  static const int legacyAckHopMetadata = 5;
   static const int maxProtocolHop = 63;
-  static const int maxRelayCount = 10;
+  static const int relayCountMetricSample = 10;
 
   static const Duration defaultMessageLifetime = Duration(hours: 6);
   static const Duration ackLifetime = Duration(minutes: 2);

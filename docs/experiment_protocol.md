@@ -10,7 +10,7 @@ Mode offline BLE:
 ```bash
 flutter run \
   --dart-define=RESQMESH_MODE=offline \
-  --dart-define=RESQMESH_FORWARDING_MODE=controlled
+  --dart-define=RESQMESH_FORWARDING_MODE=controlled_epidemic
 ```
 
 Mode gateway:
@@ -19,7 +19,7 @@ Mode gateway:
 flutter run \
   --dart-define=RESQMESH_MODE=gateway \
   --dart-define=RESQMESH_API_BASE_URL=https://example.com/api \
-  --dart-define=RESQMESH_FORWARDING_MODE=controlled
+  --dart-define=RESQMESH_FORWARDING_MODE=controlled_epidemic
 ```
 
 Pembanding basic flooding:
@@ -122,7 +122,7 @@ advertising.
 
 Timestamp BLE memakai presisi satu detik. Gunakan timestamp canonical dari
 payload/identity saat menghitung duplicate, ACK tombstone, dan recovery queue.
-Mode `basic` memakai slot aktual 2 detik, sedangkan `controlled` memakai slot
+Mode `basic` memakai slot aktual 2 detik, sedangkan `controlled_epidemic` memakai slot
 default 5 detik plus adaptive backoff.
 
 ## Catatan P5 untuk Uji Perangkat Fisik
@@ -137,10 +137,10 @@ flutter pub get
 dart format --output=none --set-exit-if-changed .
 flutter analyze
 flutter test
-flutter build apk --debug --dart-define=RESQMESH_MODE=offline --dart-define=RESQMESH_FORWARDING_MODE=controlled --dart-define=RESQMESH_BLE_DEBUG_VISIBLE=true
+flutter build apk --debug --dart-define=RESQMESH_MODE=offline --dart-define=RESQMESH_FORWARDING_MODE=controlled_epidemic --dart-define=RESQMESH_BLE_DEBUG_VISIBLE=true
 flutter build apk --debug --dart-define=RESQMESH_MODE=offline --dart-define=RESQMESH_FORWARDING_MODE=basic --dart-define=RESQMESH_BLE_DEBUG_VISIBLE=true
-flutter build apk --debug --dart-define=RESQMESH_MODE=gateway --dart-define=RESQMESH_FORWARDING_MODE=controlled --dart-define=RESQMESH_API_BASE_URL=https://example.com/api
-flutter build apk --release --dart-define=RESQMESH_MODE=offline --dart-define=RESQMESH_FORWARDING_MODE=controlled
+flutter build apk --debug --dart-define=RESQMESH_MODE=gateway --dart-define=RESQMESH_FORWARDING_MODE=controlled_epidemic --dart-define=RESQMESH_API_BASE_URL=https://example.com/api
+flutter build apk --release --dart-define=RESQMESH_MODE=offline --dart-define=RESQMESH_FORWARDING_MODE=controlled_epidemic
 ```
 
 Event P5 yang perlu diperhatikan: `QUEUE_WAKE_SCHEDULED`,

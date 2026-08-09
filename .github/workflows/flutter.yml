@@ -29,3 +29,10 @@ jobs:
 
       - name: Test
         run: flutter test
+
+      - name: Build debug APK
+        run: flutter build apk --debug
+
+      - name: Native unit tests
+        working-directory: android
+        run: ./gradlew testDebugUnitTest

@@ -14,6 +14,7 @@ import 'package:pkmproject/services/database_helper.dart';
 import 'package:pkmproject/services/demo_seed_service.dart';
 import 'package:pkmproject/services/experiment_logger.dart';
 import 'package:pkmproject/services/native_bridge_service.dart';
+import 'package:pkmproject/services/native_ble_inbox_drain_service.dart';
 import 'package:pkmproject/services/workmanager_service.dart';
 import 'package:pkmproject/sync_service.dart';
 import 'package:pkmproject/utils/navigator_key.dart';
@@ -201,7 +202,7 @@ void backgroundServiceMain() {
         final now = DateTime.now().millisecondsSinceEpoch;
         final last = lastProcessedPayloads[payloadBase64] ?? 0;
         if (now - last < 5000) {
-          if (inboxId != null) {
+          if (inboxId != null && inboxId.isNotEmpty) {
             await NativeBridgeService.acknowledgeBleInboxItem(inboxId);
           }
           return;
@@ -212,19 +213,29 @@ void backgroundServiceMain() {
         }
 
         try {
-          await BleRelayService().processIncomingBase64(
+          final result = await BleRelayService().processIncomingBase64(
             payloadBase64,
             rssi: rssi,
           );
-          if (inboxId != null) {
-            await NativeBridgeService.acknowledgeBleInboxItem(inboxId);
+          if (inboxId != null && inboxId.isNotEmpty) {
+            if (result.shouldAcknowledgeInbox) {
+              await NativeBridgeService.acknowledgeBleInboxItem(inboxId);
+            } else {
+              await NativeBridgeService.failBleInboxItem(inboxId);
+            }
           }
         } catch (_) {
-          if (inboxId != null) {
+          if (inboxId != null && inboxId.isNotEmpty) {
             await NativeBridgeService.failBleInboxItem(inboxId);
           }
           rethrow;
         }
+        break;
+      case "nativeBleInboxDrainRequested":
+        final completed = await _drainNativeBleInbox();
+        await backgroundChannel.invokeMethod('nativeBleInboxWorkerComplete', {
+          'success': completed,
+        });
         break;
       default:
         debugPrint("[backgroundServiceMain] Unknown method: ${call.method}");
@@ -234,20 +245,26 @@ void backgroundServiceMain() {
   debugPrint("[backgroundServiceMain] BLE-only background service ready");
 }
 
-Future<void> _drainNativeBleInbox() async {
+@pragma('vm:entry-point')
+void nativeBleInboxWorkerMain() {
+  WidgetsFlutterBinding.ensureInitialized();
+
+  const workerChannel = MethodChannel('id.ac.usu.resqmesh/mesh');
+  DatabaseHelper().database.then((_) async {
+    await SyncService().initializeIdentity();
+    final completed = await _drainNativeBleInbox();
+    await workerChannel.invokeMethod('nativeBleInboxWorkerComplete', {
+      'success': completed,
+    });
+  });
+}
+
+Future<bool> _drainNativeBleInbox() async {
   final pending = await NativeBridgeService.getPendingBleInbox();
-  for (final item in pending) {
-    final id = item['id'] as String?;
-    final payloadBase64 = item['payload_base64'] as String?;
-    final rssi = item['rssi'] as int?;
-    if (id == null || payloadBase64 == null || payloadBase64.isEmpty) {
-      continue;
-    }
-    try {
-      await BleRelayService().processIncomingBase64(payloadBase64, rssi: rssi);
-      await NativeBridgeService.acknowledgeBleInboxItem(id);
-    } catch (_) {
-      await NativeBridgeService.failBleInboxItem(id);
-    }
-  }
+  return const NativeBleInboxDrainService().drain(
+    items: pending,
+    process: BleRelayService().processIncomingBase64,
+    acknowledge: NativeBridgeService.acknowledgeBleInboxItem,
+    fail: NativeBridgeService.failBleInboxItem,
+  );
 }

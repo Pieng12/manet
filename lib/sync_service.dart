@@ -1,6 +1,5 @@
 import 'dart:async';
 
-import 'package:battery_plus/battery_plus.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:pkmproject/config/mesh_config.dart';
 import 'package:pkmproject/models/ack_apply_result.dart';
@@ -11,6 +10,7 @@ import 'package:pkmproject/services/ble_advertiser_service.dart';
 import 'package:pkmproject/services/database_helper.dart';
 import 'package:pkmproject/services/experiment_logger.dart';
 import 'package:pkmproject/services/relay_queue_service.dart';
+import 'package:pkmproject/services/workmanager_service.dart';
 import 'package:pkmproject/utils/hash_utils.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
@@ -29,19 +29,17 @@ class SyncService {
   final BleAdvertiserService _bleAdvertiser = BleAdvertiserService();
   final RelayQueueService _relayQueue = RelayQueueService();
   final ExperimentLogger _experimentLogger = ExperimentLogger();
-  final Battery _battery = Battery();
   final _syncCompletedController = StreamController<void>.broadcast();
 
   Stream<void> get onSyncCompleted => _syncCompletedController.stream;
 
   StreamSubscription? _connectivitySubscription;
-  Timer? _periodicSyncTimer;
-  Duration _currentSyncInterval = const Duration(seconds: 15);
   DateTime? _serverBackoffUntil;
   int? gatewayDetectedAt;
   int? gatewayUploadStartedAt;
   int? gatewayUploadCompletedAt;
   bool _isSyncListening = false;
+  bool _isSyncInProgress = false;
   String _deviceId = 'device-${Uuid().v4().substring(0, 8)}';
   String get deviceId => _deviceId;
 
@@ -113,32 +111,41 @@ class SyncService {
   }
 
   Future<void> initiateFullSync() async {
-    if (offlineOnly) {
-      print('[SyncService] Offline-only mode active. Server sync skipped.');
-      await _bleAdvertiser.advertiseLatestOrStop();
+    if (_isSyncInProgress) {
+      print('[SyncService] Full sync skipped: another sync is running.');
       return;
     }
+    _isSyncInProgress = true;
+    try {
+      if (offlineOnly) {
+        print('[SyncService] Offline-only mode active. Server sync skipped.');
+        await _bleAdvertiser.advertiseLatestOrStop();
+        return;
+      }
 
-    if (!await checkGatewayAvailability()) {
-      print('[SyncService] Gateway unavailable. Server sync skipped.');
+      if (!await checkGatewayAvailability()) {
+        print('[SyncService] Gateway unavailable. Server sync skipped.');
+        await _bleAdvertiser.advertiseLatestOrStop();
+        return;
+      }
+
+      final now = DateTime.now();
+      _serverBackoffUntil = clearBackoffIfElapsed(_serverBackoffUntil, now);
+      if (isServerBackoffActive(_serverBackoffUntil, now)) {
+        print('[SyncService] Upload skipped: server backoff is active');
+      }
+
+      print('[SyncService] Full sync initiated');
+      if (_serverBackoffUntil == null) {
+        await _uploadLatestLocalStates();
+      }
+      await _downloadServerStates();
       await _bleAdvertiser.advertiseLatestOrStop();
-      return;
+      _syncCompletedController.add(null);
+      print('[SyncService] Full sync completed');
+    } finally {
+      _isSyncInProgress = false;
     }
-
-    final now = DateTime.now();
-    _serverBackoffUntil = clearBackoffIfElapsed(_serverBackoffUntil, now);
-    if (isServerBackoffActive(_serverBackoffUntil, now)) {
-      print('[SyncService] Upload skipped: server backoff is active');
-    }
-
-    print('[SyncService] Full sync initiated');
-    if (_serverBackoffUntil == null) {
-      await _uploadLatestLocalStates();
-    }
-    await _downloadServerStates();
-    await _bleAdvertiser.advertiseLatestOrStop();
-    _syncCompletedController.add(null);
-    print('[SyncService] Full sync completed');
   }
 
   Future<void> _uploadLatestLocalStates() async {
@@ -296,7 +303,7 @@ class SyncService {
 
     checkInternetConnection().then((hasInternet) {
       if (hasInternet) {
-        initiateFullSync();
+        WorkManagerService.registerSyncTask();
       }
     });
 
@@ -306,47 +313,9 @@ class SyncService {
     ) async {
       final hasConnection = results.any((r) => r != ConnectivityResult.none);
       if (hasConnection && await checkInternetConnection()) {
-        await initiateFullSync();
-        await _updatePeriodicSyncTimer();
-      } else {
-        _periodicSyncTimer?.cancel();
+        await WorkManagerService.registerSyncTask();
       }
     });
-
-    _updatePeriodicSyncTimer();
-  }
-
-  Future<void> _updatePeriodicSyncTimer() async {
-    _periodicSyncTimer?.cancel();
-    _currentSyncInterval = await _calculateAdaptiveSyncInterval();
-    _periodicSyncTimer = Timer.periodic(_currentSyncInterval, (_) async {
-      if (await checkInternetConnection()) {
-        await initiateFullSync();
-        final nextInterval = await _calculateAdaptiveSyncInterval();
-        if (nextInterval != _currentSyncInterval) {
-          await _updatePeriodicSyncTimer();
-        }
-      }
-    });
-  }
-
-  Future<Duration> _calculateAdaptiveSyncInterval() async {
-    try {
-      final batteryLevel = await _battery.batteryLevel;
-      final connectivity = await Connectivity().checkConnectivity();
-
-      if (batteryLevel < 20) return const Duration(minutes: 5);
-      if (batteryLevel < 50) {
-        return connectivity.contains(ConnectivityResult.mobile)
-            ? const Duration(minutes: 2)
-            : const Duration(minutes: 1);
-      }
-      return connectivity.contains(ConnectivityResult.wifi)
-          ? const Duration(seconds: 15)
-          : const Duration(seconds: 30);
-    } catch (_) {
-      return const Duration(seconds: 30);
-    }
   }
 
   List<dynamic> _extractList(dynamic value) {
@@ -356,7 +325,6 @@ class SyncService {
 
   void dispose() {
     _connectivitySubscription?.cancel();
-    _periodicSyncTimer?.cancel();
     _syncCompletedController.close();
   }
 }

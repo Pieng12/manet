@@ -1,15 +1,23 @@
 package id.ac.usu.resqmesh
 
 import android.content.Context
-import android.content.Intent
-import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
+import io.flutter.FlutterInjector
+import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.embedding.engine.dart.DartExecutor
+import io.flutter.plugin.common.MethodChannel
+import io.flutter.plugins.GeneratedPluginRegistrant
 import androidx.work.CoroutineWorker
 import androidx.work.ExistingWorkPolicy
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.OutOfQuotaPolicy
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 class NativeBleInboxWorker(
     appContext: Context,
@@ -21,22 +29,69 @@ class NativeBleInboxWorker(
             return Result.retry()
         }
 
-        val intent = Intent(applicationContext, MeshBackgroundService::class.java).apply {
-            action = MeshBackgroundService.NATIVE_INBOX_RECOVERY_ACTION
-        }
-        return try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                applicationContext.startForegroundService(intent)
-            } else {
-                applicationContext.startService(intent)
+        val completed = CountDownLatch(1)
+        val success = AtomicBoolean(false)
+        val engineRef = arrayOfNulls<FlutterEngine>(1)
+
+        Handler(Looper.getMainLooper()).post {
+            try {
+                val loader = FlutterInjector.instance().flutterLoader()
+                loader.startInitialization(applicationContext)
+                loader.ensureInitializationComplete(applicationContext, null)
+
+                val engine = FlutterEngine(applicationContext)
+                engineRef[0] = engine
+                GeneratedPluginRegistrant.registerWith(engine)
+                MethodChannel(engine.dartExecutor.binaryMessenger, MainActivity.MESH_CHANNEL)
+                    .setMethodCallHandler { call, result ->
+                        when (call.method) {
+                            "getPendingBleInbox" -> {
+                                result.success(NativeBleInbox.pending(applicationContext))
+                            }
+                            "acknowledgeBleInboxItem" -> {
+                                val id = call.argument<String>("id")
+                                result.success(
+                                    id != null && NativeBleInbox.acknowledge(applicationContext, id)
+                                )
+                            }
+                            "failBleInboxItem" -> {
+                                val id = call.argument<String>("id")
+                                result.success(
+                                    id != null && NativeBleInbox.fail(applicationContext, id)
+                                )
+                            }
+                            "nativeBleInboxWorkerComplete" -> {
+                                success.set(call.argument<Boolean>("success") == true)
+                                result.success(true)
+                                completed.countDown()
+                            }
+                            else -> result.notImplemented()
+                        }
+                    }
+
+                engine.dartExecutor.executeDartEntrypoint(
+                    DartExecutor.DartEntrypoint(
+                        loader.findAppBundlePath(),
+                        "nativeBleInboxWorkerMain"
+                    )
+                )
+                Log.i(TAG, "Headless Native BLE inbox processor started")
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to start headless inbox processor: ${e.message}", e)
+                completed.countDown()
             }
-            Log.i(TAG, "BLE inbox recovery service requested")
+        }
+
+        val finished = completed.await(2, TimeUnit.MINUTES)
+        Handler(Looper.getMainLooper()).post {
+            engineRef[0]?.destroy()
+        }
+
+        return if (finished && success.get()) {
+            Log.i(TAG, "Native BLE inbox worker completed")
             Result.success()
-        } catch (e: SecurityException) {
-            Log.e(TAG, "BLE inbox recovery rejected: ${e.message}", e)
-            Result.retry()
-        } catch (e: IllegalStateException) {
-            Log.e(TAG, "BLE inbox recovery deferred: ${e.message}", e)
+        } else {
+            Log.w(TAG, "Native BLE inbox worker retry scheduled; finished=$finished success=${success.get()}")
             Result.retry()
         }
     }
