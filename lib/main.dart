@@ -5,6 +5,7 @@ import 'package:pkmproject/screen/home_screen.dart';
 import 'package:pkmproject/screen/mesh_monitor_screen.dart';
 import 'package:pkmproject/screen/onboarding_screen.dart';
 import 'package:pkmproject/screen/permission_screen.dart';
+import 'package:pkmproject/screen/research_monitor_screen.dart';
 import 'package:pkmproject/screen/splash_screen.dart';
 import 'package:pkmproject/services/android_permission_service.dart';
 import 'package:pkmproject/services/background_service_manager.dart';
@@ -146,6 +147,7 @@ class MyApp extends StatelessWidget {
         '/onboarding': (context) => const OnboardingScreen(),
         '/home': (context) => const HomeScreen(),
         '/message_log': (context) => const MeshMonitorScreen(),
+        '/research-monitor': (context) => const ResearchMonitorScreen(),
         '/permission': (context) => const PermissionScreen(),
       },
     );

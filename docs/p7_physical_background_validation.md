@@ -7,6 +7,10 @@ perangkat fisik.
 
 Status yang boleh dipakai: `NOT RUN`, `PASS`, `FAIL`, `BLOCKED`.
 
+P9 menambahkan Research Monitor untuk membuat session/trial dan export evidence
+CSV/JSON. Gunakan export tersebut sebagai bukti saat skenario fisik benar-benar
+dijalankan. Status di bawah tetap `NOT RUN` sampai ada evidence perangkat fisik.
+
 ## Evidence Wajib
 
 Untuk setiap skenario, simpan:

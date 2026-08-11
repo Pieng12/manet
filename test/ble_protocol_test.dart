@@ -473,8 +473,8 @@ CREATE TABLE sos_messages (
 
     final experimentTables = await db.rawQuery(
       "SELECT name FROM sqlite_master WHERE type='table' "
-      "AND name IN ('experiment_sessions', 'experiment_events')",
+      "AND name IN ('experiment_sessions', 'experiment_trials', 'experiment_events')",
     );
-    expect(experimentTables, hasLength(2));
+    expect(experimentTables, hasLength(3));
   });
 }

@@ -319,6 +319,11 @@ class _HomeScreenState extends State<HomeScreen>
             tooltip: 'BLE Monitor',
             onPressed: () => Navigator.pushNamed(context, '/message_log'),
           ),
+          IconButton(
+            icon: const Icon(Icons.science_outlined),
+            tooltip: 'Research Monitor',
+            onPressed: () => Navigator.pushNamed(context, '/research-monitor'),
+          ),
         ],
         bottom: TabBar(
           controller: _tabController,

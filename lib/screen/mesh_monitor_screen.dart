@@ -185,6 +185,13 @@ class _MeshMonitorScreenState extends State<MeshMonitorScreen>
           style: TextStyle(fontWeight: FontWeight.bold),
         ),
         backgroundColor: ResqColors.surface,
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.science_outlined),
+            tooltip: 'Research Monitor',
+            onPressed: () => Navigator.pushNamed(context, '/research-monitor'),
+          ),
+        ],
         bottom: TabBar(
           controller: _tabController,
           indicatorColor: ResqColors.ember,

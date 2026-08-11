@@ -20,6 +20,8 @@ sudah tersedia:
   boot, service restart, Bluetooth restart, dan reboot; validasi perangkat
   fisik untuk jalur ini masih berjalan.
 - Native persistent inbox agar packet BLE tidak hilang saat Flutter belum siap.
+- Research Monitor untuk session/trial eksperimen, timeline event, metrics
+  lokal, dan export data skripsi.
 - Gateway sync melalui WorkManager unique work `resqmeshGatewaySync`.
 - Experiment session, event log, RSSI capture, dan export CSV/JSON.
 
@@ -214,6 +216,7 @@ menghasilkan file JSON dan CSV untuk session aktif.
 - [`DOKUMENTASI_RESQMESH_BLE.md`](DOKUMENTASI_RESQMESH_BLE.md)
 - [`docs/background_recovery_test_plan.md`](docs/background_recovery_test_plan.md)
 - [`docs/p7_physical_background_validation.md`](docs/p7_physical_background_validation.md)
+- [`docs/research_monitor.md`](docs/research_monitor.md)
 - [`docs/experiment_protocol.md`](docs/experiment_protocol.md)
 - [`docs/device_compatibility.md`](docs/device_compatibility.md)
 - [`docs/known_limitations.md`](docs/known_limitations.md)

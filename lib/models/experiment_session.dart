@@ -9,6 +9,15 @@ class ExperimentSession {
   final int relayCooldownMs;
   final int startedAt;
   final int? endedAt;
+  final String? name;
+  final String? nodeRole;
+  final int? targetHop;
+  final String? topologyLabel;
+  final String? scenarioLabel;
+  final String? notes;
+  final String status;
+  final String? appVersion;
+  final int? trialTimeoutSeconds;
 
   const ExperimentSession({
     required this.sessionId,
@@ -21,6 +30,15 @@ class ExperimentSession {
     required this.relayCooldownMs,
     required this.startedAt,
     this.endedAt,
+    this.name,
+    this.nodeRole,
+    this.targetHop,
+    this.topologyLabel,
+    this.scenarioLabel,
+    this.notes,
+    this.status = 'RUNNING',
+    this.appVersion,
+    this.trialTimeoutSeconds,
   });
 
   Map<String, dynamic> toDbMap() {
@@ -35,6 +53,15 @@ class ExperimentSession {
       'relay_cooldown_ms': relayCooldownMs,
       'started_at': startedAt,
       'ended_at': endedAt,
+      'name': name,
+      'node_role': nodeRole,
+      'target_hop': targetHop,
+      'topology_label': topologyLabel,
+      'scenario_label': scenarioLabel,
+      'notes': notes,
+      'status': status,
+      'app_version': appVersion,
+      'trial_timeout_seconds': trialTimeoutSeconds,
     };
   }
 
@@ -50,6 +77,15 @@ class ExperimentSession {
       relayCooldownMs: map['relay_cooldown_ms'] as int,
       startedAt: map['started_at'] as int,
       endedAt: map['ended_at'] as int?,
+      name: map['name'] as String?,
+      nodeRole: map['node_role'] as String?,
+      targetHop: map['target_hop'] as int?,
+      topologyLabel: map['topology_label'] as String?,
+      scenarioLabel: map['scenario_label'] as String?,
+      notes: map['notes'] as String?,
+      status: map['status'] as String? ?? 'RUNNING',
+      appVersion: map['app_version'] as String?,
+      trialTimeoutSeconds: map['trial_timeout_seconds'] as int?,
     );
   }
 }

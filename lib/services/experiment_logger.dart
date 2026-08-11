@@ -4,6 +4,7 @@ import 'package:pkmproject/config/mesh_config.dart';
 import 'package:pkmproject/models/experiment_event.dart';
 import 'package:pkmproject/models/experiment_session.dart';
 import 'package:pkmproject/services/database_helper.dart';
+import 'package:pkmproject/services/research_session_service.dart';
 import 'package:sqflite/sqflite.dart';
 import 'package:uuid/uuid.dart';
 
@@ -120,6 +121,9 @@ class ExperimentLogger {
       messageLifetimeMs: MeshConfig.defaultMessageLifetime.inMilliseconds,
       relayCooldownMs: MeshConfig.relayCooldown.inMilliseconds,
       startedAt: now,
+      name: 'AUTO-${now.toString()}',
+      nodeRole: 'UNKNOWN',
+      status: 'RUNNING',
     );
     await db.insert('experiment_sessions', session.toDbMap());
     _currentSession = session;
@@ -164,12 +168,20 @@ class ExperimentLogger {
     Map<String, dynamic>? detail,
   }) async {
     final session = await ensureSession(deviceId: deviceId);
+    final trial = await ResearchSessionService(
+      database: await _db,
+    ).currentTrial(sessionId: session.sessionId);
+    final timestamp = DateTime.now().millisecondsSinceEpoch;
     final event = ExperimentEvent(
       sessionId: session.sessionId,
+      trialId: trial?.trialId,
       eventType: eventType,
       messageId: messageId,
       senderCrc: senderCrc,
-      timestampMs: DateTime.now().millisecondsSinceEpoch,
+      timestampMs: timestamp,
+      eventTimestampMs: timestamp,
+      nodeRole: session.nodeRole,
+      forwardingMode: session.forwardingMode,
       hopCount: hopCount,
       rssi: rssi,
       payloadHash: payloadHash,
@@ -179,25 +191,49 @@ class ExperimentLogger {
     await db.insert('experiment_events', event.toDbMap());
   }
 
-  Future<int> eventCount({String? sessionId}) async {
+  Future<int> eventCount({String? sessionId, String? trialId}) async {
     final db = await _db;
-    final rows = sessionId == null
-        ? await db.rawQuery('SELECT COUNT(*) AS count FROM experiment_events')
-        : await db.rawQuery(
-            'SELECT COUNT(*) AS count FROM experiment_events WHERE session_id = ?',
-            [sessionId],
-          );
+    final where = <String>[];
+    final args = <Object>[];
+    if (sessionId != null) {
+      where.add('session_id = ?');
+      args.add(sessionId);
+    }
+    if (trialId != null) {
+      where.add('trial_id = ?');
+      args.add(trialId);
+    }
+    final rows = await db.rawQuery(
+      'SELECT COUNT(*) AS count FROM experiment_events'
+      '${where.isEmpty ? '' : ' WHERE ${where.join(' AND ')}'}',
+      args,
+    );
     return rows.first['count'] as int? ?? 0;
   }
 
-  Future<List<ExperimentEvent>> events({String? sessionId}) async {
+  Future<List<ExperimentEvent>> events({
+    String? sessionId,
+    String? trialId,
+    int? limit,
+  }) async {
     final db = await _db;
+    final where = <String>[];
+    final args = <Object>[];
+    if (sessionId != null) {
+      where.add('session_id = ?');
+      args.add(sessionId);
+    }
+    if (trialId != null) {
+      where.add('trial_id = ?');
+      args.add(trialId);
+    }
     final rows = await db.query(
       'experiment_events',
-      where: sessionId == null ? null : 'session_id = ?',
-      whereArgs: sessionId == null ? null : [sessionId],
-      orderBy: 'timestamp_ms ASC, id ASC',
+      where: where.isEmpty ? null : where.join(' AND '),
+      whereArgs: args.isEmpty ? null : args,
+      orderBy: 'timestamp_ms DESC, id DESC',
+      limit: limit,
     );
-    return rows.map(ExperimentEvent.fromDbMap).toList();
+    return rows.reversed.map(ExperimentEvent.fromDbMap).toList();
   }
 }

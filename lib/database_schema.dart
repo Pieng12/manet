@@ -87,7 +87,43 @@ CREATE TABLE experiment_sessions (
   message_lifetime_ms INTEGER NOT NULL,
   relay_cooldown_ms INTEGER NOT NULL,
   started_at INTEGER NOT NULL,
-  ended_at INTEGER NULL
+  ended_at INTEGER NULL,
+  name TEXT NULL,
+  node_role TEXT NULL,
+  target_hop INTEGER NULL,
+  topology_label TEXT NULL,
+  scenario_label TEXT NULL,
+  notes TEXT NULL,
+  status TEXT NOT NULL DEFAULT 'RUNNING',
+  app_version TEXT NULL,
+  trial_timeout_seconds INTEGER NULL
+);
+''';
+
+const Map<String, String> experimentSessionColumnDefinitions = {
+  'name': 'TEXT NULL',
+  'node_role': 'TEXT NULL',
+  'target_hop': 'INTEGER NULL',
+  'topology_label': 'TEXT NULL',
+  'scenario_label': 'TEXT NULL',
+  'notes': 'TEXT NULL',
+  'status': "TEXT NOT NULL DEFAULT 'RUNNING'",
+  'app_version': 'TEXT NULL',
+  'trial_timeout_seconds': 'INTEGER NULL',
+};
+
+const String createExperimentTrialsTableSql = '''
+CREATE TABLE experiment_trials (
+  trial_id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  trial_number INTEGER NOT NULL,
+  trial_code TEXT NOT NULL,
+  started_at INTEGER NOT NULL,
+  ended_at INTEGER NULL,
+  status TEXT NOT NULL,
+  result TEXT NULL,
+  failure_reason TEXT NULL,
+  notes TEXT NULL
 );
 ''';
 
@@ -95,13 +131,26 @@ const String createExperimentEventsTableSql = '''
 CREATE TABLE experiment_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   session_id TEXT NOT NULL,
+  trial_id TEXT NULL,
   event_type TEXT NOT NULL,
   message_id TEXT NULL,
   sender_crc INTEGER NULL,
   timestamp_ms INTEGER NOT NULL,
+  event_timestamp_ms INTEGER NULL,
+  elapsed_realtime_ms INTEGER NULL,
+  node_role TEXT NULL,
+  forwarding_mode TEXT NULL,
   hop_count INTEGER NULL,
   rssi INTEGER NULL,
   payload_hash TEXT NULL,
   detail_json TEXT NULL
 );
 ''';
+
+const Map<String, String> experimentEventColumnDefinitions = {
+  'trial_id': 'TEXT NULL',
+  'event_timestamp_ms': 'INTEGER NULL',
+  'elapsed_realtime_ms': 'INTEGER NULL',
+  'node_role': 'TEXT NULL',
+  'forwarding_mode': 'TEXT NULL',
+};

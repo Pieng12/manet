@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:pkmproject/database_schema.dart';
 import 'package:pkmproject/services/experiment_export_service.dart';
 import 'package:pkmproject/services/experiment_logger.dart';
+import 'package:pkmproject/services/research_session_service.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 void main() {
@@ -16,6 +17,7 @@ void main() {
     sqfliteFfiInit();
     db = await databaseFactoryFfi.openDatabase(inMemoryDatabasePath);
     await db.execute(createExperimentSessionsTableSql);
+    await db.execute(createExperimentTrialsTableSql);
     await db.execute(createExperimentEventsTableSql);
     tempDir = await Directory.systemTemp.createTemp('resqmesh_export_test_');
     logger = ExperimentLogger(database: db);
@@ -60,6 +62,7 @@ void main() {
     );
     final exporter = ExperimentExportService(
       logger: logger,
+      researchSessionService: ResearchSessionService(database: db),
       outputDir: tempDir,
     );
 
@@ -72,6 +75,7 @@ void main() {
 
     expect(jsonPayload['events'], isA<List<dynamic>>());
     expect(csvPayload, contains('GATEWAY_UPLOAD_SUCCEEDED'));
-    expect(csvPayload, contains('detail_json'));
+    expect(csvPayload, contains('session_id,session_name,trial_id'));
+    expect(csvPayload, contains('detail'));
   });
 }

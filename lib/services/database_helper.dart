@@ -10,7 +10,7 @@ import 'package:pkmproject/utils/protocol_timestamp.dart';
 import 'package:pkmproject/utils/sos_status_priority.dart';
 
 class DatabaseHelper {
-  static const int databaseVersion = 7;
+  static const int databaseVersion = 8;
 
   static final DatabaseHelper _instance = DatabaseHelper._internal();
   static Database? _database;
@@ -71,6 +71,7 @@ class DatabaseHelper {
         await db.execute(createRelayQueueTableSql);
         await db.execute(createAckTombstonesTableSql);
         await db.execute(createExperimentSessionsTableSql);
+        await db.execute(createExperimentTrialsTableSql);
         await db.execute(createExperimentEventsTableSql);
         print("[DatabaseHelper] Table created in onCreate");
       },
@@ -93,6 +94,7 @@ class DatabaseHelper {
         await ensureRelayQueueColumns(db);
         await ensureAckTombstonesTable(db);
         await ensureExperimentTables(db);
+        await ensureExperimentColumns(db);
       },
     );
   }
@@ -127,6 +129,11 @@ class DatabaseHelper {
     if (oldVersion < 7) {
       await ensureAckTombstonesTable(db);
     }
+
+    if (oldVersion < 8) {
+      await ensureExperimentTables(db);
+      await ensureExperimentColumns(db);
+    }
   }
 
   static Future<void> ensureAckTombstonesTable(Database db) async {
@@ -141,14 +148,35 @@ class DatabaseHelper {
   static Future<void> ensureExperimentTables(Database db) async {
     final tables = await db.rawQuery(
       "SELECT name FROM sqlite_master WHERE type='table' "
-      "AND name IN ('experiment_sessions', 'experiment_events')",
+      "AND name IN ('experiment_sessions', 'experiment_events', 'experiment_trials')",
     );
     final tableNames = tables.map((row) => row['name'] as String).toSet();
     if (!tableNames.contains('experiment_sessions')) {
       await db.execute(createExperimentSessionsTableSql);
     }
+    if (!tableNames.contains('experiment_trials')) {
+      await db.execute(createExperimentTrialsTableSql);
+    }
     if (!tableNames.contains('experiment_events')) {
       await db.execute(createExperimentEventsTableSql);
+    }
+  }
+
+  static Future<void> ensureExperimentColumns(Database db) async {
+    final sessionColumns = await _tableColumnNames(db, 'experiment_sessions');
+    for (final entry in experimentSessionColumnDefinitions.entries) {
+      if (sessionColumns.contains(entry.key)) continue;
+      await db.execute(
+        'ALTER TABLE experiment_sessions ADD COLUMN ${entry.key} ${entry.value}',
+      );
+    }
+
+    final eventColumns = await _tableColumnNames(db, 'experiment_events');
+    for (final entry in experimentEventColumnDefinitions.entries) {
+      if (eventColumns.contains(entry.key)) continue;
+      await db.execute(
+        'ALTER TABLE experiment_events ADD COLUMN ${entry.key} ${entry.value}',
+      );
     }
   }
 
