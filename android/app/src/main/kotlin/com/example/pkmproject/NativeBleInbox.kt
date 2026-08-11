@@ -1,6 +1,7 @@
 package id.ac.usu.resqmesh
 
 import android.content.Context
+import android.os.SystemClock
 import android.util.Log
 import org.json.JSONArray
 import org.json.JSONObject
@@ -51,7 +52,8 @@ object NativeBleInbox {
         payload: ByteArray,
         deviceAddress: String?,
         rssi: Int,
-        receivedAt: Long = System.currentTimeMillis()
+        receivedAt: Long = System.currentTimeMillis(),
+        receivedElapsedRealtimeMs: Long = SystemClock.elapsedRealtime()
     ): NativeBleInboxStoreResult {
         cleanupProcessed(context, receivedAt)
         val payloadBase64 = Base64.getEncoder().encodeToString(payload)
@@ -65,7 +67,8 @@ object NativeBleInbox {
             metadata = metadata,
             deviceAddress = deviceAddress,
             rssi = rssi,
-            receivedAt = receivedAt
+            receivedAt = receivedAt,
+            receivedElapsedRealtimeMs = receivedElapsedRealtimeMs
         )
         writeItems(context, JSONArray(mutation.itemsJson))
         Log.i(TAG, "BLE inbox store status=${mutation.result.status} id=${mutation.result.id}")
@@ -133,7 +136,8 @@ object NativeBleInbox {
         payload: ByteArray,
         deviceAddress: String?,
         rssi: Int,
-        receivedAt: Long
+        receivedAt: Long,
+        receivedElapsedRealtimeMs: Long = receivedAt
     ): NativeBleInboxStoreMutation {
         val payloadBase64 = Base64.getEncoder().encodeToString(payload)
         return storeIntoItems(
@@ -143,7 +147,8 @@ object NativeBleInbox {
             metadata = protocolMetadata(payload),
             deviceAddress = deviceAddress,
             rssi = rssi,
-            receivedAt = receivedAt
+            receivedAt = receivedAt,
+            receivedElapsedRealtimeMs = receivedElapsedRealtimeMs
         )
     }
 
@@ -154,7 +159,8 @@ object NativeBleInbox {
         metadata: NativeBlePacketMetadata?,
         deviceAddress: String?,
         rssi: Int,
-        receivedAt: Long
+        receivedAt: Long,
+        receivedElapsedRealtimeMs: Long
     ): NativeBleInboxStoreMutation {
         for (i in 0 until items.length()) {
             val item = items.getJSONObject(i)
@@ -162,6 +168,7 @@ object NativeBleInbox {
 
             val duplicateCount = item.optInt("duplicate_count", 0) + 1
             item.put("last_seen_at", receivedAt)
+            item.put("last_seen_elapsed_realtime_ms", receivedElapsedRealtimeMs)
             item.put("last_rssi", rssi)
             item.put("duplicate_count", duplicateCount)
 
@@ -201,7 +208,9 @@ object NativeBleInbox {
                 .put("rssi", rssi)
                 .put("last_rssi", rssi)
                 .put("received_at", receivedAt)
+                .put("received_elapsed_realtime_ms", receivedElapsedRealtimeMs)
                 .put("last_seen_at", receivedAt)
+                .put("last_seen_elapsed_realtime_ms", receivedElapsedRealtimeMs)
                 .put("processed_at", JSONObject.NULL)
                 .put("attempt_count", 0)
                 .put("duplicate_count", 0)

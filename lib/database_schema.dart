@@ -96,7 +96,12 @@ CREATE TABLE experiment_sessions (
   notes TEXT NULL,
   status TEXT NOT NULL DEFAULT 'RUNNING',
   app_version TEXT NULL,
-  trial_timeout_seconds INTEGER NULL
+  trial_timeout_seconds INTEGER NULL,
+  session_kind TEXT NOT NULL DEFAULT 'AUTO',
+  device_manufacturer TEXT NULL,
+  android_sdk INTEGER NULL,
+  app_version_code TEXT NULL,
+  build_id TEXT NULL
 );
 ''';
 
@@ -110,6 +115,11 @@ const Map<String, String> experimentSessionColumnDefinitions = {
   'status': "TEXT NOT NULL DEFAULT 'RUNNING'",
   'app_version': 'TEXT NULL',
   'trial_timeout_seconds': 'INTEGER NULL',
+  'session_kind': "TEXT NOT NULL DEFAULT 'AUTO'",
+  'device_manufacturer': 'TEXT NULL',
+  'android_sdk': 'INTEGER NULL',
+  'app_version_code': 'TEXT NULL',
+  'build_id': 'TEXT NULL',
 };
 
 const String createExperimentTrialsTableSql = '''
@@ -138,8 +148,13 @@ CREATE TABLE experiment_events (
   timestamp_ms INTEGER NOT NULL,
   event_timestamp_ms INTEGER NULL,
   elapsed_realtime_ms INTEGER NULL,
+  protocol_timestamp_ms INTEGER NULL,
   node_role TEXT NULL,
   forwarding_mode TEXT NULL,
+  packet_type TEXT NULL,
+  status TEXT NULL,
+  hop_in INTEGER NULL,
+  hop_out INTEGER NULL,
   hop_count INTEGER NULL,
   rssi INTEGER NULL,
   payload_hash TEXT NULL,
@@ -151,6 +166,20 @@ const Map<String, String> experimentEventColumnDefinitions = {
   'trial_id': 'TEXT NULL',
   'event_timestamp_ms': 'INTEGER NULL',
   'elapsed_realtime_ms': 'INTEGER NULL',
+  'protocol_timestamp_ms': 'INTEGER NULL',
   'node_role': 'TEXT NULL',
   'forwarding_mode': 'TEXT NULL',
+  'packet_type': 'TEXT NULL',
+  'status': 'TEXT NULL',
+  'hop_in': 'INTEGER NULL',
+  'hop_out': 'INTEGER NULL',
 };
+
+const List<String> experimentIndexSql = [
+  'CREATE INDEX IF NOT EXISTS idx_experiment_sessions_kind_open '
+      'ON experiment_sessions(session_kind, ended_at)',
+  'CREATE INDEX IF NOT EXISTS idx_experiment_trials_session_status '
+      'ON experiment_trials(session_id, status)',
+  'CREATE INDEX IF NOT EXISTS idx_experiment_events_session_trial_time '
+      'ON experiment_events(session_id, trial_id, event_timestamp_ms)',
+];

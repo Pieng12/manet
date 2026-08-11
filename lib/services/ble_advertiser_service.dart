@@ -552,16 +552,20 @@ class BleAdvertiserService {
       messageId: message.id,
       senderCrc: message.senderCrc,
       hopCount: message.hopCount,
+      hopOut: message.hopCount,
       payloadHash: payloadHash,
+      protocolTimestampMs: packet?.timestampMs,
+      packetType: 'sos',
+      status: message.status.name,
     );
 
     try {
       if (await _startNativePayload(payload)) {
+        final succeededAt = DateTime.now().millisecondsSinceEpoch;
         _isAdvertising = true;
         _setSchedulerState(RelaySchedulerState.advertising);
         _isAdvertisingController.add(_isAdvertising);
         _startWatchdog();
-        final succeededAt = DateTime.now().millisecondsSinceEpoch;
         await _relayQueue.markAdvertisingSucceeded(
           queued.item,
           nowMs: succeededAt,
@@ -574,7 +578,12 @@ class BleAdvertiserService {
           messageId: message.id,
           senderCrc: message.senderCrc,
           hopCount: message.hopCount,
+          hopOut: message.hopCount,
           payloadHash: payloadHash,
+          eventTimestampMs: succeededAt,
+          protocolTimestampMs: packet?.timestampMs,
+          packetType: 'sos',
+          status: message.status.name,
         );
         await _experimentLogger.logEvent(
           eventType: ExperimentEventTypes.bleRelayStarted,
@@ -582,7 +591,12 @@ class BleAdvertiserService {
           messageId: message.id,
           senderCrc: message.senderCrc,
           hopCount: message.hopCount,
+          hopOut: message.hopCount,
           payloadHash: payloadHash,
+          eventTimestampMs: succeededAt,
+          protocolTimestampMs: packet?.timestampMs,
+          packetType: 'sos',
+          status: message.status.name,
         );
         if (continueScheduling) {
           _startSlotTimer();
@@ -619,7 +633,11 @@ class BleAdvertiserService {
       messageId: message.id,
       senderCrc: message.senderCrc,
       hopCount: message.hopCount,
+      hopOut: message.hopCount,
       payloadHash: payloadHash,
+      protocolTimestampMs: packet?.timestampMs,
+      packetType: 'sos',
+      status: message.status.name,
     );
     if (blockedState != null) {
       _enterBlockedState(blockedState);
@@ -655,6 +673,7 @@ class BleAdvertiserService {
 
     try {
       if (await _startNativePayload(payload)) {
+        final succeededAt = DateTime.now().millisecondsSinceEpoch;
         _isAdvertising = true;
         _setSchedulerState(RelaySchedulerState.advertising);
         _currentAdvertisedMessageId = null;
@@ -662,7 +681,7 @@ class BleAdvertiserService {
         _startWatchdog();
         await _relayQueue.markAdvertisingSucceeded(
           queued.item,
-          nowMs: DateTime.now().millisecondsSinceEpoch,
+          nowMs: succeededAt,
           slotDuration: duration,
         );
         _resetTransientRetry();
@@ -671,7 +690,12 @@ class BleAdvertiserService {
           deviceId: 'unknown',
           senderCrc: packet.senderCrc,
           hopCount: packet.hopCount,
+          hopOut: packet.hopCount,
           payloadHash: packet.identity,
+          eventTimestampMs: succeededAt,
+          protocolTimestampMs: packet.timestampMs,
+          packetType: 'ack',
+          status: packet.status.name,
           detail: {'kind': 'ack'},
         );
         await _experimentLogger.logEvent(
@@ -679,7 +703,12 @@ class BleAdvertiserService {
           deviceId: 'unknown',
           senderCrc: packet.senderCrc,
           hopCount: packet.hopCount,
+          hopOut: packet.hopCount,
           payloadHash: packet.identity,
+          eventTimestampMs: succeededAt,
+          protocolTimestampMs: packet.timestampMs,
+          packetType: 'ack',
+          status: packet.status.name,
           detail: {'kind': 'ack'},
         );
         print("[BleAdvertiserService] Started queued BLE ACK advertising.");
@@ -716,7 +745,11 @@ class BleAdvertiserService {
       deviceId: 'unknown',
       senderCrc: packet.senderCrc,
       hopCount: packet.hopCount,
+      hopOut: packet.hopCount,
       payloadHash: packet.identity,
+      protocolTimestampMs: packet.timestampMs,
+      packetType: 'ack',
+      status: packet.status.name,
       detail: {'kind': 'ack'},
     );
     await _persistPendingAck(payload);

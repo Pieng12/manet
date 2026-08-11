@@ -109,6 +109,9 @@ class MainActivity : FlutterActivity() {
                     "getBleCapabilities" -> {
                         result.success(bleCapabilities())
                     }
+                    "getDeviceMetadata" -> {
+                        result.success(deviceMetadata())
+                    }
                     "startBleWakeUpScan" -> {
                         val scanAllAdvertisements =
                             call.argument<Boolean>("scanAllAdvertisements") ?: false
@@ -227,6 +230,7 @@ class MainActivity : FlutterActivity() {
         }
         return mapOf(
             "sdkInt" to Build.VERSION.SDK_INT,
+            "androidRelease" to Build.VERSION.RELEASE,
             "deviceManufacturer" to Build.MANUFACTURER,
             "deviceModel" to Build.MODEL,
             "bluetoothEnabled" to (adapter?.isEnabled == true),
@@ -247,7 +251,33 @@ class MainActivity : FlutterActivity() {
             "pendingNativeInbox" to NativeBleInbox.pendingCount(this),
             "nativeInboxPermissionBlockedAt" to NativeBleInbox.permissionBlockedAt(this),
             "relayModeEnabled" to servicePrefs().getBoolean(KEY_RELAY_MODE_ENABLED, true),
-            "nativeManufacturerId" to NativeBleConfig.MANUFACTURER_ID
+            "nativeManufacturerId" to NativeBleConfig.MANUFACTURER_ID,
+            "appVersionName" to deviceMetadata()["appVersionName"],
+            "appVersionCode" to deviceMetadata()["appVersionCode"]
+        )
+    }
+
+    private fun deviceMetadata(): Map<String, Any?> {
+        val packageInfo = try {
+            packageManager.getPackageInfo(packageName, 0)
+        } catch (_: Exception) {
+            null
+        }
+        val versionCode = if (packageInfo == null) {
+            "unknown"
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            packageInfo.longVersionCode.toString()
+        } else {
+            @Suppress("DEPRECATION")
+            packageInfo.versionCode.toString()
+        }
+        return mapOf(
+            "manufacturer" to Build.MANUFACTURER,
+            "model" to Build.MODEL,
+            "androidRelease" to Build.VERSION.RELEASE,
+            "androidSdk" to Build.VERSION.SDK_INT,
+            "appVersionName" to (packageInfo?.versionName ?: "unknown"),
+            "appVersionCode" to versionCode
         )
     }
 

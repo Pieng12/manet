@@ -41,6 +41,13 @@ void main() {
       hopCount: 2,
       rssi: -71,
       payloadHash: 'SOS:12345:1:1',
+      eventTimestampMs: 1111,
+      elapsedRealtimeMs: 2222,
+      protocolTimestampMs: 3333,
+      packetType: 'sos',
+      status: 'active',
+      hopIn: 2,
+      hopOut: 3,
       detail: {'kind': 'sos'},
     );
 
@@ -49,6 +56,13 @@ void main() {
     expect(events, hasLength(1));
     expect(events.single.rssi, -71);
     expect(events.single.hopCount, 2);
+    expect(events.single.eventTimestampMs, 1111);
+    expect(events.single.elapsedRealtimeMs, 2222);
+    expect(events.single.protocolTimestampMs, 3333);
+    expect(events.single.packetType, 'sos');
+    expect(events.single.status, 'active');
+    expect(events.single.hopIn, 2);
+    expect(events.single.hopOut, 3);
     expect(events.single.payloadHash, 'SOS:12345:1:1');
     expect(await logger.eventCount(sessionId: session.sessionId), 1);
   });
@@ -58,6 +72,11 @@ void main() {
     await logger.logEvent(
       eventType: ExperimentEventTypes.gatewayUploadSucceeded,
       deviceId: 'device-a',
+      protocolTimestampMs: 4444,
+      packetType: 'sos',
+      status: 'resolved',
+      hopIn: 4,
+      hopOut: 5,
       detail: {'latency_ms': 1200},
     );
     final exporter = ExperimentExportService(
@@ -74,8 +93,19 @@ void main() {
     final csvPayload = await csvFile.readAsString();
 
     expect(jsonPayload['events'], isA<List<dynamic>>());
+    expect(
+      (jsonPayload['session'] as Map<String, dynamic>)['session_kind'],
+      'AUTO',
+    );
+    expect(
+      ((jsonPayload['events'] as List<dynamic>).single
+          as Map<String, dynamic>)['protocol_timestamp_ms'],
+      4444,
+    );
     expect(csvPayload, contains('GATEWAY_UPLOAD_SUCCEEDED'));
-    expect(csvPayload, contains('session_id,session_name,trial_id'));
+    expect(csvPayload, contains('session_id,session_kind,session_name'));
+    expect(csvPayload, contains('protocol_timestamp_ms'));
+    expect(csvPayload, contains('"4444"'));
     expect(csvPayload, contains('detail'));
   });
 }

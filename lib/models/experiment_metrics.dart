@@ -45,6 +45,34 @@ class HopValidation {
   bool get passed => hopOut == expectedHopOut;
 }
 
+class CurrentPacketSnapshot {
+  final int? senderCrc;
+  final int? protocolTimestampMs;
+  final String? status;
+  final String? packetType;
+  final int? hopIn;
+  final int? hopOut;
+  final int? rssi;
+  final bool? fromServer;
+  final String? payloadHash;
+  final int? receivedAtMs;
+  final int? advertisedAtMs;
+
+  const CurrentPacketSnapshot({
+    this.senderCrc,
+    this.protocolTimestampMs,
+    this.status,
+    this.packetType,
+    this.hopIn,
+    this.hopOut,
+    this.rssi,
+    this.fromServer,
+    this.payloadHash,
+    this.receivedAtMs,
+    this.advertisedAtMs,
+  });
+}
+
 class ExperimentMetrics {
   final int successfulTrials;
   final int validCompletedTrials;
@@ -65,11 +93,13 @@ class ExperimentMetrics {
   final int relaySlotCount;
   final double? transmissionOverhead;
   final NumericStats rssiStats;
-  final NumericStats hopStats;
+  final NumericStats hopInStats;
+  final NumericStats hopOutStats;
   final NumericStats localRelayLatencyMs;
   final NumericStats e2eLatencyMs;
   final NumericStats ackTerminationLatencyMs;
   final HopValidation? latestHopValidation;
+  final CurrentPacketSnapshot? currentPacket;
   final bool e2eRequiresPeerLog;
 
   const ExperimentMetrics({
@@ -92,11 +122,15 @@ class ExperimentMetrics {
     required this.relaySlotCount,
     required this.transmissionOverhead,
     required this.rssiStats,
-    required this.hopStats,
+    required this.hopInStats,
+    required this.hopOutStats,
     required this.localRelayLatencyMs,
     required this.e2eLatencyMs,
     required this.ackTerminationLatencyMs,
     required this.latestHopValidation,
+    required this.currentPacket,
     required this.e2eRequiresPeerLog,
   });
+
+  NumericStats get hopStats => hopInStats;
 }

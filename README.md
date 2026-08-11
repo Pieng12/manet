@@ -22,6 +22,9 @@ sudah tersedia:
 - Native persistent inbox agar packet BLE tidak hilang saat Flutter belum siap.
 - Research Monitor untuk session/trial eksperimen, timeline event, metrics
   lokal, dan export data skripsi.
+- Research Monitor mencatat mode forwarding aktual dari build config, memisahkan
+  session `AUTO` dan `RESEARCH`, menyimpan timestamp receive native,
+  `protocol_timestamp_ms`, hop in/out, RSSI RX-only, dan device metadata.
 - Gateway sync melalui WorkManager unique work `resqmeshGatewaySync`.
 - Experiment session, event log, RSSI capture, dan export CSV/JSON.
 
@@ -199,9 +202,12 @@ flutter build apk --release --dart-define=RESQMESH_MODE=offline --dart-define=RE
 
 ## Cara Memulai Sesi Eksperimen
 
-Jalankan aplikasi dalam mode yang ingin diuji. Session eksperimen dibuat saat
-service/app dimulai dan menyimpan konfigurasi forwarding, backoff, lifetime
-legacy, dan timestamp mulai.
+Jalankan aplikasi dalam mode yang ingin diuji. Mode forwarding tidak dipilih
+manual di Research Monitor; nilainya selalu berasal dari
+`RESQMESH_FORWARDING_MODE`. Session penelitian menyimpan konfigurasi forwarding
+aktual, metadata perangkat, timeout trial workflow, dan timestamp mulai. Trial
+ditutup sebagai success, failed dengan failure reason, atau invalid; denominator
+DSR hanya memakai result eksplisit `SUCCESS` dan `FAILED`.
 
 Panduan lengkap ada di
 [`docs/experiment_protocol.md`](docs/experiment_protocol.md).

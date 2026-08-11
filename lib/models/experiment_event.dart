@@ -8,8 +8,13 @@ class ExperimentEvent {
   final int timestampMs;
   final int? eventTimestampMs;
   final int? elapsedRealtimeMs;
+  final int? protocolTimestampMs;
   final String? nodeRole;
   final String? forwardingMode;
+  final String? packetType;
+  final String? status;
+  final int? hopIn;
+  final int? hopOut;
   final int? hopCount;
   final int? rssi;
   final String? payloadHash;
@@ -25,8 +30,13 @@ class ExperimentEvent {
     required this.timestampMs,
     this.eventTimestampMs,
     this.elapsedRealtimeMs,
+    this.protocolTimestampMs,
     this.nodeRole,
     this.forwardingMode,
+    this.packetType,
+    this.status,
+    this.hopIn,
+    this.hopOut,
     this.hopCount,
     this.rssi,
     this.payloadHash,
@@ -44,8 +54,13 @@ class ExperimentEvent {
       'timestamp_ms': timestampMs,
       'event_timestamp_ms': eventTimestampMs,
       'elapsed_realtime_ms': elapsedRealtimeMs,
+      'protocol_timestamp_ms': protocolTimestampMs,
       'node_role': nodeRole,
       'forwarding_mode': forwardingMode,
+      'packet_type': packetType,
+      'status': status,
+      'hop_in': hopIn,
+      'hop_out': hopOut,
       'hop_count': hopCount,
       'rssi': rssi,
       'payload_hash': payloadHash,
@@ -64,8 +79,13 @@ class ExperimentEvent {
       timestampMs: map['timestamp_ms'] as int,
       eventTimestampMs: map['event_timestamp_ms'] as int?,
       elapsedRealtimeMs: map['elapsed_realtime_ms'] as int?,
+      protocolTimestampMs: map['protocol_timestamp_ms'] as int?,
       nodeRole: map['node_role'] as String?,
       forwardingMode: map['forwarding_mode'] as String?,
+      packetType: map['packet_type'] as String?,
+      status: map['status'] as String?,
+      hopIn: map['hop_in'] as int?,
+      hopOut: map['hop_out'] as int?,
       hopCount: map['hop_count'] as int?,
       rssi: map['rssi'] as int?,
       payloadHash: map['payload_hash'] as String?,

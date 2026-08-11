@@ -64,7 +64,8 @@ andal dikerjakan di sisi Android:
   dan PendingIntent.
 - `BleWakeUpReceiver.kt`: menerima hasil scan, mengekstrak payload 17 byte,
   menyertakan RSSI, menyimpan payload ke native inbox, lalu membangunkan service
-  bila diizinkan OS.
+  bila diizinkan OS. Timestamp receive native (`received_at`) dan monotonic
+  `received_elapsed_realtime_ms` ikut diteruskan ke Dart untuk logging riset.
 - `MeshBackgroundService.kt`: menjaga scan/advertising dan menghubungkan event
   native ke Dart background isolate.
 - `BootReceiver.kt`: memulihkan service setelah boot.
@@ -117,6 +118,11 @@ bit 0-5    hopCount, maksimum representasi protokol 63
 
 SOS memakai ACK flag `0`. ACK memakai ACK flag `1`. Timestamp disimpan dengan
 resolusi detik dan direkonstruksi terhadap waktu referensi penerima.
+
+`protocol_timestamp_ms` pada log riset selalu berasal dari timestamp protokol
+ini. Waktu event lokal disimpan terpisah sebagai `event_timestamp_ms`, sehingga
+CSV/JSON tidak mencampur waktu penerimaan/advertising dengan state timestamp
+BLE.
 
 CRC32 hanya identifier ringkas untuk payload, bukan mekanisme keamanan.
 
@@ -315,6 +321,15 @@ scanner/advertiser availability, multiple advertising support, permission
 status, foreground service, scan/advertiser native state, scheduler state,
 current packet, queue SOS/ACK, pending native inbox, earliest next eligible
 time, dan error native terakhir.
+
+## Research Observability P10
+
+Research Monitor hanya membaca session aktif `RESEARCH`; event background tanpa
+session penelitian aktif memakai session `AUTO`. Forwarding mode dicatat dari
+build config aktual, bukan dropdown manual. Accepted packet dihitung hanya dari
+`BLE_PACKET_ACCEPTED`, RSSI hanya dari `BLE_PACKET_RECEIVED`, dan hop dipisahkan
+menjadi `hop_in` serta `hop_out`. Trial timeout adalah workflow eksperimen
+(`FAILED/TIMEOUT`), bukan TTL protokol.
 
 ## Pengujian Developer
 

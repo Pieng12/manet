@@ -41,9 +41,11 @@ void main() {
     expect(current.nodeRole, 'RELAY');
     expect(current.targetHop, 3);
     expect(current.status, 'RUNNING');
+    expect(current.sessionKind, 'RESEARCH');
+    expect(current.forwardingMode, isNot('manually_selected'));
   });
 
-  test('create trial and trial numbering increments correctly', () async {
+  test('create trial numbering increments after terminal result', () async {
     final session = await research.startSession(
       deviceId: 'device-a',
       name: 'CTRL-H3',
@@ -57,6 +59,7 @@ void main() {
       sessionId: session.sessionId,
       trialCodePrefix: 'CTRL-H3',
     );
+    await research.finishTrial(first.trialId, result: 'SUCCESS');
     final second = await research.startTrial(
       sessionId: session.sessionId,
       trialCodePrefix: 'CTRL-H3',
@@ -67,6 +70,58 @@ void main() {
     expect(second.trialNumber, 2);
     expect(second.trialCode, 'CTRL-H3-002');
   });
+
+  test('start trial rejects when another trial is running', () async {
+    final session = await research.startSession(
+      deviceId: 'device-a',
+      name: 'CTRL-H3',
+      nodeRole: 'RELAY',
+      targetHop: 3,
+      topologyLabel: 'A -> R -> B',
+      scenarioLabel: 'LOS-5M',
+    );
+
+    await research.startTrial(sessionId: session.sessionId);
+
+    expect(
+      () => research.startTrial(sessionId: session.sessionId),
+      throwsA(isA<StateError>()),
+    );
+  });
+
+  test(
+    'AUTO session stays separate from active RESEARCH session query',
+    () async {
+      await logger.logEvent(
+        eventType: ExperimentEventTypes.serviceStarted,
+        deviceId: 'device-a',
+      );
+
+      expect(await research.currentSession(), isNull);
+
+      final researchSession = await research.startSession(
+        deviceId: 'device-a',
+        name: 'FIELD',
+        nodeRole: 'SOURCE',
+        targetHop: 1,
+        topologyLabel: 'A -> B',
+        scenarioLabel: 'P10',
+      );
+
+      final rows = await db.query(
+        'experiment_sessions',
+        orderBy: 'started_at ASC',
+      );
+      expect(
+        rows.map((row) => row['session_kind']),
+        containsAll(['AUTO', 'RESEARCH']),
+      );
+      expect(
+        (await research.currentSession())?.sessionId,
+        researchSession.sessionId,
+      );
+    },
+  );
 
   test('invalid trial remains stored and auditable', () async {
     final session = await research.startSession(
@@ -118,4 +173,66 @@ void main() {
       expect(events.single.eventTimestampMs, isNotNull);
     },
   );
+
+  test('logger does not use stale cached session across instances', () async {
+    final autoLogger = ExperimentLogger(database: db);
+    await autoLogger.logEvent(
+      eventType: ExperimentEventTypes.serviceStarted,
+      deviceId: 'device-a',
+    );
+    final researchSession = await research.startSession(
+      deviceId: 'device-a',
+      name: 'NEW-SESSION',
+      nodeRole: 'DESTINATION',
+      targetHop: 2,
+      topologyLabel: 'A -> R -> B',
+      scenarioLabel: 'P10',
+    );
+    final otherLoggerInstance = ExperimentLogger(database: db);
+
+    await otherLoggerInstance.logEvent(
+      eventType: ExperimentEventTypes.blePacketReceived,
+      deviceId: 'device-a',
+      eventTimestampMs: 1234,
+      elapsedRealtimeMs: 5678,
+      protocolTimestampMs: 9000,
+      packetType: 'sos',
+      status: 'active',
+      hopIn: 1,
+    );
+
+    final events = await otherLoggerInstance.events(
+      sessionId: researchSession.sessionId,
+    );
+    expect(events, hasLength(1));
+    expect(events.single.eventTimestampMs, 1234);
+    expect(events.single.elapsedRealtimeMs, 5678);
+    expect(events.single.protocolTimestampMs, 9000);
+    expect(events.single.packetType, 'sos');
+    expect(events.single.hopIn, 1);
+  });
+
+  test('running trial timeout marks explicit FAILED/TIMEOUT', () async {
+    final session = await research.startSession(
+      deviceId: 'device-a',
+      name: 'TIMEOUT',
+      nodeRole: 'DESTINATION',
+      targetHop: 2,
+      topologyLabel: 'A -> B',
+      scenarioLabel: 'P10',
+      trialTimeoutSeconds: 60,
+    );
+    final trial = await research.startTrial(sessionId: session.sessionId);
+
+    final updated = await research.applyTimeoutIfNeeded(
+      sessionId: session.sessionId,
+      nowMs: trial.startedAt + 60001,
+    );
+    final trials = await research.trialsForSession(session.sessionId);
+
+    expect(updated, 1);
+    expect(trials.single.status, 'COMPLETED');
+    expect(trials.single.result, 'FAILED');
+    expect(trials.single.failureReason, 'TIMEOUT');
+  });
 }

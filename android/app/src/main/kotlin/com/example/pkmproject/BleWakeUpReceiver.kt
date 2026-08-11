@@ -7,6 +7,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.os.Build
+import android.os.SystemClock
 import android.util.Log
 
 class BleWakeUpReceiver : BroadcastReceiver() {
@@ -111,7 +112,16 @@ class BleWakeUpReceiver : BroadcastReceiver() {
             payload,
             android.util.Base64.NO_WRAP
         )
-        val storeResult = NativeBleInbox.store(context, payload, deviceAddress, rssi)
+        val receivedAt = System.currentTimeMillis()
+        val receivedElapsedRealtimeMs = SystemClock.elapsedRealtime()
+        val storeResult = NativeBleInbox.store(
+            context,
+            payload,
+            deviceAddress,
+            rssi,
+            receivedAt,
+            receivedElapsedRealtimeMs
+        )
         if (!storeResult.shouldScheduleWorker) {
             Log.i(TAG, "Exact BLE payload already processed; worker recovery not scheduled")
             return
@@ -135,6 +145,8 @@ class BleWakeUpReceiver : BroadcastReceiver() {
             putExtra("inbox_id", inboxId)
             putExtra("device_address", deviceAddress)
             putExtra("rssi", rssi)
+            putExtra("received_at", receivedAt)
+            putExtra("received_elapsed_realtime_ms", receivedElapsedRealtimeMs)
         }
 
         try {

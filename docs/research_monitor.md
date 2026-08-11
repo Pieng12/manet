@@ -11,27 +11,36 @@ dimasukkan ke payload BLE 17 byte.
 ## Workflow
 
 1. Buka `Research Monitor`.
-2. Isi experiment name, forwarding mode, node role, target hop, topology,
-   scenario, dan notes.
+2. Isi experiment name, node role, target hop, topology, scenario, optional
+   trial timeout, dan notes. Forwarding mode dibaca dari build config, bukan
+   input manual.
 3. Tekan `START SESSION`.
 4. Tekan `START TRIAL`.
 5. Jalankan eksperimen fisik.
 6. Pantau LIVE, METRICS, EVENTS, dan SYSTEM.
-7. Akhiri trial sebagai `SUCCESS`, `FAILED`, atau `INVALID`.
-8. Gunakan `NEXT TRIAL` sampai jumlah pengulangan selesai.
+7. Akhiri trial sebagai `SUCCESS`, `FAILED` dengan failure reason, atau
+   `INVALID`.
+8. Gunakan `NEXT TRIAL` hanya setelah trial berjalan sudah terminal.
 9. Export current trial CSV, session CSV, atau session JSON.
 
 Trial invalid tidak dihapus. Trial tetap tersimpan dengan status `INVALID`
-agar keputusan eksperimen bisa diaudit.
+agar keputusan eksperimen bisa diaudit. Trial timeout hanya menandai trial
+`FAILED/TIMEOUT` saat monitor aktif; ini bukan TTL protokol mesh.
+
+Session logging dipisah menjadi `RESEARCH` dan `AUTO`. Research Monitor hanya
+menampilkan session `RESEARCH` yang masih aktif. Event service/background tetap
+dicatat ke session `AUTO` ketika tidak ada session penelitian aktif.
 
 ## Timestamp
 
 Protocol timestamp adalah timestamp ringkas satu detik di payload BLE. Timestamp
-ini dipakai untuk identity packet, state SOS, dan ACK tombstone.
+ini dipakai untuk identity packet, state SOS, dan ACK tombstone. Kolom
+`protocol_timestamp_ms` hanya berisi timestamp protokol, bukan waktu event.
 
-Research event time disimpan terpisah sebagai `event_timestamp_ms`. Nilai ini
-dipakai untuk metrik lokal seperti RX ke relay start. Jangan memasukkan
-timestamp millisecond ke payload BLE.
+Research event time disimpan terpisah sebagai `event_timestamp_ms`. Untuk
+packet BLE yang diterima native, nilai ini berasal dari timestamp native receive,
+bukan waktu drain Dart. Jika tersedia, `elapsed_realtime_ms` dipakai untuk
+latency lokal agar tidak terpengaruh perubahan jam sistem.
 
 ## Metric Scope
 
@@ -46,32 +55,36 @@ DSR:
 ```text
 successful valid trials
 -----------------------
-total valid completed trials
+total explicit SUCCESS + FAILED trials
 x 100%
 ```
 
-Trial `INVALID` tidak masuk denominator.
+Trial `INVALID`, `RUNNING`, dan `COMPLETED` tanpa result eksplisit tidak masuk
+denominator.
 
 Duplicate Ratio:
 
 ```text
 duplicate receptions
 ------------------------------
-accepted + duplicate receptions
+BLE_PACKET_ACCEPTED + duplicate receptions
 x 100%
 ```
 
-Stale packet tidak dihitung sebagai duplicate.
+Accepted count berasal hanya dari event canonical `BLE_PACKET_ACCEPTED`.
+Diagnostic stored/queued events tidak menambah accepted count. Stale packet
+tidak dihitung sebagai duplicate.
 
 Local Relay Processing Latency:
 
 ```text
-BLE_ADVERTISE_STARTED timestamp
+BLE_RELAY_STARTED timestamp
 -
 BLE_PACKET_RECEIVED timestamp
 ```
 
-Ini hanya aman untuk event pada device yang sama.
+Ini hanya aman untuk event pada device yang sama dan dikorelasikan dengan
+`payload_hash`, bukan hanya sender CRC.
 
 Hop Correctness:
 
@@ -105,10 +118,14 @@ source_first_advertise_timestamp
 Jika bukti peer tidak ada, Research Monitor menampilkan `Requires peer log`.
 Jangan menghitung E2E dari clock device yang tidak disinkronkan.
 
-## RSSI
+## RSSI dan Hop
 
 RSSI ditampilkan sebagai statistik observasional: count, min, mean, median, dan
-max. RSSI tidak dikonversi langsung menjadi meter.
+max. RSSI hanya diambil dari `BLE_PACKET_RECEIVED` dan tidak dikonversi langsung
+menjadi meter.
+
+Hop dipisah menjadi `hop_in` dan `hop_out`. Current Packet di LIVE membangun
+snapshot dari RX terbaru dan event output dengan `payload_hash` yang sama.
 
 ## ACK Metrics
 
@@ -121,15 +138,26 @@ ACK metrics memisahkan:
 - ACK invalid
 
 ACK packet dan SOS terminal state tetap diperlakukan sesuai semantik P8.
+Relay lokal yang berhenti karena ACK dicatat dengan event produksi
+`SOS_RELAY_TERMINATED_BY_ACK`, lalu dipasangkan deterministik dengan
+`ACK_RECEIVED` lewat `payload_hash`.
+
+## Device Metadata
+
+Session menyimpan manufacturer, model, Android release, SDK, app versionName,
+versionCode, dan build ID dari `RESQMESH_BUILD_ID` jika ada. Metadata ini tampil
+di tab SYSTEM dan ikut CSV/JSON export.
 
 ## Export
 
 CSV dan JSON export berisi session metadata, trial metadata, dan raw events.
 Calculated metrics harus bisa direproduksi dari raw events.
 
-Kolom CSV stabil mencakup session/trial identifiers, node role, forwarding mode,
-target hop, event timestamp, event type, sender CRC, protocol timestamp, packet
-type, status, hop, RSSI, payload hash, queue fields jika tersedia, dan detail.
+Kolom CSV stabil mencakup session kind, session/trial identifiers, trial result,
+failure reason, device metadata, node role, forwarding mode, target hop,
+`event_timestamp_ms`, ISO event time, `elapsed_realtime_ms`,
+`protocol_timestamp_ms`, event type, sender CRC, packet type, status, hop in,
+hop out, RSSI, payload hash, queue fields jika tersedia, dan detail.
 
 ## Limitations
 

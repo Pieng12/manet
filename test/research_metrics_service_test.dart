@@ -16,7 +16,13 @@ void main() {
     int timestamp, {
     String? payloadHash = 'packet-a',
     int? hop,
+    int? hopIn,
+    int? hopOut,
     int? rssi,
+    int? elapsedRealtimeMs,
+    int? protocolTimestampMs,
+    String? packetType,
+    String? status,
     Map<String, dynamic>? detail,
   }) {
     return ExperimentEvent(
@@ -25,6 +31,12 @@ void main() {
       eventType: type,
       timestampMs: timestamp,
       eventTimestampMs: timestamp,
+      elapsedRealtimeMs: elapsedRealtimeMs,
+      protocolTimestampMs: protocolTimestampMs,
+      packetType: packetType,
+      status: status,
+      hopIn: hopIn,
+      hopOut: hopOut,
       payloadHash: payloadHash,
       hopCount: hop,
       rssi: rssi,
@@ -81,17 +93,17 @@ void main() {
     final metrics = service.calculate(
       events: [
         event(ExperimentEventTypes.blePacketStored, 1000),
-        event(ExperimentEventTypes.blePacketStored, 1001),
+        event(ExperimentEventTypes.blePacketAccepted, 1001),
         event(ExperimentEventTypes.blePacketDuplicate, 1002),
         event(ExperimentEventTypes.blePacketStale, 1003),
       ],
       trials: const [],
     );
 
-    expect(metrics.acceptedCount, 2);
+    expect(metrics.acceptedCount, 1);
     expect(metrics.duplicateCount, 1);
     expect(metrics.staleCount, 1);
-    expect(metrics.duplicateRatioPercent, closeTo(33.33, 0.01));
+    expect(metrics.duplicateRatioPercent, closeTo(50, 0.01));
   });
 
   test('hop validation accepts expected increments and saturated 63', () {
@@ -176,7 +188,11 @@ void main() {
           detail: {'reason': 'ACK_ACTIVE_REJECTED'},
         ),
         event(ExperimentEventTypes.ackReceived, 2000, payloadHash: 'ack-a'),
-        event('LOCAL_RELAY_STOPPED', 2300, payloadHash: 'ack-a'),
+        event(
+          ExperimentEventTypes.sosRelayTerminatedByAck,
+          2300,
+          payloadHash: 'ack-a',
+        ),
       ],
       trials: const [],
     );
@@ -187,6 +203,77 @@ void main() {
     expect(metrics.ackStaleCount, 1);
     expect(metrics.ackInvalidCount, 1);
     expect(metrics.ackTerminationLatencyMs.median, 300);
+  });
+
+  test('RSSI stats only use BLE_PACKET_RECEIVED samples', () {
+    final metrics = service.calculate(
+      events: [
+        event(ExperimentEventTypes.blePacketReceived, 1000, rssi: -80),
+        event(ExperimentEventTypes.bleRelayStarted, 1010, rssi: -10),
+      ],
+      trials: const [],
+    );
+
+    expect(metrics.rssiStats.count, 1);
+    expect(metrics.rssiStats.mean, -80);
+  });
+
+  test('current packet snapshot correlates RX and TX by payload hash', () {
+    final metrics = service.calculate(
+      events: [
+        event(
+          ExperimentEventTypes.blePacketReceived,
+          1000,
+          payloadHash: 'payload-a',
+          hopIn: 2,
+          rssi: -71,
+          protocolTimestampMs: 900000,
+          packetType: 'sos',
+          status: 'active',
+          detail: {'from_server': false},
+        ),
+        event(
+          ExperimentEventTypes.bleRelayStarted,
+          1100,
+          payloadHash: 'payload-a',
+          hopOut: 3,
+        ),
+        event(
+          ExperimentEventTypes.bleRelayStarted,
+          1200,
+          payloadHash: 'payload-b',
+          hopOut: 9,
+        ),
+      ],
+      trials: const [],
+    );
+
+    expect(metrics.currentPacket?.payloadHash, 'payload-a');
+    expect(metrics.currentPacket?.hopIn, 2);
+    expect(metrics.currentPacket?.hopOut, 3);
+    expect(metrics.currentPacket?.protocolTimestampMs, 900000);
+    expect(metrics.currentPacket?.rssi, -71);
+  });
+
+  test('local latency uses elapsedRealtime when present', () {
+    final samples = service.localLatencySamples(
+      [
+        event(
+          ExperimentEventTypes.blePacketReceived,
+          1000,
+          elapsedRealtimeMs: 5000,
+        ),
+        event(
+          ExperimentEventTypes.bleRelayStarted,
+          900,
+          elapsedRealtimeMs: 5120,
+        ),
+      ],
+      startType: ExperimentEventTypes.blePacketReceived,
+      endType: ExperimentEventTypes.bleRelayStarted,
+    );
+
+    expect(samples, [120]);
   });
 
   test('advertise requested is not counted as successful TX', () {

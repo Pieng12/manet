@@ -10,7 +10,7 @@ import 'package:pkmproject/utils/protocol_timestamp.dart';
 import 'package:pkmproject/utils/sos_status_priority.dart';
 
 class DatabaseHelper {
-  static const int databaseVersion = 8;
+  static const int databaseVersion = 9;
 
   static final DatabaseHelper _instance = DatabaseHelper._internal();
   static Database? _database;
@@ -73,6 +73,7 @@ class DatabaseHelper {
         await db.execute(createExperimentSessionsTableSql);
         await db.execute(createExperimentTrialsTableSql);
         await db.execute(createExperimentEventsTableSql);
+        await ensureExperimentIndexes(db);
         print("[DatabaseHelper] Table created in onCreate");
       },
       onUpgrade: (db, oldVersion, newVersion) async {
@@ -95,6 +96,7 @@ class DatabaseHelper {
         await ensureAckTombstonesTable(db);
         await ensureExperimentTables(db);
         await ensureExperimentColumns(db);
+        await ensureExperimentIndexes(db);
       },
     );
   }
@@ -133,6 +135,12 @@ class DatabaseHelper {
     if (oldVersion < 8) {
       await ensureExperimentTables(db);
       await ensureExperimentColumns(db);
+    }
+
+    if (oldVersion < 9) {
+      await ensureExperimentTables(db);
+      await ensureExperimentColumns(db);
+      await ensureExperimentIndexes(db);
     }
   }
 
@@ -177,6 +185,12 @@ class DatabaseHelper {
       await db.execute(
         'ALTER TABLE experiment_events ADD COLUMN ${entry.key} ${entry.value}',
       );
+    }
+  }
+
+  static Future<void> ensureExperimentIndexes(Database db) async {
+    for (final sql in experimentIndexSql) {
+      await db.execute(sql);
     }
   }
 

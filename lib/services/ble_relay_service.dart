@@ -158,10 +158,17 @@ class BleRelayService {
   Future<BleProcessingResult> processIncomingBase64(
     String payloadBase64, {
     int? rssi,
+    int? receivedAtMs,
+    int? receivedElapsedRealtimeMs,
   }) async {
     try {
       final payload = base64Decode(payloadBase64);
-      return processIncomingPayload(Uint8List.fromList(payload), rssi: rssi);
+      return processIncomingPayload(
+        Uint8List.fromList(payload),
+        rssi: rssi,
+        receivedAtMs: receivedAtMs,
+        receivedElapsedRealtimeMs: receivedElapsedRealtimeMs,
+      );
     } on FormatException catch (e) {
       _log('Invalid BLE payload: $e');
       return BleProcessingResult.invalid;
@@ -171,6 +178,8 @@ class BleRelayService {
   Future<BleProcessingResult> processIncomingPayload(
     Uint8List payload, {
     int? rssi,
+    int? receivedAtMs,
+    int? receivedElapsedRealtimeMs,
   }) async {
     final packet = BlePacket.unpack(payload);
     if (packet == null) {
@@ -179,21 +188,42 @@ class BleRelayService {
     }
 
     _log('Received BLE payload ${_hex(payload)} -> ${_describePacket(packet)}');
+    final rxAtMs = receivedAtMs ?? DateTime.now().millisecondsSinceEpoch;
     await _experimentLogger.logEvent(
       eventType: ExperimentEventTypes.blePacketReceived,
       deviceId: SyncService().deviceId,
       senderCrc: packet.senderCrc,
       hopCount: packet.hopCount,
+      hopIn: packet.hopCount,
       rssi: rssi,
       payloadHash: packet.identity,
-      detail: {'kind': packet.kind.name, 'status': packet.status.name},
+      eventTimestampMs: rxAtMs,
+      elapsedRealtimeMs: receivedElapsedRealtimeMs,
+      protocolTimestampMs: packet.timestampMs,
+      packetType: packet.kind.name,
+      status: packet.status.name,
+      detail: {
+        'kind': packet.kind.name,
+        'status': packet.status.name,
+        'from_server': packet.fromServer,
+      },
     );
 
     try {
       if (packet.isAck) {
-        return await _processAck(packet, rssi: rssi);
+        return await _processAck(
+          packet,
+          rssi: rssi,
+          receivedAtMs: rxAtMs,
+          receivedElapsedRealtimeMs: receivedElapsedRealtimeMs,
+        );
       } else {
-        return await _processSos(packet, rssi: rssi);
+        return await _processSos(
+          packet,
+          rssi: rssi,
+          receivedAtMs: rxAtMs,
+          receivedElapsedRealtimeMs: receivedElapsedRealtimeMs,
+        );
       }
     } catch (e) {
       _log('Retryable BLE processing failure for ${packet.identity}: $e');
@@ -233,15 +263,26 @@ class BleRelayService {
         sosStatusPriority(existing.status);
   }
 
-  Future<BleProcessingResult> _processAck(BlePacket packet, {int? rssi}) async {
+  Future<BleProcessingResult> _processAck(
+    BlePacket packet, {
+    int? rssi,
+    int? receivedAtMs,
+    int? receivedElapsedRealtimeMs,
+  }) async {
     if (packet.status == SOSMessageStatus.active) {
       await _experimentLogger.logEvent(
         eventType: ExperimentEventTypes.bleRelayDropped,
         deviceId: SyncService().deviceId,
         senderCrc: packet.senderCrc,
         hopCount: packet.hopCount,
+        hopIn: packet.hopCount,
         rssi: rssi,
         payloadHash: packet.identity,
+        eventTimestampMs: receivedAtMs,
+        elapsedRealtimeMs: receivedElapsedRealtimeMs,
+        protocolTimestampMs: packet.timestampMs,
+        packetType: 'ack',
+        status: packet.status.name,
         detail: {'reason': 'ACK_ACTIVE_REJECTED'},
       );
       _log('ACK_ACTIVE_REJECTED ${packet.identity}');
@@ -253,8 +294,14 @@ class BleRelayService {
       deviceId: SyncService().deviceId,
       senderCrc: packet.senderCrc,
       hopCount: packet.hopCount,
+      hopIn: packet.hopCount,
       rssi: rssi,
       payloadHash: packet.identity,
+      eventTimestampMs: receivedAtMs,
+      elapsedRealtimeMs: receivedElapsedRealtimeMs,
+      protocolTimestampMs: packet.timestampMs,
+      packetType: 'ack',
+      status: packet.status.name,
     );
     final AckApplyResult result;
     try {
@@ -272,8 +319,14 @@ class BleRelayService {
         eventType: ExperimentEventTypes.ackTransactionRolledBack,
         deviceId: SyncService().deviceId,
         senderCrc: packet.senderCrc,
+        hopIn: packet.hopCount,
         rssi: rssi,
         payloadHash: packet.identity,
+        eventTimestampMs: receivedAtMs,
+        elapsedRealtimeMs: receivedElapsedRealtimeMs,
+        protocolTimestampMs: packet.timestampMs,
+        packetType: 'ack',
+        status: packet.status.name,
         detail: {'error': e.toString()},
       );
       rethrow;
@@ -285,6 +338,10 @@ class BleRelayService {
       status: packet.status,
       rssi: rssi,
       payloadHash: packet.identity,
+      hopIn: packet.hopCount,
+      hopOut: packet.hopCount >= MeshConfig.maxProtocolHop
+          ? MeshConfig.maxProtocolHop
+          : packet.hopCount + 1,
     );
 
     final genericAckEventType = genericAckPacketEventTypeForResult(result);
@@ -295,8 +352,14 @@ class BleRelayService {
           deviceId: SyncService().deviceId,
           senderCrc: packet.senderCrc,
           hopCount: packet.hopCount,
+          hopIn: packet.hopCount,
           rssi: rssi,
           payloadHash: packet.identity,
+          eventTimestampMs: receivedAtMs,
+          elapsedRealtimeMs: receivedElapsedRealtimeMs,
+          protocolTimestampMs: packet.timestampMs,
+          packetType: 'ack',
+          status: packet.status.name,
           detail: {
             'kind': 'ack',
             if (genericAckEventType == ExperimentEventTypes.bleRelayDropped)
@@ -312,21 +375,33 @@ class BleRelayService {
     final nextAckHop = packet.hopCount >= MeshConfig.maxProtocolHop
         ? MeshConfig.maxProtocolHop
         : packet.hopCount + 1;
+    await _logSosRelayTerminatedByAck(packet, receivedAtMs: receivedAtMs);
     await _experimentLogger.logEvent(
       eventType: ExperimentEventTypes.bleRelayQueued,
       deviceId: SyncService().deviceId,
       senderCrc: packet.senderCrc,
       hopCount: nextAckHop,
+      hopIn: packet.hopCount,
+      hopOut: nextAckHop,
       rssi: rssi,
       payloadHash: packet.identity,
+      protocolTimestampMs: packet.timestampMs,
+      packetType: 'ack',
+      status: packet.status.name,
       detail: {'kind': 'ack'},
     );
     _log('ACK_RELAY_QUEUED ${packet.identity} hop=$nextAckHop');
     return BleProcessingResult.accepted;
   }
 
-  Future<BleProcessingResult> _processSos(BlePacket packet, {int? rssi}) async {
+  Future<BleProcessingResult> _processSos(
+    BlePacket packet, {
+    int? rssi,
+    int? receivedAtMs,
+    int? receivedElapsedRealtimeMs,
+  }) async {
     final now = DateTime.now().millisecondsSinceEpoch;
+    final rxAtMs = receivedAtMs ?? now;
     final suppressedByAck = await _dbHelper.isSuppressedByAckTombstone(
       senderCrc: packet.senderCrc,
       sosTimestampMs: packet.timestampMs,
@@ -337,15 +412,21 @@ class BleRelayService {
         deviceId: SyncService().deviceId,
         senderCrc: packet.senderCrc,
         hopCount: packet.hopCount,
+        hopIn: packet.hopCount,
         rssi: rssi,
         payloadHash: packet.identity,
+        eventTimestampMs: rxAtMs,
+        elapsedRealtimeMs: receivedElapsedRealtimeMs,
+        protocolTimestampMs: packet.timestampMs,
+        packetType: 'sos',
+        status: packet.status.name,
         detail: {'reason': 'ACK_TOMBSTONE_SUPPRESSED'},
       );
       _log('ACK_TOMBSTONE_SUPPRESSED ${packet.identity}');
       return BleProcessingResult.suppressedByAck;
     }
 
-    final message = messageFromSosPacket(packet, now);
+    final message = messageFromSosPacket(packet, rxAtMs);
     final existing = await _dbHelper.getLatestMessageForSender(
       senderId: message.senderId,
       senderCrc: message.senderCrc,
@@ -367,8 +448,12 @@ class BleRelayService {
           messageId: existing.id,
           senderCrc: packet.senderCrc,
           hopCount: packet.hopCount,
+          hopIn: packet.hopCount,
           rssi: rssi,
           payloadHash: packet.identity,
+          protocolTimestampMs: packet.timestampMs,
+          packetType: 'sos',
+          status: packet.status.name,
         );
       } else if (decision.reason == ForwardingDecisionReason.dropStale) {
         await _experimentLogger.logEvent(
@@ -377,8 +462,12 @@ class BleRelayService {
           messageId: existing?.id,
           senderCrc: packet.senderCrc,
           hopCount: packet.hopCount,
+          hopIn: packet.hopCount,
           rssi: rssi,
           payloadHash: packet.identity,
+          protocolTimestampMs: packet.timestampMs,
+          packetType: 'sos',
+          status: packet.status.name,
           detail: {'latest_state': existing?.status.name},
         );
       }
@@ -388,8 +477,12 @@ class BleRelayService {
         messageId: existing?.id,
         senderCrc: packet.senderCrc,
         hopCount: packet.hopCount,
+        hopIn: packet.hopCount,
         rssi: rssi,
         payloadHash: packet.identity,
+        protocolTimestampMs: packet.timestampMs,
+        packetType: 'sos',
+        status: packet.status.name,
         detail: {'reason': decision.reason.code},
       );
       _log('${decision.reason.code} ${packet.identity}');
@@ -443,8 +536,12 @@ class BleRelayService {
         deviceId: SyncService().deviceId,
         messageId: message.id,
         senderCrc: message.senderCrc,
+        hopIn: packet.hopCount,
         rssi: rssi,
         payloadHash: packet.identity,
+        protocolTimestampMs: packet.timestampMs,
+        packetType: 'sos',
+        status: packet.status.name,
         detail: {'error': e.toString()},
       );
       rethrow;
@@ -459,8 +556,13 @@ class BleRelayService {
       messageId: message.id,
       senderCrc: message.senderCrc,
       hopCount: message.hopCount,
+      hopIn: packet.hopCount,
+      hopOut: message.hopCount,
       rssi: rssi,
       payloadHash: packet.identity,
+      protocolTimestampMs: packet.timestampMs,
+      packetType: 'sos',
+      status: message.status.name,
       detail: {
         'status': message.status.name,
         'next_eligible_at': nextEligibleAt,
@@ -468,13 +570,32 @@ class BleRelayService {
       },
     );
     await _experimentLogger.logEvent(
+      eventType: ExperimentEventTypes.blePacketAccepted,
+      deviceId: SyncService().deviceId,
+      messageId: message.id,
+      senderCrc: message.senderCrc,
+      hopCount: message.hopCount,
+      hopIn: packet.hopCount,
+      hopOut: message.hopCount,
+      rssi: rssi,
+      payloadHash: packet.identity,
+      protocolTimestampMs: packet.timestampMs,
+      packetType: 'sos',
+      status: message.status.name,
+    );
+    await _experimentLogger.logEvent(
       eventType: ExperimentEventTypes.blePacketStored,
       deviceId: SyncService().deviceId,
       messageId: message.id,
       senderCrc: message.senderCrc,
       hopCount: message.hopCount,
+      hopIn: packet.hopCount,
+      hopOut: message.hopCount,
       rssi: rssi,
       payloadHash: packet.identity,
+      protocolTimestampMs: packet.timestampMs,
+      packetType: 'sos',
+      status: message.status.name,
       detail: {'local_state': message.localState},
     );
     await WorkManagerService.registerSyncTask();
@@ -487,8 +608,13 @@ class BleRelayService {
         messageId: message.id,
         senderCrc: message.senderCrc,
         hopCount: message.hopCount,
+        hopIn: packet.hopCount,
+        hopOut: message.hopCount,
         rssi: rssi,
         payloadHash: packet.identity,
+        protocolTimestampMs: packet.timestampMs,
+        packetType: 'sos',
+        status: message.status.name,
         detail: {'deferred': true, 'next_eligible_at': decision.nextEligibleAt},
       );
       await _advertiser.advertiseLatestOrStop();
@@ -504,8 +630,12 @@ class BleRelayService {
         messageId: message.id,
         senderCrc: packet.senderCrc,
         hopCount: packet.hopCount,
+        hopIn: packet.hopCount,
         rssi: rssi,
         payloadHash: packet.identity,
+        protocolTimestampMs: packet.timestampMs,
+        packetType: 'sos',
+        status: packet.status.name,
         detail: {'reason': decision.reason.code},
       );
       _log('${decision.reason.code} ${packet.identity}');
@@ -519,8 +649,13 @@ class BleRelayService {
       messageId: message.id,
       senderCrc: message.senderCrc,
       hopCount: message.hopCount,
+      hopIn: packet.hopCount,
+      hopOut: message.hopCount,
       rssi: rssi,
       payloadHash: packet.identity,
+      protocolTimestampMs: packet.timestampMs,
+      packetType: 'sos',
+      status: message.status.name,
     );
     await _advertiser.advertiseLatestOrStop();
     _log('${decision.reason.code} ${packet.identity} hop=${message.hopCount}');
@@ -573,6 +708,8 @@ class BleRelayService {
     required SOSMessageStatus status,
     int? rssi,
     String? payloadHash,
+    int? hopIn,
+    int? hopOut,
   }) async {
     final eventType = switch (result) {
       AckApplyResult.inserted => ExperimentEventTypes.ackTransactionCommitted,
@@ -589,14 +726,52 @@ class BleRelayService {
       eventType: eventType,
       deviceId: SyncService().deviceId,
       senderCrc: senderCrc,
+      hopCount: hopOut,
+      hopIn: hopIn,
+      hopOut: hopOut,
       rssi: rssi,
       payloadHash: payloadHash,
+      protocolTimestampMs: ackTimestampMs,
+      packetType: 'ack',
+      status: status.name,
       detail: {
         'ack_timestamp_ms': canonicalProtocolTimestamp(ackTimestampMs),
         'status': status.name,
         'result': result.name,
       },
     );
+  }
+
+  Future<void> _logSosRelayTerminatedByAck(
+    BlePacket packet, {
+    int? receivedAtMs,
+  }) async {
+    final db = await _dbHelper.database;
+    final ackTimestamp = canonicalProtocolTimestamp(packet.timestampMs);
+    final rows = await db.query(
+      'sos_messages',
+      columns: const ['id'],
+      where: 'sender_crc = ? AND ack_received_at = ? AND local_state = ?',
+      whereArgs: [packet.senderCrc, ackTimestamp, 'acked'],
+    );
+    if (rows.isEmpty) return;
+    final eventAt = receivedAtMs ?? DateTime.now().millisecondsSinceEpoch;
+    for (final row in rows) {
+      await _experimentLogger.logEvent(
+        eventType: ExperimentEventTypes.sosRelayTerminatedByAck,
+        deviceId: SyncService().deviceId,
+        messageId: row['id']?.toString(),
+        senderCrc: packet.senderCrc,
+        hopIn: packet.hopCount,
+        rssi: null,
+        payloadHash: packet.identity,
+        eventTimestampMs: eventAt,
+        protocolTimestampMs: packet.timestampMs,
+        packetType: 'ack',
+        status: packet.status.name,
+        detail: {'ack_timestamp_ms': ackTimestamp},
+      );
+    }
   }
 
   void _log(String message) {

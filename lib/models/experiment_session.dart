@@ -18,6 +18,11 @@ class ExperimentSession {
   final String status;
   final String? appVersion;
   final int? trialTimeoutSeconds;
+  final String sessionKind;
+  final String? deviceManufacturer;
+  final int? androidSdk;
+  final String? appVersionCode;
+  final String? buildId;
 
   const ExperimentSession({
     required this.sessionId,
@@ -39,6 +44,11 @@ class ExperimentSession {
     this.status = 'RUNNING',
     this.appVersion,
     this.trialTimeoutSeconds,
+    this.sessionKind = 'AUTO',
+    this.deviceManufacturer,
+    this.androidSdk,
+    this.appVersionCode,
+    this.buildId,
   });
 
   Map<String, dynamic> toDbMap() {
@@ -62,6 +72,11 @@ class ExperimentSession {
       'status': status,
       'app_version': appVersion,
       'trial_timeout_seconds': trialTimeoutSeconds,
+      'session_kind': sessionKind,
+      'device_manufacturer': deviceManufacturer,
+      'android_sdk': androidSdk,
+      'app_version_code': appVersionCode,
+      'build_id': buildId,
     };
   }
 
@@ -86,6 +101,11 @@ class ExperimentSession {
       status: map['status'] as String? ?? 'RUNNING',
       appVersion: map['app_version'] as String?,
       trialTimeoutSeconds: map['trial_timeout_seconds'] as int?,
+      sessionKind: map['session_kind'] as String? ?? 'AUTO',
+      deviceManufacturer: map['device_manufacturer'] as String?,
+      androidSdk: map['android_sdk'] as int?,
+      appVersionCode: map['app_version_code']?.toString(),
+      buildId: map['build_id'] as String?,
     );
   }
 }

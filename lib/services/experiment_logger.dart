@@ -14,6 +14,7 @@ class ExperimentEventTypes {
   static const bleAdvertiseStarted = 'BLE_ADVERTISE_STARTED';
   static const bleAdvertiseFailed = 'BLE_ADVERTISE_FAILED';
   static const blePacketReceived = 'BLE_PACKET_RECEIVED';
+  static const blePacketAccepted = 'BLE_PACKET_ACCEPTED';
   static const blePacketStored = 'BLE_PACKET_STORED';
   static const blePacketDuplicate = 'BLE_PACKET_DUPLICATE';
   static const blePacketStale = 'BLE_PACKET_STALE';
@@ -23,6 +24,7 @@ class ExperimentEventTypes {
   static const messageExpired = 'MESSAGE_EXPIRED';
   static const ackReceived = 'ACK_RECEIVED';
   static const ackAccepted = 'ACK_ACCEPTED';
+  static const sosRelayTerminatedByAck = 'SOS_RELAY_TERMINATED_BY_ACK';
   static const ackTransactionCommitted = 'ACK_TRANSACTION_COMMITTED';
   static const ackTransactionRolledBack = 'ACK_TRANSACTION_ROLLED_BACK';
   static const ackDuplicate = 'ACK_DUPLICATE';
@@ -85,29 +87,39 @@ class ExperimentLogger {
   final Database? _database;
   final DatabaseHelper _databaseHelper;
 
-  ExperimentSession? _currentSession;
-
   Future<Database> get _db async => _database ?? _databaseHelper.database;
 
   Future<ExperimentSession> ensureSession({
     required String deviceId,
     String deviceModel = 'unknown',
     String androidVersion = 'unknown',
+    String? deviceManufacturer,
+    int? androidSdk,
+    String appVersion = 'auto',
+    String? appVersionCode,
+    String? buildId,
   }) async {
-    if (_currentSession != null && _currentSession!.endedAt == null) {
-      return _currentSession!;
-    }
-
     final db = await _db;
     final rows = await db.query(
       'experiment_sessions',
-      where: 'ended_at IS NULL',
+      where: 'session_kind = ? AND ended_at IS NULL',
+      whereArgs: const ['RESEARCH'],
       orderBy: 'started_at DESC',
       limit: 1,
     );
     if (rows.isNotEmpty) {
-      _currentSession = ExperimentSession.fromDbMap(rows.first);
-      return _currentSession!;
+      return ExperimentSession.fromDbMap(rows.first);
+    }
+
+    final autoRows = await db.query(
+      'experiment_sessions',
+      where: 'session_kind = ? AND ended_at IS NULL',
+      whereArgs: const ['AUTO'],
+      orderBy: 'started_at DESC',
+      limit: 1,
+    );
+    if (autoRows.isNotEmpty) {
+      return ExperimentSession.fromDbMap(autoRows.first);
     }
 
     final now = DateTime.now().millisecondsSinceEpoch;
@@ -124,23 +136,27 @@ class ExperimentLogger {
       name: 'AUTO-${now.toString()}',
       nodeRole: 'UNKNOWN',
       status: 'RUNNING',
+      appVersion: appVersion,
+      sessionKind: 'AUTO',
+      deviceManufacturer: deviceManufacturer,
+      androidSdk: androidSdk,
+      appVersionCode: appVersionCode,
+      buildId: buildId ?? MeshConfig.buildId,
     );
     await db.insert('experiment_sessions', session.toDbMap());
-    _currentSession = session;
     return session;
   }
 
   Future<ExperimentSession?> currentSession() async {
-    if (_currentSession != null) return _currentSession;
     final db = await _db;
     final rows = await db.query(
       'experiment_sessions',
+      where: 'ended_at IS NULL',
       orderBy: 'started_at DESC',
       limit: 1,
     );
     if (rows.isEmpty) return null;
-    _currentSession = ExperimentSession.fromDbMap(rows.first);
-    return _currentSession;
+    return ExperimentSession.fromDbMap(rows.first);
   }
 
   Future<void> endCurrentSession() async {
@@ -154,7 +170,6 @@ class ExperimentLogger {
       where: 'session_id = ?',
       whereArgs: [session.sessionId],
     );
-    _currentSession = null;
   }
 
   Future<void> logEvent({
@@ -163,15 +178,22 @@ class ExperimentLogger {
     String? messageId,
     int? senderCrc,
     int? hopCount,
+    int? hopIn,
+    int? hopOut,
     int? rssi,
     String? payloadHash,
+    int? eventTimestampMs,
+    int? elapsedRealtimeMs,
+    int? protocolTimestampMs,
+    String? packetType,
+    String? status,
     Map<String, dynamic>? detail,
   }) async {
     final session = await ensureSession(deviceId: deviceId);
     final trial = await ResearchSessionService(
       database: await _db,
     ).currentTrial(sessionId: session.sessionId);
-    final timestamp = DateTime.now().millisecondsSinceEpoch;
+    final timestamp = eventTimestampMs ?? DateTime.now().millisecondsSinceEpoch;
     final event = ExperimentEvent(
       sessionId: session.sessionId,
       trialId: trial?.trialId,
@@ -180,9 +202,15 @@ class ExperimentLogger {
       senderCrc: senderCrc,
       timestampMs: timestamp,
       eventTimestampMs: timestamp,
+      elapsedRealtimeMs: elapsedRealtimeMs,
       nodeRole: session.nodeRole,
       forwardingMode: session.forwardingMode,
       hopCount: hopCount,
+      protocolTimestampMs: protocolTimestampMs,
+      packetType: packetType,
+      status: status,
+      hopIn: hopIn,
+      hopOut: hopOut,
       rssi: rssi,
       payloadHash: payloadHash,
       detailJson: detail == null ? null : jsonEncode(detail),

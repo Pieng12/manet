@@ -77,6 +77,18 @@ class NativeBridgeService {
     }
   }
 
+  static Future<Map<String, dynamic>> getDeviceMetadata() async {
+    try {
+      final result = await _platform.invokeMapMethod<String, dynamic>(
+        'getDeviceMetadata',
+      );
+      return result ?? const <String, dynamic>{};
+    } on PlatformException catch (e) {
+      print("Failed to read device metadata: '${e.message}'.");
+      return const <String, dynamic>{};
+    }
+  }
+
   static Future<List<Map<String, dynamic>>> getPendingBleInbox() async {
     try {
       final result = await _platform.invokeListMethod<dynamic>(

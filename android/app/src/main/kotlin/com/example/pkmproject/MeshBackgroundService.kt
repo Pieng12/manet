@@ -132,7 +132,17 @@ class MeshBackgroundService : Service() {
                     val inboxId = intent.getStringExtra("inbox_id")
                     val deviceAddress = intent.getStringExtra("device_address")
                     val rssi = intent.getIntExtra("rssi", 0)
-                    sendPayloadToFlutter(payloadBase64, deviceAddress, rssi, inboxId = inboxId)
+                    val receivedAt = intent.getLongExtra("received_at", 0L)
+                    val receivedElapsedRealtimeMs =
+                        intent.getLongExtra("received_elapsed_realtime_ms", 0L)
+                    sendPayloadToFlutter(
+                        payloadBase64,
+                        deviceAddress,
+                        rssi,
+                        inboxId = inboxId,
+                        receivedAt = receivedAt,
+                        receivedElapsedRealtimeMs = receivedElapsedRealtimeMs
+                    )
                 }
                 CONNECTIVITY_CHANGED_ACTION -> {
                     sendWakeUpToFlutter("connectivityChanged", null, null, 0)
@@ -356,6 +366,9 @@ class MeshBackgroundService : Service() {
                     "getBleCapabilities" -> {
                         result.success(bleCapabilities())
                     }
+                    "getDeviceMetadata" -> {
+                        result.success(deviceMetadata())
+                    }
                     "startBleWakeUpScan" -> {
                         val scanAllAdvertisements =
                             call.argument<Boolean>("scanAllAdvertisements") ?: false
@@ -421,7 +434,9 @@ class MeshBackgroundService : Service() {
         deviceAddress: String?,
         rssi: Int,
         retryCount: Int = 0,
-        inboxId: String? = null
+        inboxId: String? = null,
+        receivedAt: Long = 0L,
+        receivedElapsedRealtimeMs: Long = 0L
     ) {
         sendWakeUpToFlutter(
             "bleWakeUpTriggered",
@@ -429,7 +444,9 @@ class MeshBackgroundService : Service() {
             deviceAddress,
             rssi,
             retryCount,
-            inboxId
+            inboxId,
+            receivedAt,
+            receivedElapsedRealtimeMs
         )
     }
 
@@ -439,7 +456,9 @@ class MeshBackgroundService : Service() {
         deviceAddress: String?,
         rssi: Int,
         retryCount: Int = 0,
-        inboxId: String? = null
+        inboxId: String? = null,
+        receivedAt: Long = 0L,
+        receivedElapsedRealtimeMs: Long = 0L
     ) {
         val maxRetries = 10
         val retryDelayMs = 500L
@@ -458,7 +477,9 @@ class MeshBackgroundService : Service() {
                         deviceAddress,
                         rssi,
                         retryCount + 1,
-                        inboxId
+                        inboxId,
+                        receivedAt,
+                        receivedElapsedRealtimeMs
                     )
                 }, retryDelayMs)
             } else {
@@ -479,7 +500,10 @@ class MeshBackgroundService : Service() {
                     "payload" to payloadBase64,
                     "inbox_id" to (inboxId ?: ""),
                     "device_address" to (deviceAddress ?: ""),
-                    "rssi" to rssi
+                    "rssi" to rssi,
+                    "received_at" to receivedAt.takeIf { it > 0L },
+                    "received_elapsed_realtime_ms" to receivedElapsedRealtimeMs
+                        .takeIf { it > 0L }
                 )
                 methodChannel.invokeMethod("blePayloadReceived", arguments)
                 Log.d(tag, "Sent BLE payload to Flutter, device=$deviceAddress, rssi=$rssi")
@@ -553,6 +577,7 @@ class MeshBackgroundService : Service() {
         }
         return mapOf(
             "sdkInt" to Build.VERSION.SDK_INT,
+            "androidRelease" to Build.VERSION.RELEASE,
             "deviceManufacturer" to Build.MANUFACTURER,
             "deviceModel" to Build.MODEL,
             "bluetoothEnabled" to (adapter?.isEnabled == true),
@@ -573,7 +598,33 @@ class MeshBackgroundService : Service() {
             "pendingNativeInbox" to NativeBleInbox.pendingCount(this),
             "nativeInboxPermissionBlockedAt" to NativeBleInbox.permissionBlockedAt(this),
             "relayModeEnabled" to servicePrefs().getBoolean(KEY_RELAY_MODE_ENABLED, true),
-            "nativeManufacturerId" to NativeBleConfig.MANUFACTURER_ID
+            "nativeManufacturerId" to NativeBleConfig.MANUFACTURER_ID,
+            "appVersionName" to deviceMetadata()["appVersionName"],
+            "appVersionCode" to deviceMetadata()["appVersionCode"]
+        )
+    }
+
+    private fun deviceMetadata(): Map<String, Any?> {
+        val packageInfo = try {
+            packageManager.getPackageInfo(packageName, 0)
+        } catch (_: Exception) {
+            null
+        }
+        val versionCode = if (packageInfo == null) {
+            "unknown"
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            packageInfo.longVersionCode.toString()
+        } else {
+            @Suppress("DEPRECATION")
+            packageInfo.versionCode.toString()
+        }
+        return mapOf(
+            "manufacturer" to Build.MANUFACTURER,
+            "model" to Build.MODEL,
+            "androidRelease" to Build.VERSION.RELEASE,
+            "androidSdk" to Build.VERSION.SDK_INT,
+            "appVersionName" to (packageInfo?.versionName ?: "unknown"),
+            "appVersionCode" to versionCode
         )
     }
 

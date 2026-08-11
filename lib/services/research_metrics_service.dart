@@ -34,18 +34,12 @@ class ResearchMetricsService {
     required List<ExperimentTrial> trials,
   }) {
     final validCompletedTrials = trials
-        .where((trial) => trial.status == 'COMPLETED')
+        .where((trial) => trial.result == 'SUCCESS' || trial.result == 'FAILED')
         .length;
     final successfulTrials = trials
-        .where(
-          (trial) => trial.status == 'COMPLETED' && trial.result == 'SUCCESS',
-        )
+        .where((trial) => trial.result == 'SUCCESS')
         .length;
-    final accepted = _count(events, {
-      ExperimentEventTypes.blePacketStored,
-      ExperimentEventTypes.sosTransactionCommitted,
-      ExperimentEventTypes.bleRelayQueued,
-    });
+    final accepted = _count(events, {ExperimentEventTypes.blePacketAccepted});
     final duplicates = _count(events, {
       ExperimentEventTypes.blePacketDuplicate,
     });
@@ -83,12 +77,20 @@ class ResearchMetricsService {
     });
     final relaySlots = _count(events, {ExperimentEventTypes.bleRelayStarted});
     final rssiSamples = events
-        .where((event) => event.rssi != null)
+        .where(
+          (event) =>
+              event.eventType == ExperimentEventTypes.blePacketReceived &&
+              event.rssi != null,
+        )
         .map((event) => event.rssi!)
         .toList();
-    final hopSamples = events
-        .where((event) => event.hopCount != null)
-        .map((event) => event.hopCount!)
+    final hopInSamples = events
+        .where((event) => event.hopIn != null)
+        .map((event) => event.hopIn!)
+        .toList();
+    final hopOutSamples = events
+        .where((event) => event.hopOut != null)
+        .map((event) => event.hopOut!)
         .toList();
     final localRelayLatencies = localLatencySamples(
       events,
@@ -99,7 +101,7 @@ class ResearchMetricsService {
     final ackTerminationLatencies = localLatencySamples(
       events,
       startType: ExperimentEventTypes.ackReceived,
-      endType: 'LOCAL_RELAY_STOPPED',
+      endType: ExperimentEventTypes.sosRelayTerminatedByAck,
     );
     final duplicateDenominator = accepted + duplicates;
     final latestHopValidation = latestHopValidationFromEvents(events);
@@ -130,13 +132,15 @@ class ResearchMetricsService {
           ? null
           : txSuccess / successfulTrials,
       rssiStats: NumericStats.fromSamples(rssiSamples),
-      hopStats: NumericStats.fromSamples(hopSamples),
+      hopInStats: NumericStats.fromSamples(hopInSamples),
+      hopOutStats: NumericStats.fromSamples(hopOutSamples),
       localRelayLatencyMs: NumericStats.fromSamples(localRelayLatencies),
       e2eLatencyMs: NumericStats.fromSamples(e2eLatencies),
       ackTerminationLatencyMs: NumericStats.fromSamples(
         ackTerminationLatencies,
       ),
       latestHopValidation: latestHopValidation,
+      currentPacket: currentPacketSnapshot(events),
       e2eRequiresPeerLog: e2eLatencies.isEmpty,
     );
   }
@@ -152,11 +156,11 @@ class ResearchMetricsService {
       final key = _latencyKey(event);
       if (key == null) continue;
       if (event.eventType == startType) {
-        startsByPayload[key] = event.eventTimestampMs ?? event.timestampMs;
+        startsByPayload[key] = _monotonicTime(event);
       } else if (event.eventType == endType) {
         final start = startsByPayload[key];
         if (start == null) continue;
-        final end = event.eventTimestampMs ?? event.timestampMs;
+        final end = _monotonicTime(event);
         if (end >= start) samples.add(end - start);
       }
     }
@@ -170,11 +174,11 @@ class ResearchMetricsService {
       final key = _latencyKey(event);
       if (key == null) continue;
       if (event.eventType == 'SOURCE_FIRST_ADVERTISE') {
-        sourceStarts[key] = event.eventTimestampMs ?? event.timestampMs;
+        sourceStarts[key] = _monotonicTime(event);
       } else if (event.eventType == 'DESTINATION_FIRST_RECEIVE') {
         final start = sourceStarts[key];
         if (start == null) continue;
-        final end = event.eventTimestampMs ?? event.timestampMs;
+        final end = _monotonicTime(event);
         if (end >= start) samples.add(end - start);
       }
     }
@@ -193,14 +197,50 @@ class ResearchMetricsService {
 
   HopValidation? latestHopValidationFromEvents(List<ExperimentEvent> events) {
     for (final event in events.reversed) {
-      final detail = _detail(event);
-      final hopIn = _asInt(detail['hop_in']) ?? event.hopCount;
-      final hopOut = _asInt(detail['hop_out']);
+      final hopIn = event.hopIn;
+      final hopOut = event.hopOut;
       if (hopIn != null && hopOut != null) {
         return validateHop(hopIn: hopIn, hopOut: hopOut);
       }
     }
     return null;
+  }
+
+  CurrentPacketSnapshot? currentPacketSnapshot(List<ExperimentEvent> events) {
+    ExperimentEvent? latestRx;
+    for (final event in events.reversed) {
+      if (event.eventType == ExperimentEventTypes.blePacketReceived) {
+        latestRx = event;
+        break;
+      }
+    }
+    if (latestRx == null) return null;
+    final payloadHash = latestRx.payloadHash;
+    ExperimentEvent? latestTx;
+    if (payloadHash != null) {
+      for (final event in events.reversed) {
+        if (event.payloadHash == payloadHash && event.hopOut != null) {
+          latestTx = event;
+          break;
+        }
+      }
+    }
+    final detail = _detail(latestRx);
+    return CurrentPacketSnapshot(
+      senderCrc: latestRx.senderCrc,
+      protocolTimestampMs: latestRx.protocolTimestampMs,
+      status: latestRx.status ?? detail['status']?.toString(),
+      packetType: latestRx.packetType ?? detail['kind']?.toString(),
+      hopIn: latestRx.hopIn,
+      hopOut: latestTx?.hopOut,
+      rssi: latestRx.rssi,
+      fromServer: detail['from_server'] is bool
+          ? detail['from_server'] as bool
+          : null,
+      payloadHash: payloadHash,
+      receivedAtMs: latestRx.eventTimestampMs ?? latestRx.timestampMs,
+      advertisedAtMs: latestTx?.eventTimestampMs ?? latestTx?.timestampMs,
+    );
   }
 
   static int _count(Iterable<ExperimentEvent> events, Set<String> types) {
@@ -214,7 +254,13 @@ class ResearchMetricsService {
   }
 
   static String? _latencyKey(ExperimentEvent event) {
-    return event.payloadHash ?? event.messageId ?? event.senderCrc?.toString();
+    return event.payloadHash ?? event.messageId;
+  }
+
+  static int _monotonicTime(ExperimentEvent event) {
+    return event.elapsedRealtimeMs ??
+        event.eventTimestampMs ??
+        event.timestampMs;
   }
 
   static Map<String, dynamic> _detail(ExperimentEvent event) {
@@ -226,12 +272,5 @@ class ResearchMetricsService {
     } catch (_) {
       return const {};
     }
-  }
-
-  static int? _asInt(Object? value) {
-    if (value is int) return value;
-    if (value is num) return value.toInt();
-    if (value is String) return int.tryParse(value);
-    return null;
   }
 }

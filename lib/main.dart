@@ -204,6 +204,10 @@ void backgroundServiceMain() {
         final args = Map<String, dynamic>.from(call.arguments as Map);
         final payloadBase64 = args['payload'] as String?;
         final rssi = args['rssi'] as int?;
+        final receivedAtMs = _asInt(args['received_at']);
+        final receivedElapsedRealtimeMs = _asInt(
+          args['received_elapsed_realtime_ms'],
+        );
         final inboxId = args['inbox_id'] as String?;
         if (payloadBase64 == null || payloadBase64.isEmpty) return;
 
@@ -224,6 +228,8 @@ void backgroundServiceMain() {
           final result = await BleRelayService().processIncomingBase64(
             payloadBase64,
             rssi: rssi,
+            receivedAtMs: receivedAtMs,
+            receivedElapsedRealtimeMs: receivedElapsedRealtimeMs,
           );
           if (inboxId != null && inboxId.isNotEmpty) {
             if (result.shouldAcknowledgeInbox) {
@@ -251,6 +257,13 @@ void backgroundServiceMain() {
   });
 
   debugPrint("[backgroundServiceMain] BLE-only background service ready");
+}
+
+int? _asInt(Object? value) {
+  if (value is int) return value;
+  if (value is num) return value.toInt();
+  if (value is String) return int.tryParse(value);
+  return null;
 }
 
 @pragma('vm:entry-point')

@@ -27,6 +27,10 @@ class MeshConfig {
     'RESQMESH_FORWARDING_MODE',
     defaultValue: 'controlled_epidemic',
   );
+  static const String buildId = String.fromEnvironment(
+    'RESQMESH_BUILD_ID',
+    defaultValue: 'unknown',
+  );
   static const ForwardingMode forwardingMode =
       forwardingModeName == 'basic' || forwardingModeName == 'basic_flooding'
       ? ForwardingMode.basicFlooding

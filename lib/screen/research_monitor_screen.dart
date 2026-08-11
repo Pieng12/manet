@@ -1,6 +1,4 @@
 import 'dart:async';
-import 'dart:convert';
-
 import 'package:flutter/material.dart';
 import 'package:pkmproject/config/mesh_config.dart';
 import 'package:pkmproject/models/experiment_event.dart';
@@ -57,8 +55,9 @@ class _ResearchMonitorScreenState extends State<ResearchMonitorScreen>
   final _scenarioController = TextEditingController(text: 'HOP-3');
   final _notesController = TextEditingController();
   final _trialNotesController = TextEditingController();
-  String _forwardingMode = MeshConfig.forwardingMode.logValue;
+  final _trialTimeoutController = TextEditingController();
   String _nodeRole = 'RELAY';
+  String _failureReason = 'NO_DELIVERY';
 
   @override
   void initState() {
@@ -80,11 +79,15 @@ class _ResearchMonitorScreenState extends State<ResearchMonitorScreen>
     _scenarioController.dispose();
     _notesController.dispose();
     _trialNotesController.dispose();
+    _trialTimeoutController.dispose();
     super.dispose();
   }
 
   Future<void> _refresh() async {
     final session = await _researchService.currentSession();
+    if (session != null) {
+      await _researchService.applyTimeoutIfNeeded(sessionId: session.sessionId);
+    }
     final trial = session == null
         ? null
         : await _researchService.currentTrial(sessionId: session.sessionId);
@@ -163,14 +166,17 @@ class _ResearchMonitorScreenState extends State<ResearchMonitorScreen>
   }
 
   Widget _buildLiveTab() {
-    final latestPacket = _latestPacketEvent();
+    final currentPacket = _metrics?.currentPacket;
     return _scroll(
       children: [
         _section('Experiment Session', [
           _kv('Session', _session?.name ?? 'No active session'),
           _kv('Trial', _trial?.trialCode ?? 'No active trial'),
           _kv('Trial Status', _trial?.status ?? '-'),
-          _kv('Forwarding Mode', _session?.forwardingMode ?? _forwardingMode),
+          _kv(
+            'Forwarding Mode',
+            _session?.forwardingMode ?? MeshConfig.forwardingMode.logValue,
+          ),
           _kv('Node Role', _session?.nodeRole ?? _nodeRole),
           _kv('Hop Target', _session?.targetHop?.toString() ?? '-'),
           _kv(
@@ -179,24 +185,29 @@ class _ResearchMonitorScreenState extends State<ResearchMonitorScreen>
           ),
         ]),
         _section('Current Packet', [
-          if (latestPacket == null)
+          if (currentPacket == null)
             _muted('No current packet')
           else ...[
-            _kv('Sender CRC', _hexCrc(latestPacket.senderCrc)),
-            _kv('Protocol Time', latestPacket.timestampMs.toString()),
-            _kv('Status', _detail(latestPacket, 'status') ?? '-'),
-            _kv('Packet Type', _detail(latestPacket, 'kind') ?? '-'),
-            _kv('Hop In', latestPacket.hopCount?.toString() ?? '-'),
-            _kv('Hop Out', _detail(latestPacket, 'hop_out') ?? '-'),
+            _kv('Sender CRC', _hexCrc(currentPacket.senderCrc)),
+            _kv(
+              'Protocol Time',
+              currentPacket.protocolTimestampMs?.toString() ?? '-',
+            ),
+            _kv('Status', currentPacket.status ?? '-'),
+            _kv('Packet Type', currentPacket.packetType ?? '-'),
+            _kv('Hop In', currentPacket.hopIn?.toString() ?? '-'),
+            _kv('Hop Out', currentPacket.hopOut?.toString() ?? '-'),
             _kv(
               'RSSI',
-              latestPacket.rssi == null ? '-' : '${latestPacket.rssi} dBm',
+              currentPacket.rssi == null ? '-' : '${currentPacket.rssi} dBm',
             ),
-            _kv('From Server', _detail(latestPacket, 'from_server') ?? '-'),
-            _kv('Payload Identity', latestPacket.payloadHash ?? '-'),
+            _kv('From Server', '${currentPacket.fromServer ?? '-'}'),
+            _kv('Payload Identity', currentPacket.payloadHash ?? '-'),
             _kv(
               'Received At',
-              _time(latestPacket.eventTimestampMs ?? latestPacket.timestampMs),
+              currentPacket.receivedAtMs == null
+                  ? '-'
+                  : _time(currentPacket.receivedAtMs!),
             ),
           ],
         ]),
@@ -255,8 +266,16 @@ class _ResearchMonitorScreenState extends State<ResearchMonitorScreen>
         ]),
         _section('RSSI', _statsRows(metrics.rssiStats, suffix: ' dBm')),
         _section('Hop Metrics', [
-          _kv('Max Hop Observed', metrics.hopStats.max?.toString() ?? 'N/A'),
-          _kv('Mean Hop', metrics.hopStats.mean?.toStringAsFixed(2) ?? 'N/A'),
+          _kv('Max Hop In', metrics.hopInStats.max?.toString() ?? 'N/A'),
+          _kv(
+            'Mean Hop In',
+            metrics.hopInStats.mean?.toStringAsFixed(2) ?? 'N/A',
+          ),
+          _kv('Max Hop Out', metrics.hopOutStats.max?.toString() ?? 'N/A'),
+          _kv(
+            'Mean Hop Out',
+            metrics.hopOutStats.mean?.toStringAsFixed(2) ?? 'N/A',
+          ),
           if (metrics.latestHopValidation == null)
             _kv('Hop Validation', 'N/A')
           else
@@ -292,12 +311,7 @@ class _ResearchMonitorScreenState extends State<ResearchMonitorScreen>
       children: [
         _section('Experiment Configuration', [
           _textField(_sessionNameController, 'Experiment Name'),
-          _dropdown(
-            label: 'Forwarding Mode',
-            value: _forwardingMode,
-            values: const ['controlled_epidemic', 'basic_flooding'],
-            onChanged: (value) => setState(() => _forwardingMode = value),
-          ),
+          _kv('Forwarding Mode', MeshConfig.forwardingMode.logValue),
           _dropdown(
             label: 'Node Role',
             value: _nodeRole,
@@ -317,6 +331,11 @@ class _ResearchMonitorScreenState extends State<ResearchMonitorScreen>
           ),
           _textField(_topologyController, 'Topology Label'),
           _textField(_scenarioController, 'Distance / Scenario Label'),
+          _textField(
+            _trialTimeoutController,
+            'Trial Timeout Seconds',
+            keyboardType: TextInputType.number,
+          ),
           _textField(_notesController, 'Notes', maxLines: 3),
           _buttonRow([
             _action('START SESSION', Icons.play_arrow, _startSession),
@@ -325,6 +344,19 @@ class _ResearchMonitorScreenState extends State<ResearchMonitorScreen>
         ]),
         _section('Trial Controls', [
           _kv('Current Trial', _trial?.trialCode ?? '-'),
+          _dropdown(
+            label: 'Failure Reason',
+            value: _failureReason,
+            values: const [
+              'NO_DELIVERY',
+              'TIMEOUT',
+              'DEVICE_ERROR',
+              'BLUETOOTH_ERROR',
+              'USER_ERROR',
+              'OTHER',
+            ],
+            onChanged: (value) => setState(() => _failureReason = value),
+          ),
           _textField(_trialNotesController, 'Trial Notes', maxLines: 2),
           _buttonRow([
             _action('START TRIAL', Icons.play_circle, _startTrial),
@@ -454,6 +486,13 @@ class _ResearchMonitorScreenState extends State<ResearchMonitorScreen>
       ),
       _kv('Pending Relay Work', _pendingRelayWork ? 'Yes' : 'No'),
       _kv('Forwarding Mode', MeshConfig.forwardingMode.logValue),
+      _kv('Device Manufacturer', _session?.deviceManufacturer ?? '-'),
+      _kv('Device Model', _session?.deviceModel ?? '-'),
+      _kv('Android Release', _session?.androidVersion ?? '-'),
+      _kv('Android SDK', _session?.androidSdk?.toString() ?? '-'),
+      _kv('App Version', _session?.appVersion ?? '-'),
+      _kv('App Version Code', _session?.appVersionCode ?? '-'),
+      _kv('Build ID', _session?.buildId ?? MeshConfig.buildId),
       _kv('Last Native Error', '${_capabilities['lastErrorCode'] ?? '-'}'),
       _kv('Permission Blocked', _permissionBlockedLabel()),
       _kv('Headless Worker', 'unknown'),
@@ -462,6 +501,8 @@ class _ResearchMonitorScreenState extends State<ResearchMonitorScreen>
 
   Future<void> _startSession() async {
     final targetHop = int.tryParse(_targetHopController.text.trim()) ?? 0;
+    final timeoutSeconds = int.tryParse(_trialTimeoutController.text.trim());
+    final metadata = await NativeBridgeService.getDeviceMetadata();
     await _researchService.startSession(
       deviceId: _syncService.deviceId,
       name: _sessionNameController.text,
@@ -470,7 +511,16 @@ class _ResearchMonitorScreenState extends State<ResearchMonitorScreen>
       topologyLabel: _topologyController.text,
       scenarioLabel: _scenarioController.text,
       notes: _notesController.text,
-      forwardingMode: _forwardingMode,
+      trialTimeoutSeconds: timeoutSeconds == null || timeoutSeconds <= 0
+          ? null
+          : timeoutSeconds,
+      deviceManufacturer: metadata['manufacturer']?.toString(),
+      deviceModel: metadata['model']?.toString() ?? 'unknown',
+      androidVersion: metadata['androidRelease']?.toString() ?? 'unknown',
+      androidSdk: _asInt(metadata['androidSdk']),
+      appVersion: metadata['appVersionName']?.toString() ?? 'research',
+      appVersionCode: metadata['appVersionCode']?.toString(),
+      buildId: MeshConfig.buildId,
     );
     await _logger.logEvent(
       eventType: 'RESEARCH_SESSION_STARTED',
@@ -494,11 +544,16 @@ class _ResearchMonitorScreenState extends State<ResearchMonitorScreen>
     }
     final activeSession = await _researchService.currentSession();
     if (activeSession == null) return;
-    await _researchService.startTrial(
-      sessionId: activeSession.sessionId,
-      trialCodePrefix: activeSession.name,
-      notes: _trialNotesController.text,
-    );
+    try {
+      await _researchService.startTrial(
+        sessionId: activeSession.sessionId,
+        trialCodePrefix: activeSession.name,
+        notes: _trialNotesController.text,
+      );
+    } on StateError catch (e) {
+      if (mounted) ResqFeedback.error(context, e.message);
+      return;
+    }
     await _logger.logEvent(
       eventType: 'RESEARCH_TRIAL_STARTED',
       deviceId: _syncService.deviceId,
@@ -512,7 +567,7 @@ class _ResearchMonitorScreenState extends State<ResearchMonitorScreen>
     await _researchService.finishTrial(
       trial.trialId,
       result: result,
-      failureReason: result == 'FAILED' ? 'OTHER' : null,
+      failureReason: result == 'FAILED' ? _failureReason : null,
       notes: _trialNotesController.text,
     );
     await _refresh();
@@ -529,12 +584,11 @@ class _ResearchMonitorScreenState extends State<ResearchMonitorScreen>
   }
 
   Future<void> _nextTrial() async {
-    if (_trial != null) {
-      await _researchService.finishTrial(
-        _trial!.trialId,
-        result: 'SUCCESS',
-        notes: _trialNotesController.text,
-      );
+    if (_trial != null && _trial!.status == 'RUNNING') {
+      if (mounted) {
+        ResqFeedback.error(context, 'Finish the running trial first');
+      }
+      return;
     }
     await _startTrial();
   }
@@ -586,18 +640,6 @@ class _ResearchMonitorScreenState extends State<ResearchMonitorScreen>
         _ => true,
       };
     }).toList();
-  }
-
-  ExperimentEvent? _latestPacketEvent() {
-    for (final event in _events.reversed) {
-      if (event.eventType == ExperimentEventTypes.blePacketReceived ||
-          event.eventType == ExperimentEventTypes.blePacketStored ||
-          event.eventType == ExperimentEventTypes.bleRelayQueued ||
-          event.eventType == ExperimentEventTypes.bleRelayStarted) {
-        return event;
-      }
-    }
-    return null;
   }
 
   Widget _scroll({required List<Widget> children}) {
@@ -834,13 +876,10 @@ class _ResearchMonitorScreenState extends State<ResearchMonitorScreen>
     return crc.toUnsigned(32).toRadixString(16).padLeft(8, '0').toUpperCase();
   }
 
-  String? _detail(ExperimentEvent event, String key) {
-    final raw = event.detailJson;
-    if (raw == null || raw.isEmpty) return null;
-    try {
-      final decoded = jsonDecode(raw);
-      if (decoded is Map<String, dynamic>) return decoded[key]?.toString();
-    } catch (_) {}
+  int? _asInt(Object? value) {
+    if (value is int) return value;
+    if (value is num) return value.toInt();
+    if (value is String) return int.tryParse(value);
     return null;
   }
 
