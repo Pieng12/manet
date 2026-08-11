@@ -12,6 +12,7 @@ import 'package:pkmproject/services/experiment_logger.dart';
 import 'package:pkmproject/services/relay_queue_service.dart';
 import 'package:pkmproject/services/workmanager_service.dart';
 import 'package:pkmproject/utils/hash_utils.dart';
+import 'package:pkmproject/utils/sos_state_ordering.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 
@@ -68,7 +69,7 @@ class SyncService {
 
       final key = message.senderCrc?.toString() ?? message.senderId;
       final existing = latestByDevice[key];
-      if (existing == null || message.updatedAt > existing.updatedAt) {
+      if (existing == null || compareSosState(message, existing) > 0) {
         latestByDevice[key] = message;
       }
     }

@@ -98,11 +98,15 @@ x 100%
 
 Accepted count berasal hanya dari event canonical `BLE_PACKET_ACCEPTED` dengan
 `packet_type = sos`. Diagnostic stored/queued events tidak menambah accepted
-count. Stale packet tidak dihitung sebagai duplicate. SOS Logical Duplicate
+count. SOS stale packet tidak dihitung sebagai duplicate. SOS Logical Duplicate
 Ratio hanya menghitung `BLE_PACKET_DUPLICATE` dengan `packet_type = sos` yang
 mencapai ResQMesh forwarding policy. ACK duplicate dikeluarkan dari rasio ini
 dan tetap tersedia sebagai metric `ACK Duplicate`. Exact repeated advertisements
 yang sudah disaring oleh native receiver/inbox dedup tidak termasuk.
+
+SOS Stale Received hanya menghitung `BLE_PACKET_STALE` dengan
+`packet_type = sos`. ACK stale dikeluarkan dari packet count utama dan tetap
+tersedia di bagian ACK Metrics sebagai `ACK Stale`.
 
 Initial Local Relay Latency:
 
@@ -158,9 +162,10 @@ Jangan menghitung E2E dari clock device yang tidak disinkronkan.
 
 ## RSSI dan Hop
 
-RSSI ditampilkan sebagai statistik observasional: count, min, mean, median, dan
-max. RSSI hanya diambil dari `BLE_PACKET_RECEIVED` dan tidak dikonversi langsung
-menjadi meter.
+SOS RSSI ditampilkan sebagai statistik observasional: count, min, mean, median,
+dan max. RSSI utama hanya diambil dari `BLE_PACKET_RECEIVED` dengan
+`packet_type = sos` dan tidak dikonversi langsung menjadi meter. ACK RSSI tidak
+masuk statistik propagasi SOS utama.
 
 Hop dipisah menjadi `hop_in` dan `hop_out`. SOS Hop In sample deskriptif hanya
 berasal dari `BLE_PACKET_RECEIVED` dengan `packet_type = sos`. SOS Hop Out
@@ -182,9 +187,13 @@ protocol timestamp
 
 Hop quality hanya dipakai saat timestamp dan status sama. Hop yang lebih baik
 tidak boleh mengalahkan protocol state yang lebih baru, terminal status, atau
-ACK tombstone. Saat better-hop update diterima, SQLite dan relay queue diperbarui
-agar relay berikutnya memakai hop yang lebih baik, dan relay scheduling metrics
-direset agar state improvement segera eligible sesuai aturan queue yang ada.
+ACK tombstone. Ordering canonical ini dipakai oleh state handling yang
+kompatibel dengan `ForwardingPolicy`, scheduling di `BleRelayService`,
+persistence di `RelayQueueService`, dan preferred-state selection di
+`DatabaseHelper`. Saat better-hop update diterima, SQLite dan relay queue
+diperbarui agar relay berikutnya memakai hop yang lebih baik, dan relay
+scheduling metrics direset agar state improvement segera eligible sesuai aturan
+queue yang ada.
 
 Current Packet di LIVE membangun snapshot dari latest accepted logical
 forwarding lifecycle, bukan dari raw duplicate advertisement terbaru. Anchor-nya

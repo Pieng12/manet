@@ -294,11 +294,14 @@ class _ResearchMonitorScreenState extends State<ResearchMonitorScreen>
           _kv('Scope', packetScope),
           _kv('Unique Accepted', packetMetrics.acceptedCount.toString()),
           _kv('SOS Logical Duplicate', packetMetrics.duplicateCount.toString()),
-          _kv('Stale Received', packetMetrics.staleCount.toString()),
+          _kv('SOS Stale Received', packetMetrics.staleCount.toString()),
           _kv('Invalid Received', packetMetrics.invalidCount.toString()),
           _kv('ACK Suppressed', packetMetrics.ackSuppressedCount.toString()),
         ]),
-        _section('RSSI', _statsRows(packetMetrics.rssiStats, suffix: ' dBm')),
+        _section(
+          'SOS RSSI',
+          _statsRows(packetMetrics.rssiStats, suffix: ' dBm'),
+        ),
         _section('SOS Hop Metrics', [
           _kv('Scope', packetScope),
           _kv('Max Hop In', packetMetrics.hopInStats.max?.toString() ?? 'N/A'),

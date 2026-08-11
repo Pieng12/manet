@@ -525,42 +525,51 @@ class DatabaseHelper {
 
   Future<int> upsertMessage(SOSMessage message) async {
     final db = await database;
-    // Don't hardcode isSynced to 1 here.
-    // It should preserve its original value (0 for mesh-received messages).
-    List<Map<String, dynamic>> existing;
+    final result = await upsertMessageInDb(db, message);
+    if (result > 0) refreshMessages();
+    return result;
+  }
+
+  static Future<int> upsertMessageInDb(Database db, SOSMessage message) async {
     if (message.senderCrc != null) {
-      existing = await db.query(
+      final existing = await db.query(
         'sos_messages',
         where: 'sender_id = ? OR sender_crc = ?',
         whereArgs: [message.senderId, message.senderCrc],
       );
+      return _upsertMessageWithExistingRows(db, message, existing);
     } else {
-      existing = await db.query(
+      final existing = await db.query(
         'sos_messages',
         where: 'sender_id = ?',
         whereArgs: [message.senderId],
       );
+      return _upsertMessageWithExistingRows(db, message, existing);
     }
+  }
 
+  static Future<int> _upsertMessageWithExistingRows(
+    Database db,
+    SOSMessage message,
+    List<Map<String, dynamic>> existing,
+  ) async {
     if (existing.isEmpty) {
-      final result = await db.insert(
+      return db.insert(
         'sos_messages',
         message.toDbMap(),
         conflictAlgorithm: ConflictAlgorithm.replace,
       );
-      refreshMessages();
-      return result;
     }
 
-    final existingMessage = SOSMessage.fromDbMap(existing.first);
-    if (message.updatedAt > existingMessage.updatedAt) {
-      // This is a full replacement, not just an upsert
-      await replaceWithLatestMessage(message);
-      // refreshMessages is called inside replaceWithLatestMessage
+    final existingMessage = existing
+        .map((row) => SOSMessage.fromDbMap(row))
+        .reduce(_newerMessage);
+    if (compareSosState(message, existingMessage) > 0) {
+      await replaceWithLatestMessageInDb(db, message);
       return 1;
     }
 
-    return 0; // No change
+    return 0;
   }
 
   Future<int> getLastSyncTimestamp() async {
@@ -750,36 +759,46 @@ class DatabaseHelper {
   Future<void> cleanupOldDuplicates() async {
     try {
       final db = await database;
-      final allMessages = await db.query('sos_messages');
-      if (allMessages.isEmpty) return;
-
-      final Map<String, SOSMessage> latestByDevice = {};
-      final idsToDelete = <String>{};
-
-      for (final msgMap in allMessages) {
-        final msg = SOSMessage.fromDbMap(msgMap);
-        final existing = latestByDevice[msg.senderId];
-        if (existing == null) {
-          latestByDevice[msg.senderId] = msg;
-        } else if (msg.updatedAt > existing.updatedAt) {
-          idsToDelete.add(existing.id);
-          latestByDevice[msg.senderId] = msg;
-        } else {
-          idsToDelete.add(msg.id);
-        }
-      }
-
-      if (idsToDelete.isNotEmpty) {
-        await db.transaction((txn) async {
-          for (final id in idsToDelete) {
-            await txn.delete('sos_messages', where: 'id = ?', whereArgs: [id]);
-          }
-        });
+      final deleted = await cleanupOldDuplicatesInDb(db);
+      if (deleted > 0) {
         refreshMessages(); // Broadcast change
       }
     } catch (e) {
       print("[DatabaseHelper] ⚠️ Error during cleanupOldDuplicates: $e");
     }
+  }
+
+  static Future<int> cleanupOldDuplicatesInDb(Database db) async {
+    final allMessages = await db.query('sos_messages');
+    if (allMessages.isEmpty) return 0;
+
+    final latestBySender = <String, SOSMessage>{};
+    final idsToDelete = <String>{};
+
+    for (final msgMap in allMessages) {
+      final msg = SOSMessage.fromDbMap(msgMap);
+      final senderKey = msg.senderCrc?.toString() ?? msg.senderId;
+      final existing = latestBySender[senderKey];
+      if (existing == null) {
+        latestBySender[senderKey] = msg;
+        continue;
+      }
+
+      if (compareSosState(msg, existing) > 0) {
+        idsToDelete.add(existing.id);
+        latestBySender[senderKey] = msg;
+      } else {
+        idsToDelete.add(msg.id);
+      }
+    }
+
+    if (idsToDelete.isEmpty) return 0;
+    await db.transaction((txn) async {
+      for (final id in idsToDelete) {
+        await txn.delete('sos_messages', where: 'id = ?', whereArgs: [id]);
+      }
+    });
+    return idsToDelete.length;
   }
 
   /// Delete a message by ID (only for non-own messages or cancelled/resolved own messages)

@@ -1054,6 +1054,56 @@ void main() {
     },
   );
 
+  test('upsertMessageInDb preserves better-hop preferred state', () async {
+    final existing = message(
+      'upsert-hop-3',
+      senderCrc: 6060,
+      updatedAt: now,
+      hopCount: 3,
+    );
+    await DatabaseHelper.upsertMessageInDb(db, existing);
+
+    final better = message(
+      'upsert-hop-1',
+      senderCrc: 6060,
+      updatedAt: now,
+      hopCount: 1,
+    );
+    final result = await DatabaseHelper.upsertMessageInDb(db, better);
+
+    final rows = await db.query('sos_messages');
+    final stored = SOSMessage.fromDbMap(rows.single);
+
+    expect(result, 1);
+    expect(stored.id, 'upsert-hop-1');
+    expect(stored.hopCount, 1);
+  });
+
+  test('cleanupOldDuplicatesInDb keeps better-hop preferred state', () async {
+    final worse = message(
+      'cleanup-hop-3',
+      senderCrc: 6161,
+      updatedAt: now,
+      hopCount: 3,
+    );
+    final better = message(
+      'cleanup-hop-1',
+      senderCrc: 6161,
+      updatedAt: now,
+      hopCount: 1,
+    );
+    await insertMessage(worse);
+    await insertMessage(better);
+
+    final deleted = await DatabaseHelper.cleanupOldDuplicatesInDb(db);
+    final rows = await db.query('sos_messages');
+    final stored = SOSMessage.fromDbMap(rows.single);
+
+    expect(deleted, 1);
+    expect(stored.id, 'cleanup-hop-1');
+    expect(stored.hopCount, 1);
+  });
+
   test(
     'ACK transaction atomically tombstones, ACKs SOS, removes SOS queue, and queues ACK',
     () async {

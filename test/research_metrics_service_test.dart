@@ -98,6 +98,7 @@ void main() {
         event(ExperimentEventTypes.blePacketAccepted, 1001, packetType: 'sos'),
         event(ExperimentEventTypes.blePacketDuplicate, 1002, packetType: 'sos'),
         event(ExperimentEventTypes.blePacketStale, 1003, packetType: 'sos'),
+        event(ExperimentEventTypes.blePacketStale, 1004, packetType: 'ack'),
       ],
       trials: const [],
     );
@@ -249,9 +250,30 @@ void main() {
   test('RSSI stats are calculated correctly', () {
     final metrics = service.calculate(
       events: [
-        event(ExperimentEventTypes.blePacketReceived, 1000, rssi: -80),
-        event(ExperimentEventTypes.blePacketReceived, 1100, rssi: -60),
-        event(ExperimentEventTypes.blePacketReceived, 1200, rssi: -70),
+        event(
+          ExperimentEventTypes.blePacketReceived,
+          1000,
+          packetType: 'sos',
+          rssi: -80,
+        ),
+        event(
+          ExperimentEventTypes.blePacketReceived,
+          1100,
+          packetType: 'sos',
+          rssi: -60,
+        ),
+        event(
+          ExperimentEventTypes.blePacketReceived,
+          1200,
+          packetType: 'sos',
+          rssi: -70,
+        ),
+        event(
+          ExperimentEventTypes.blePacketReceived,
+          1300,
+          packetType: 'ack',
+          rssi: -20,
+        ),
       ],
       trials: const [],
     );
@@ -295,8 +317,24 @@ void main() {
   test('RSSI stats only use BLE_PACKET_RECEIVED samples', () {
     final metrics = service.calculate(
       events: [
-        event(ExperimentEventTypes.blePacketReceived, 1000, rssi: -80),
-        event(ExperimentEventTypes.bleRelayStarted, 1010, rssi: -10),
+        event(
+          ExperimentEventTypes.blePacketReceived,
+          1000,
+          packetType: 'sos',
+          rssi: -80,
+        ),
+        event(
+          ExperimentEventTypes.blePacketReceived,
+          1005,
+          packetType: 'ack',
+          rssi: -20,
+        ),
+        event(
+          ExperimentEventTypes.bleRelayStarted,
+          1010,
+          packetType: 'sos',
+          rssi: -10,
+        ),
       ],
       trials: const [],
     );

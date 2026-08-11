@@ -67,9 +67,17 @@ void main() {
       final validNewer = message('valid-newer', offsetMs: 1000)
         ..senderCrc = 777;
       final oldSos = message('old', expiresAt: now - 1)..senderCrc = 888;
+      final worseHop = message('worse-hop', offsetMs: 2000)
+        ..senderCrc = 999
+        ..hopCount = 3;
+      final betterHop = message('better-hop', offsetMs: 2000)
+        ..senderCrc = 999
+        ..hopCount = 1;
       final candidates = SyncService.filterGatewayUploadCandidates([
         validOld,
         validNewer,
+        worseHop,
+        betterHop,
         message('synced', isSynced: 1),
         message('acked', ackReceivedAt: now),
         oldSos,
@@ -78,6 +86,7 @@ void main() {
 
       expect(candidates.map((item) => item.id).toSet(), {
         validNewer.id,
+        betterHop.id,
         oldSos.id,
       });
     },

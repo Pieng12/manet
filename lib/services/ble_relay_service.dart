@@ -20,7 +20,7 @@ import 'package:pkmproject/services/workmanager_service.dart';
 import 'package:pkmproject/sync_service.dart';
 import 'package:pkmproject/utils/hash_utils.dart';
 import 'package:pkmproject/utils/protocol_timestamp.dart';
-import 'package:pkmproject/utils/sos_status_priority.dart';
+import 'package:pkmproject/utils/sos_state_ordering.dart';
 
 class BleRelayService {
   static final BleRelayService _instance = BleRelayService._internal();
@@ -256,11 +256,62 @@ class BleRelayService {
   }
 
   bool _isNewerState(SOSMessage incoming, SOSMessage? existing) {
+    return isSosStateImprovement(incoming, existing);
+  }
+
+  static bool isSosStateImprovement(SOSMessage incoming, SOSMessage? existing) {
     if (existing == null) return true;
-    if (incoming.updatedAt > existing.updatedAt) return true;
-    if (incoming.updatedAt < existing.updatedAt) return false;
-    return sosStatusPriority(incoming.status) >
-        sosStatusPriority(existing.status);
+    return compareSosState(incoming, existing) > 0;
+  }
+
+  static bool isPrioritySosStatus(SOSMessageStatus status) {
+    return status == SOSMessageStatus.cancelled ||
+        status == SOSMessageStatus.resolved;
+  }
+
+  static bool shouldDeferSosForCooldown({
+    required ForwardingDecision decision,
+    required SOSMessage incoming,
+    required SOSMessage? existing,
+  }) {
+    return decision.reason == ForwardingDecisionReason.dropCooldown &&
+        decision.nextEligibleAt != null &&
+        !isSosStateImprovement(incoming, existing) &&
+        !isPrioritySosStatus(incoming.status);
+  }
+
+  static bool shouldRelaySosNow({
+    required ForwardingDecision decision,
+    required SOSMessage incoming,
+    required SOSMessage? existing,
+  }) {
+    return decision.shouldRelay ||
+        isSosStateImprovement(incoming, existing) ||
+        isPrioritySosStatus(incoming.status);
+  }
+
+  static int determineSosNextEligibleAt({
+    required int nowMs,
+    required ForwardingDecision decision,
+    required SOSMessage incoming,
+    required SOSMessage? existing,
+    required RelayQueueService relayQueue,
+  }) {
+    if (shouldDeferSosForCooldown(
+      decision: decision,
+      incoming: incoming,
+      existing: existing,
+    )) {
+      return decision.nextEligibleAt!;
+    }
+    if (isSosStateImprovement(incoming, existing) ||
+        isPrioritySosStatus(incoming.status)) {
+      return nowMs;
+    }
+    return relayQueue.sosCooldownEligibleAt(
+      nowMs,
+      relayCount: incoming.relayCount,
+    );
   }
 
   Future<BleProcessingResult> _processAck(
@@ -503,9 +554,16 @@ class BleRelayService {
       message.localState = 'queued';
     }
     final isNewerState = _isNewerState(message, existing);
-    final isPriorityStatus =
-        message.status == SOSMessageStatus.cancelled ||
-        message.status == SOSMessageStatus.resolved;
+    final shouldRelayNow = shouldRelaySosNow(
+      decision: decision,
+      incoming: message,
+      existing: existing,
+    );
+    final isDeferredByCooldown = shouldDeferSosForCooldown(
+      decision: decision,
+      incoming: message,
+      existing: existing,
+    );
 
     if (existing != null && !isNewerState) {
       message.relayCount = existing.relayCount;
@@ -513,16 +571,13 @@ class BleRelayService {
       message.lastRelayedAt = existing.lastRelayedAt;
     }
 
-    final nextEligibleAt =
-        decision.reason == ForwardingDecisionReason.dropCooldown &&
-            decision.nextEligibleAt != null
-        ? decision.nextEligibleAt!
-        : isNewerState || isPriorityStatus
-        ? now
-        : _relayQueue.sosCooldownEligibleAt(
-            now,
-            relayCount: message.relayCount,
-          );
+    final nextEligibleAt = determineSosNextEligibleAt(
+      nowMs: now,
+      decision: decision,
+      incoming: message,
+      existing: existing,
+      relayQueue: _relayQueue,
+    );
     final bool stored;
     try {
       stored = await _relayQueue.storeAndQueueSos(
@@ -602,8 +657,7 @@ class BleRelayService {
     );
     await WorkManagerService.registerSyncTask();
 
-    if (decision.reason == ForwardingDecisionReason.dropCooldown &&
-        decision.nextEligibleAt != null) {
+    if (isDeferredByCooldown) {
       await _experimentLogger.logEvent(
         eventType: ExperimentEventTypes.bleRelayQueued,
         deviceId: SyncService().deviceId,
@@ -625,7 +679,7 @@ class BleRelayService {
       return BleProcessingResult.accepted;
     }
 
-    if (!decision.shouldRelay) {
+    if (!shouldRelayNow) {
       await _experimentLogger.logEvent(
         eventType: ExperimentEventTypes.bleRelayDropped,
         deviceId: SyncService().deviceId,

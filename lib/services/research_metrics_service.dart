@@ -53,7 +53,13 @@ class ResearchMetricsService {
               _isPacketType(event, 'sos'),
         )
         .length;
-    final stale = _count(events, {ExperimentEventTypes.blePacketStale});
+    final stale = events
+        .where(
+          (event) =>
+              event.eventType == ExperimentEventTypes.blePacketStale &&
+              _isPacketType(event, 'sos'),
+        )
+        .length;
     final invalid = events.where(_isInvalidEvent).length;
     final ackSuppressed = events.where((event) {
       final detail = _detail(event);
@@ -90,6 +96,7 @@ class ResearchMetricsService {
         .where(
           (event) =>
               event.eventType == ExperimentEventTypes.blePacketReceived &&
+              _isPacketType(event, 'sos') &&
               event.rssi != null,
         )
         .map((event) => event.rssi!)
