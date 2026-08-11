@@ -326,6 +326,7 @@ void main() {
         eventType: ExperimentEventTypes.blePacketAccepted,
         deviceId: 'device-a',
         payloadHash: 'current-trial',
+        packetType: 'sos',
       );
       final metrics = ResearchMetricsService(
         logger: logger,

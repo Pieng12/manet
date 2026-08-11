@@ -39,10 +39,20 @@ class ResearchMetricsService {
     final successfulTrials = trials
         .where((trial) => trial.result == 'SUCCESS')
         .length;
-    final accepted = _count(events, {ExperimentEventTypes.blePacketAccepted});
-    final duplicates = _count(events, {
-      ExperimentEventTypes.blePacketDuplicate,
-    });
+    final accepted = events
+        .where(
+          (event) =>
+              event.eventType == ExperimentEventTypes.blePacketAccepted &&
+              _isPacketType(event, 'sos'),
+        )
+        .length;
+    final duplicates = events
+        .where(
+          (event) =>
+              event.eventType == ExperimentEventTypes.blePacketDuplicate &&
+              _isPacketType(event, 'sos'),
+        )
+        .length;
     final stale = _count(events, {ExperimentEventTypes.blePacketStale});
     final invalid = events.where(_isInvalidEvent).length;
     final ackSuppressed = events.where((event) {
@@ -88,6 +98,7 @@ class ResearchMetricsService {
         .where(
           (event) =>
               event.eventType == ExperimentEventTypes.blePacketReceived &&
+              _isPacketType(event, 'sos') &&
               event.hopIn != null,
         )
         .map((event) => event.hopIn!)
@@ -96,6 +107,7 @@ class ResearchMetricsService {
         .where(
           (event) =>
               event.eventType == ExperimentEventTypes.bleRelayStarted &&
+              _isPacketType(event, 'sos') &&
               event.hopOut != null,
         )
         .map((event) => event.hopOut!)
@@ -331,6 +343,10 @@ class ResearchMetricsService {
     if (event.eventType != ExperimentEventTypes.bleRelayDropped) return false;
     final reason = _detail(event)['reason']?.toString().toUpperCase();
     return reason != null && reason.contains('INVALID');
+  }
+
+  static bool _isPacketType(ExperimentEvent event, String packetType) {
+    return event.packetType?.toLowerCase() == packetType;
   }
 
   static int _wallTime(ExperimentEvent event) {

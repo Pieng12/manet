@@ -7,6 +7,7 @@ import 'package:pkmproject/config/mesh_config.dart';
 import 'package:pkmproject/database_schema.dart'; // Import our SQL schema
 import 'package:pkmproject/models/sos_message.dart'; // Import the SOSMessage model
 import 'package:pkmproject/utils/protocol_timestamp.dart';
+import 'package:pkmproject/utils/sos_state_ordering.dart';
 import 'package:pkmproject/utils/sos_status_priority.dart';
 
 class DatabaseHelper {
@@ -659,10 +660,7 @@ class DatabaseHelper {
         .map((m) => SOSMessage.fromDbMap(m))
         .reduce(_newerMessage);
 
-    return incomingMessage.updatedAt > latestExisting.updatedAt ||
-        (incomingMessage.updatedAt == latestExisting.updatedAt &&
-            sosStatusPriority(incomingMessage.status) >
-                sosStatusPriority(latestExisting.status));
+    return compareSosState(incomingMessage, latestExisting) > 0;
   }
 
   Future<void> replaceWithLatestMessage(SOSMessage message) async {
@@ -701,29 +699,19 @@ class DatabaseHelper {
         if (rows.isEmpty) continue;
         final candidate = SOSMessage.fromDbMap(rows.first);
         if (latestExisting == null ||
-            candidate.updatedAt > latestExisting.updatedAt ||
-            (candidate.updatedAt == latestExisting.updatedAt &&
-                sosStatusPriority(candidate.status) >
-                    sosStatusPriority(latestExisting.status))) {
+            compareSosState(candidate, latestExisting) > 0) {
           latestExisting = candidate;
         }
       }
 
       if (latestExisting != null) {
-        if (latestExisting.updatedAt > message.updatedAt ||
-            (latestExisting.updatedAt == message.updatedAt &&
-                sosStatusPriority(latestExisting.status) >
-                    sosStatusPriority(message.status))) {
+        final comparison = compareSosState(message, latestExisting);
+        if (comparison <= 0) {
           return;
         }
 
-        if (message.updatedAt > latestExisting.updatedAt ||
-            (message.updatedAt == latestExisting.updatedAt &&
-                sosStatusPriority(message.status) >
-                    sosStatusPriority(latestExisting.status))) {
-          message.relayCount = 0;
-          message.lastRelayedAt = 0;
-        }
+        message.relayCount = 0;
+        message.lastRelayedAt = 0;
       }
 
       for (final row in existingRows) {
@@ -831,11 +819,6 @@ class DatabaseHelper {
   }
 
   static SOSMessage _newerMessage(SOSMessage a, SOSMessage b) {
-    final aTimestamp = canonicalProtocolTimestamp(a.updatedAt);
-    final bTimestamp = canonicalProtocolTimestamp(b.updatedAt);
-    if (aTimestamp != bTimestamp) {
-      return aTimestamp > bTimestamp ? a : b;
-    }
-    return sosStatusPriority(a.status) >= sosStatusPriority(b.status) ? a : b;
+    return preferredSosState(a, b);
   }
 }

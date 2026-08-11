@@ -87,21 +87,22 @@ x 100%
 Trial `INVALID`, `RUNNING`, dan `COMPLETED` tanpa result eksplisit tidak masuk
 denominator.
 
-Logical Duplicate Ratio:
+SOS Logical Duplicate Ratio:
 
 ```text
-BLE_PACKET_DUPLICATE
+SOS BLE_PACKET_DUPLICATE
 ------------------------------
-BLE_PACKET_ACCEPTED + BLE_PACKET_DUPLICATE
+SOS BLE_PACKET_ACCEPTED + SOS BLE_PACKET_DUPLICATE
 x 100%
 ```
 
-Accepted count berasal hanya dari event canonical `BLE_PACKET_ACCEPTED`.
-Diagnostic stored/queued events tidak menambah accepted count. Stale packet
-tidak dihitung sebagai duplicate. Logical Duplicate Ratio hanya menghitung
-packet duplicate yang mencapai ResQMesh forwarding policy. Exact repeated
-advertisements yang sudah disaring oleh native receiver/inbox dedup tidak
-termasuk.
+Accepted count berasal hanya dari event canonical `BLE_PACKET_ACCEPTED` dengan
+`packet_type = sos`. Diagnostic stored/queued events tidak menambah accepted
+count. Stale packet tidak dihitung sebagai duplicate. SOS Logical Duplicate
+Ratio hanya menghitung `BLE_PACKET_DUPLICATE` dengan `packet_type = sos` yang
+mencapai ResQMesh forwarding policy. ACK duplicate dikeluarkan dari rasio ini
+dan tetap tersedia sebagai metric `ACK Duplicate`. Exact repeated advertisements
+yang sudah disaring oleh native receiver/inbox dedup tidak termasuk.
 
 Initial Local Relay Latency:
 
@@ -161,9 +162,29 @@ RSSI ditampilkan sebagai statistik observasional: count, min, mean, median, dan
 max. RSSI hanya diambil dari `BLE_PACKET_RECEIVED` dan tidak dikonversi langsung
 menjadi meter.
 
-Hop dipisah menjadi `hop_in` dan `hop_out`. Hop In sample deskriptif hanya
-berasal dari `BLE_PACKET_RECEIVED`. Hop Out sample hanya berasal dari
-`BLE_RELAY_STARTED`.
+Hop dipisah menjadi `hop_in` dan `hop_out`. SOS Hop In sample deskriptif hanya
+berasal dari `BLE_PACKET_RECEIVED` dengan `packet_type = sos`. SOS Hop Out
+sample hanya berasal dari `BLE_RELAY_STARTED` dengan `packet_type = sos`. ACK
+hop tetap terlihat di event/timeline, tetapi tidak masuk statistik hop utama
+untuk forwarding SOS.
+
+## Better-Hop Behavior
+
+ResQMesh tetap memakai epidemic forwarding. Untuk equal sender/timestamp/status
+state, packet dengan resulting stored hop yang lebih kecil diperlakukan sebagai
+better-hop state update atau route-quality correction. Storage ordering final:
+
+```text
+protocol timestamp
+-> status priority
+-> lower resulting hop
+```
+
+Hop quality hanya dipakai saat timestamp dan status sama. Hop yang lebih baik
+tidak boleh mengalahkan protocol state yang lebih baru, terminal status, atau
+ACK tombstone. Saat better-hop update diterima, SQLite dan relay queue diperbarui
+agar relay berikutnya memakai hop yang lebih baik, dan relay scheduling metrics
+direset agar state improvement segera eligible sesuai aturan queue yang ada.
 
 Current Packet di LIVE membangun snapshot dari latest accepted logical
 forwarding lifecycle, bukan dari raw duplicate advertisement terbaru. Anchor-nya

@@ -8,6 +8,7 @@ import 'package:pkmproject/models/sos_message.dart';
 import 'package:pkmproject/services/ble_protocol.dart';
 import 'package:pkmproject/services/database_helper.dart';
 import 'package:pkmproject/utils/protocol_timestamp.dart';
+import 'package:pkmproject/utils/sos_state_ordering.dart';
 import 'package:pkmproject/utils/sos_status_priority.dart';
 import 'package:sqflite/sqflite.dart';
 
@@ -839,16 +840,11 @@ WHERE id = ?
   ) async {
     final rows = await _messageRowsForSenderInExecutor(db, message);
     if (rows.isEmpty) return null;
-    return rows.map(SOSMessage.fromDbMap).reduce((a, b) {
-      return _compareMessageState(a, b) >= 0 ? a : b;
-    });
+    return rows.map(SOSMessage.fromDbMap).reduce(preferredSosState);
   }
 
   int _compareMessageState(SOSMessage a, SOSMessage b) {
-    final aTimestamp = canonicalProtocolTimestamp(a.updatedAt);
-    final bTimestamp = canonicalProtocolTimestamp(b.updatedAt);
-    if (aTimestamp != bTimestamp) return aTimestamp.compareTo(bTimestamp);
-    return sosStatusPriority(a.status).compareTo(sosStatusPriority(b.status));
+    return compareSosState(a, b);
   }
 
   int _recoveredSosEligibleAt(SOSMessage message, int nowMs) {

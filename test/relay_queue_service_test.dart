@@ -7,6 +7,7 @@ import 'package:pkmproject/database_schema.dart';
 import 'package:pkmproject/models/ack_apply_result.dart';
 import 'package:pkmproject/models/forwarding_decision.dart';
 import 'package:pkmproject/models/sos_message.dart';
+import 'package:pkmproject/services/ble_relay_service.dart';
 import 'package:pkmproject/services/ble_protocol.dart';
 import 'package:pkmproject/services/database_helper.dart';
 import 'package:pkmproject/services/forwarding_policy.dart';
@@ -40,6 +41,7 @@ void main() {
     SOSMessageStatus status = SOSMessageStatus.active,
     int? senderCrc,
     int? updatedAt,
+    int hopCount = 0,
   }) {
     final createdAt =
         updatedAt ?? now + Duration(seconds: offsetSeconds).inMilliseconds;
@@ -53,6 +55,7 @@ void main() {
       status: status,
       createdAt: createdAt,
       updatedAt: createdAt,
+      hopCount: hopCount,
       expiresAt: expired
           ? now - const Duration(seconds: 1).inMilliseconds
           : now + MeshConfig.defaultMessageLifetime.inMilliseconds,
@@ -726,6 +729,330 @@ void main() {
     expect(item!.nextEligibleAt, decision.nextEligibleAt);
     expect(await queue.nextEligible(now), isNull);
   });
+
+  test(
+    'better-hop policy and storage update SQLite queue and advertised hop',
+    () async {
+      const senderCrc = 424242;
+      final timestamp = canonicalProtocolTimestamp(now);
+      final existing = message(
+        'ble-$senderCrc-$timestamp',
+        senderCrc: senderCrc,
+        updatedAt: timestamp,
+        hopCount: 3,
+      )..senderId = 'ble-device-$senderCrc';
+      await queue.storeAndQueueSos(
+        message: existing,
+        nextEligibleAt: now + 60000,
+      );
+
+      final packet = BlePacket(
+        kind: BlePacketKind.sos,
+        senderCrc: senderCrc,
+        timestampMs: timestamp,
+        latitude: existing.latitude,
+        longitude: existing.longitude,
+        status: SOSMessageStatus.active,
+        hopCount: 0,
+      );
+      final decision = const ForwardingPolicy().decideSos(
+        packet: packet,
+        nowMs: now,
+        existingMessage: existing,
+      );
+      final incoming = BleRelayService.messageFromSosPacket(packet, now)
+        ..localState = 'queued';
+      incoming.hopCount = decision.nextHopCount!;
+
+      expect(decision.shouldStore, true);
+      expect(decision.nextHopCount, 1);
+      expect(
+        await queue.storeAndQueueSos(message: incoming, nextEligibleAt: now),
+        true,
+      );
+
+      final stored = SOSMessage.fromDbMap(
+        (await db.query('sos_messages')).single,
+      );
+      final queued = await queue.getItem(incoming.id, 'sos');
+      final advertised = BlePacket.unpack(BlePacket.packSos(stored))!;
+
+      expect(stored.id, incoming.id);
+      expect(stored.hopCount, 1);
+      expect(stored.relayCount, 0);
+      expect(stored.lastRelayedAt, 0);
+      expect(queued, isNotNull);
+      expect(queued!.messageId, incoming.id);
+      expect(queued.nextEligibleAt, now);
+      expect(advertised.hopCount, 1);
+    },
+  );
+
+  test('worse hop does not replace better same-version state', () async {
+    final existing =
+        message('same-version', senderCrc: 5151, updatedAt: now, hopCount: 1)
+          ..relayCount = 7
+          ..lastRelayedAt = now - 1000;
+    await queue.storeAndQueueSos(message: existing, nextEligibleAt: now);
+
+    final worse = message(
+      'same-version',
+      senderCrc: 5151,
+      updatedAt: now,
+      hopCount: 3,
+    );
+
+    expect(
+      await queue.storeAndQueueSos(message: worse, nextEligibleAt: now),
+      false,
+    );
+    final stored = SOSMessage.fromDbMap(
+      (await db.query('sos_messages')).single,
+    );
+    expect(stored.hopCount, 1);
+    expect(stored.relayCount, 7);
+    expect(stored.lastRelayedAt, now - 1000);
+  });
+
+  test(
+    'equal hop remains duplicate and does not reset relay metrics',
+    () async {
+      final existing =
+          message('equal-hop', senderCrc: 5252, updatedAt: now, hopCount: 2)
+            ..relayCount = 3
+            ..lastRelayedAt = now - 2000;
+      await queue.storeAndQueueSos(message: existing, nextEligibleAt: now);
+
+      final equal = message(
+        'equal-hop',
+        senderCrc: 5252,
+        updatedAt: now,
+        hopCount: 2,
+      );
+
+      expect(
+        await queue.storeAndQueueSos(message: equal, nextEligibleAt: now),
+        false,
+      );
+      final stored = SOSMessage.fromDbMap(
+        (await db.query('sos_messages')).single,
+      );
+      expect(stored.hopCount, 2);
+      expect(stored.relayCount, 3);
+      expect(stored.lastRelayedAt, now - 2000);
+    },
+  );
+
+  test('newer timestamp wins despite worse hop', () async {
+    final existing = message(
+      'newer-wins',
+      senderCrc: 5353,
+      updatedAt: now,
+      hopCount: 1,
+    );
+    await queue.storeAndQueueSos(message: existing, nextEligibleAt: now);
+
+    final newer = message(
+      'newer-wins',
+      senderCrc: 5353,
+      updatedAt: now + 1000,
+      hopCount: 5,
+    );
+
+    expect(
+      await queue.storeAndQueueSos(message: newer, nextEligibleAt: now),
+      true,
+    );
+    final stored = SOSMessage.fromDbMap(
+      (await db.query('sos_messages')).single,
+    );
+    expect(stored.updatedAt, now + 1000);
+    expect(stored.hopCount, 5);
+  });
+
+  test('terminal higher-priority status wins despite worse hop', () async {
+    final active = message(
+      'terminal-wins',
+      senderCrc: 5454,
+      updatedAt: now,
+      hopCount: 1,
+    );
+    await queue.storeAndQueueSos(message: active, nextEligibleAt: now);
+
+    final resolved = message(
+      'terminal-wins',
+      senderCrc: 5454,
+      updatedAt: now,
+      status: SOSMessageStatus.resolved,
+      hopCount: 5,
+    );
+
+    expect(
+      await queue.storeAndQueueSos(message: resolved, nextEligibleAt: now),
+      true,
+    );
+    final stored = SOSMessage.fromDbMap(
+      (await db.query('sos_messages')).single,
+    );
+    expect(stored.status, SOSMessageStatus.resolved);
+    expect(stored.hopCount, 5);
+  });
+
+  test('stale ACTIVE better hop cannot replace terminal state', () async {
+    final resolved = message(
+      'no-resurrect',
+      senderCrc: 5555,
+      updatedAt: now,
+      status: SOSMessageStatus.resolved,
+      hopCount: 5,
+    );
+    await queue.storeAndQueueSos(message: resolved, nextEligibleAt: now);
+
+    final active = message(
+      'no-resurrect',
+      senderCrc: 5555,
+      updatedAt: now,
+      hopCount: 1,
+    );
+
+    expect(
+      await queue.storeAndQueueSos(message: active, nextEligibleAt: now),
+      false,
+    );
+    final stored = SOSMessage.fromDbMap(
+      (await db.query('sos_messages')).single,
+    );
+    expect(stored.status, SOSMessageStatus.resolved);
+    expect(stored.hopCount, 5);
+  });
+
+  test('ACK tombstone still suppresses better-hop ACTIVE', () async {
+    await DatabaseHelper.upsertAckTombstoneInDb(
+      db,
+      senderCrc: 5656,
+      ackTimestampMs: now,
+      status: SOSMessageStatus.resolved,
+    );
+
+    expect(
+      await DatabaseHelper.isSuppressedByAckTombstoneInDb(
+        db,
+        senderCrc: 5656,
+        sosTimestampMs: now,
+      ),
+      true,
+    );
+  });
+
+  test('hop 63 saturation and better-hop ordering remain coherent', () async {
+    final saturated = message(
+      'saturated',
+      senderCrc: 5757,
+      updatedAt: now,
+      hopCount: MeshConfig.maxProtocolHop,
+    );
+    await queue.storeAndQueueSos(message: saturated, nextEligibleAt: now);
+
+    final better = message(
+      'saturated',
+      senderCrc: 5757,
+      updatedAt: now,
+      hopCount: MeshConfig.maxProtocolHop - 1,
+    );
+    expect(
+      await queue.storeAndQueueSos(message: better, nextEligibleAt: now),
+      true,
+    );
+    var stored = SOSMessage.fromDbMap((await db.query('sos_messages')).single);
+    expect(stored.hopCount, MeshConfig.maxProtocolHop - 1);
+
+    final worse = message(
+      'saturated',
+      senderCrc: 5757,
+      updatedAt: now,
+      hopCount: MeshConfig.maxProtocolHop,
+    );
+    expect(
+      await queue.storeAndQueueSos(message: worse, nextEligibleAt: now),
+      false,
+    );
+    stored = SOSMessage.fromDbMap((await db.query('sos_messages')).single);
+    expect(stored.hopCount, MeshConfig.maxProtocolHop - 1);
+  });
+
+  test(
+    'better-hop state ordering is consistent in basic flooding mode',
+    () async {
+      final basicQueue = RelayQueueService(
+        database: db,
+        random: Random(1),
+        mode: ForwardingMode.basicFlooding,
+      );
+      final existing = message(
+        'basic-better-hop',
+        senderCrc: 5858,
+        updatedAt: now,
+        hopCount: 4,
+      );
+      await basicQueue.storeAndQueueSos(message: existing, nextEligibleAt: now);
+
+      final better = message(
+        'basic-better-hop',
+        senderCrc: 5858,
+        updatedAt: now,
+        hopCount: 2,
+      );
+
+      expect(
+        await basicQueue.storeAndQueueSos(message: better, nextEligibleAt: now),
+        true,
+      );
+      final stored = SOSMessage.fromDbMap(
+        (await db.query('sos_messages')).single,
+      );
+      expect(stored.hopCount, 2);
+    },
+  );
+
+  test(
+    'better-hop state ordering is consistent in controlled epidemic mode',
+    () async {
+      final controlledQueue = RelayQueueService(
+        database: db,
+        random: Random(1),
+        mode: ForwardingMode.controlledEpidemic,
+      );
+      final existing = message(
+        'controlled-better-hop',
+        senderCrc: 5959,
+        updatedAt: now,
+        hopCount: 4,
+      );
+      await controlledQueue.storeAndQueueSos(
+        message: existing,
+        nextEligibleAt: now,
+      );
+
+      final better = message(
+        'controlled-better-hop',
+        senderCrc: 5959,
+        updatedAt: now,
+        hopCount: 2,
+      );
+
+      expect(
+        await controlledQueue.storeAndQueueSos(
+          message: better,
+          nextEligibleAt: now,
+        ),
+        true,
+      );
+      final stored = SOSMessage.fromDbMap(
+        (await db.query('sos_messages')).single,
+      );
+      expect(stored.hopCount, 2);
+    },
+  );
 
   test(
     'ACK transaction atomically tombstones, ACKs SOS, removes SOS queue, and queues ACK',

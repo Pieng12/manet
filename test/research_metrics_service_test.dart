@@ -94,10 +94,10 @@ void main() {
   test('duplicate ratio excludes stale events from duplicate numerator', () {
     final metrics = service.calculate(
       events: [
-        event(ExperimentEventTypes.blePacketStored, 1000),
-        event(ExperimentEventTypes.blePacketAccepted, 1001),
-        event(ExperimentEventTypes.blePacketDuplicate, 1002),
-        event(ExperimentEventTypes.blePacketStale, 1003),
+        event(ExperimentEventTypes.blePacketStored, 1000, packetType: 'sos'),
+        event(ExperimentEventTypes.blePacketAccepted, 1001, packetType: 'sos'),
+        event(ExperimentEventTypes.blePacketDuplicate, 1002, packetType: 'sos'),
+        event(ExperimentEventTypes.blePacketStale, 1003, packetType: 'sos'),
       ],
       trials: const [],
     );
@@ -111,11 +111,11 @@ void main() {
   test('logical duplicate ratio is policy-level and excludes stale', () {
     final metrics = service.calculate(
       events: [
-        event(ExperimentEventTypes.blePacketAccepted, 1000),
-        event(ExperimentEventTypes.blePacketDuplicate, 1001),
-        event(ExperimentEventTypes.blePacketDuplicate, 1002),
-        event(ExperimentEventTypes.blePacketDuplicate, 1003),
-        event(ExperimentEventTypes.blePacketStale, 1004),
+        event(ExperimentEventTypes.blePacketAccepted, 1000, packetType: 'sos'),
+        event(ExperimentEventTypes.blePacketDuplicate, 1001, packetType: 'sos'),
+        event(ExperimentEventTypes.blePacketDuplicate, 1002, packetType: 'sos'),
+        event(ExperimentEventTypes.blePacketDuplicate, 1003, packetType: 'sos'),
+        event(ExperimentEventTypes.blePacketStale, 1004, packetType: 'sos'),
       ],
       trials: const [],
     );
@@ -125,6 +125,73 @@ void main() {
     expect(metrics.staleCount, 1);
     expect(metrics.duplicateRatioPercent, closeTo(75, 0.01));
   });
+
+  test('SOS duplicate metric excludes ACK duplicate events', () {
+    final metrics = service.calculate(
+      events: [
+        event(ExperimentEventTypes.blePacketAccepted, 1000, packetType: 'sos'),
+        for (var i = 0; i < 3; i++)
+          event(
+            ExperimentEventTypes.blePacketDuplicate,
+            1010 + i,
+            packetType: 'sos',
+          ),
+        for (var i = 0; i < 5; i++)
+          event(
+            ExperimentEventTypes.blePacketDuplicate,
+            1020 + i,
+            packetType: 'ack',
+          ),
+        for (var i = 0; i < 5; i++)
+          event(ExperimentEventTypes.ackDuplicate, 1030 + i, packetType: 'ack'),
+      ],
+      trials: const [],
+    );
+
+    expect(metrics.acceptedCount, 1);
+    expect(metrics.duplicateCount, 3);
+    expect(metrics.ackDuplicateCount, 5);
+    expect(metrics.duplicateRatioPercent, closeTo(75, 0.01));
+  });
+
+  test('SOS duplicate ratio is zero when only ACK duplicates exist', () {
+    final metrics = service.calculate(
+      events: [
+        event(ExperimentEventTypes.blePacketAccepted, 1000, packetType: 'sos'),
+        for (var i = 0; i < 10; i++)
+          event(
+            ExperimentEventTypes.blePacketDuplicate,
+            1010 + i,
+            packetType: 'ack',
+          ),
+      ],
+      trials: const [],
+    );
+
+    expect(metrics.acceptedCount, 1);
+    expect(metrics.duplicateCount, 0);
+    expect(metrics.duplicateRatioPercent, 0);
+  });
+
+  test(
+    'SOS duplicate ratio is N/A when no SOS accepted or duplicate exists',
+    () {
+      final metrics = service.calculate(
+        events: [
+          event(
+            ExperimentEventTypes.blePacketDuplicate,
+            1000,
+            packetType: 'ack',
+          ),
+        ],
+        trials: const [],
+      );
+
+      expect(metrics.acceptedCount, 0);
+      expect(metrics.duplicateCount, 0);
+      expect(metrics.duplicateRatioPercent, isNull);
+    },
+  );
 
   test('hop validation accepts expected increments and saturated 63', () {
     expect(service.validateHop(hopIn: 0, hopOut: 1).passed, true);
@@ -468,6 +535,57 @@ void main() {
 
     expect(metrics.hopInStats.count, 1);
     expect(metrics.hopOutStats.count, 1);
+  });
+
+  test('SOS hop descriptive stats exclude ACK hop samples', () {
+    final metrics = service.calculate(
+      events: [
+        event(
+          ExperimentEventTypes.blePacketReceived,
+          1000,
+          packetType: 'sos',
+          hopIn: 1,
+        ),
+        event(
+          ExperimentEventTypes.blePacketReceived,
+          1001,
+          packetType: 'sos',
+          hopIn: 2,
+        ),
+        event(
+          ExperimentEventTypes.blePacketReceived,
+          1002,
+          packetType: 'ack',
+          hopIn: 5,
+        ),
+        event(
+          ExperimentEventTypes.bleRelayStarted,
+          1010,
+          packetType: 'sos',
+          hopOut: 2,
+        ),
+        event(
+          ExperimentEventTypes.bleRelayStarted,
+          1011,
+          packetType: 'sos',
+          hopOut: 3,
+        ),
+        event(
+          ExperimentEventTypes.bleRelayStarted,
+          1012,
+          packetType: 'ack',
+          hopOut: 6,
+        ),
+      ],
+      trials: const [],
+    );
+
+    expect(metrics.hopInStats.count, 2);
+    expect(metrics.hopInStats.min, 1);
+    expect(metrics.hopInStats.max, 2);
+    expect(metrics.hopOutStats.count, 2);
+    expect(metrics.hopOutStats.min, 2);
+    expect(metrics.hopOutStats.max, 3);
   });
 
   test(
