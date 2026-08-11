@@ -458,6 +458,12 @@ class BleAdvertiserService {
     }
   }
 
+  Future<void> stopAdvertisingIfCurrentMessage(String messageId) async {
+    if (_currentAdvertisedMessageId == messageId) {
+      await stopAdvertising();
+    }
+  }
+
   Future<void> stopAdvertising() async {
     _ackRestoreTimer?.cancel();
     _cancelQueueWakeTimer();

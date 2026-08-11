@@ -263,7 +263,7 @@ class _ResearchMonitorScreenState extends State<ResearchMonitorScreen>
             'CURRENT SESSION',
           ),
           _metric(
-            'RX -> Relay Start',
+            'Initial RX -> Relay',
             _statMs(packetMetrics.localRelayLatencyMs),
             '$packetScope / LOCAL DEVICE',
           ),
@@ -285,9 +285,9 @@ class _ResearchMonitorScreenState extends State<ResearchMonitorScreen>
             'REQUIRES PEER LOG',
           ),
           _metric(
-            'TX Overhead',
+            'Local TX / Successful Trial',
             sessionMetrics.transmissionOverhead?.toStringAsFixed(2) ?? 'N/A',
-            'CURRENT SESSION',
+            'CURRENT SESSION / LOCAL DEVICE',
           ),
         ]),
         _section('Packet Counts', [

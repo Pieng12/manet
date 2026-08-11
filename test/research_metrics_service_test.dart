@@ -238,42 +238,50 @@ void main() {
     expect(metrics.rssiStats.mean, -80);
   });
 
-  test('current packet snapshot correlates RX and TX by payload hash', () {
-    final metrics = service.calculate(
-      events: [
-        event(
-          ExperimentEventTypes.blePacketReceived,
-          1000,
-          payloadHash: 'payload-a',
-          hopIn: 2,
-          rssi: -71,
-          protocolTimestampMs: 900000,
-          packetType: 'sos',
-          status: 'active',
-          detail: {'from_server': false},
-        ),
-        event(
-          ExperimentEventTypes.bleRelayStarted,
-          1100,
-          payloadHash: 'payload-a',
-          hopOut: 3,
-        ),
-        event(
-          ExperimentEventTypes.bleRelayStarted,
-          1200,
-          payloadHash: 'payload-b',
-          hopOut: 9,
-        ),
-      ],
-      trials: const [],
-    );
+  test(
+    'current packet snapshot correlates accepted RX and TX by logical key',
+    () {
+      final metrics = service.calculate(
+        events: [
+          event(
+            ExperimentEventTypes.blePacketAccepted,
+            1000,
+            payloadHash: 'payload-hop-2',
+            senderCrc: 111,
+            hopIn: 2,
+            rssi: -71,
+            protocolTimestampMs: 900000,
+            packetType: 'sos',
+            status: 'active',
+            detail: {'from_server': false},
+          ),
+          event(
+            ExperimentEventTypes.bleRelayStarted,
+            1100,
+            payloadHash: 'payload-hop-3',
+            senderCrc: 111,
+            protocolTimestampMs: 900000,
+            packetType: 'sos',
+            status: 'active',
+            hopOut: 3,
+          ),
+          event(
+            ExperimentEventTypes.bleRelayStarted,
+            1200,
+            payloadHash: 'payload-b',
+            hopOut: 9,
+          ),
+        ],
+        trials: const [],
+      );
 
-    expect(metrics.currentPacket?.payloadHash, 'payload-a');
-    expect(metrics.currentPacket?.hopIn, 2);
-    expect(metrics.currentPacket?.hopOut, 3);
-    expect(metrics.currentPacket?.protocolTimestampMs, 900000);
-    expect(metrics.currentPacket?.rssi, -71);
-  });
+      expect(metrics.currentPacket?.payloadHash, 'payload-hop-2');
+      expect(metrics.currentPacket?.hopIn, 2);
+      expect(metrics.currentPacket?.hopOut, 3);
+      expect(metrics.currentPacket?.protocolTimestampMs, 900000);
+      expect(metrics.currentPacket?.rssi, -71);
+    },
+  );
 
   test('local latency uses elapsedRealtime when present', () {
     final samples = service.localLatencySamples(
@@ -462,42 +470,45 @@ void main() {
     expect(metrics.hopOutStats.count, 1);
   });
 
-  test('hop validation correlates RX and relay start by logical state', () {
-    HopValidation? validationFor(int hopIn, int hopOut) {
-      return service.latestHopValidationFromEvents([
-        event(
-          ExperimentEventTypes.blePacketReceived,
-          1000,
-          payloadHash: 'rx-$hopIn',
-          senderCrc: 99,
-          protocolTimestampMs: 100000,
-          packetType: 'sos',
-          status: 'active',
-          hopIn: hopIn,
-        ),
-        event(
-          ExperimentEventTypes.bleRelayStarted,
-          1100,
-          payloadHash: 'tx-$hopOut',
-          senderCrc: 99,
-          protocolTimestampMs: 100000,
-          packetType: 'sos',
-          status: 'active',
-          hopOut: hopOut,
-        ),
-      ]);
-    }
+  test(
+    'hop validation correlates accepted RX and relay start by logical state',
+    () {
+      HopValidation? validationFor(int hopIn, int hopOut) {
+        return service.latestHopValidationFromEvents([
+          event(
+            ExperimentEventTypes.blePacketAccepted,
+            1000,
+            payloadHash: 'rx-$hopIn',
+            senderCrc: 99,
+            protocolTimestampMs: 100000,
+            packetType: 'sos',
+            status: 'active',
+            hopIn: hopIn,
+          ),
+          event(
+            ExperimentEventTypes.bleRelayStarted,
+            1100,
+            payloadHash: 'tx-$hopOut',
+            senderCrc: 99,
+            protocolTimestampMs: 100000,
+            packetType: 'sos',
+            status: 'active',
+            hopOut: hopOut,
+          ),
+        ]);
+      }
 
-    expect(validationFor(1, 2)?.passed, true);
-    expect(validationFor(63, 63)?.passed, true);
-    expect(validationFor(1, 3)?.passed, false);
-  });
+      expect(validationFor(1, 2)?.passed, true);
+      expect(validationFor(63, 63)?.passed, true);
+      expect(validationFor(1, 3)?.passed, false);
+    },
+  );
 
   test('current packet does not show TX before actual relay start', () {
     final metrics = service.calculate(
       events: [
         event(
-          ExperimentEventTypes.blePacketReceived,
+          ExperimentEventTypes.blePacketAccepted,
           1000,
           payloadHash: 'rx-hop-1',
           senderCrc: 77,
@@ -530,6 +541,7 @@ void main() {
       trials: const [],
     );
 
+    expect(metrics.currentPacket?.receivedAtMs, 1000);
     expect(metrics.currentPacket?.hopOut, isNull);
     expect(metrics.currentPacket?.advertisedAtMs, isNull);
     expect(metrics.currentPacket?.storedAtMs, 1010);
@@ -542,7 +554,7 @@ void main() {
       final metrics = service.calculate(
         events: [
           event(
-            ExperimentEventTypes.blePacketReceived,
+            ExperimentEventTypes.blePacketAccepted,
             1000,
             payloadHash: 'rx-hop-1',
             senderCrc: 77,
@@ -561,6 +573,16 @@ void main() {
             status: 'active',
             hopOut: 2,
           ),
+          event(
+            ExperimentEventTypes.bleRelayStarted,
+            2286,
+            payloadHash: 'tx-hop-2-repeat',
+            senderCrc: 77,
+            protocolTimestampMs: 100000,
+            packetType: 'sos',
+            status: 'active',
+            hopOut: 2,
+          ),
         ],
         trials: const [],
       );
@@ -569,6 +591,268 @@ void main() {
       expect(metrics.currentPacket?.advertisedAtMs, 1286);
     },
   );
+
+  test(
+    'initial relay latency uses accepted RX and repeated relay slots once',
+    () {
+      final samples = service.initialRelayLatencySamples([
+        event(
+          ExperimentEventTypes.blePacketAccepted,
+          1000,
+          senderCrc: 5,
+          protocolTimestampMs: 9000,
+          packetType: 'sos',
+          status: 'active',
+          hopIn: 0,
+        ),
+        event(
+          ExperimentEventTypes.bleRelayStarted,
+          1300,
+          senderCrc: 5,
+          protocolTimestampMs: 9000,
+          packetType: 'sos',
+          status: 'active',
+          hopOut: 1,
+        ),
+        event(
+          ExperimentEventTypes.bleRelayStarted,
+          11300,
+          senderCrc: 5,
+          protocolTimestampMs: 9000,
+          packetType: 'sos',
+          status: 'active',
+          hopOut: 1,
+        ),
+        event(
+          ExperimentEventTypes.bleRelayStarted,
+          21300,
+          senderCrc: 5,
+          protocolTimestampMs: 9000,
+          packetType: 'sos',
+          status: 'active',
+          hopOut: 1,
+        ),
+      ]);
+
+      expect(samples, [300]);
+    },
+  );
+
+  test('duplicate RX does not replace accepted RX for latency', () {
+    final metrics = service.calculate(
+      events: [
+        event(
+          ExperimentEventTypes.blePacketReceived,
+          1000,
+          senderCrc: 5,
+          protocolTimestampMs: 9000,
+          packetType: 'sos',
+          status: 'active',
+          hopIn: 0,
+        ),
+        event(
+          ExperimentEventTypes.blePacketAccepted,
+          1000,
+          senderCrc: 5,
+          protocolTimestampMs: 9000,
+          packetType: 'sos',
+          status: 'active',
+          hopIn: 0,
+        ),
+        event(
+          ExperimentEventTypes.blePacketReceived,
+          1150,
+          senderCrc: 5,
+          protocolTimestampMs: 9000,
+          packetType: 'sos',
+          status: 'active',
+          hopIn: 1,
+        ),
+        event(
+          ExperimentEventTypes.blePacketDuplicate,
+          1150,
+          senderCrc: 5,
+          protocolTimestampMs: 9000,
+          packetType: 'sos',
+          status: 'active',
+          hopIn: 1,
+        ),
+        event(
+          ExperimentEventTypes.bleRelayStarted,
+          1300,
+          senderCrc: 5,
+          protocolTimestampMs: 9000,
+          packetType: 'sos',
+          status: 'active',
+          hopOut: 1,
+        ),
+      ],
+      trials: const [],
+    );
+
+    expect(metrics.localRelayLatencyMs.count, 1);
+    expect(metrics.localRelayLatencyMs.median, 300);
+  });
+
+  test('duplicate RX does not replace accepted hop for hop correctness', () {
+    final validation = service.latestHopValidationFromEvents([
+      event(
+        ExperimentEventTypes.blePacketAccepted,
+        1000,
+        senderCrc: 5,
+        protocolTimestampMs: 9000,
+        packetType: 'sos',
+        status: 'active',
+        hopIn: 0,
+      ),
+      event(
+        ExperimentEventTypes.blePacketReceived,
+        1150,
+        senderCrc: 5,
+        protocolTimestampMs: 9000,
+        packetType: 'sos',
+        status: 'active',
+        hopIn: 1,
+      ),
+      event(
+        ExperimentEventTypes.blePacketDuplicate,
+        1150,
+        senderCrc: 5,
+        protocolTimestampMs: 9000,
+        packetType: 'sos',
+        status: 'active',
+        hopIn: 1,
+      ),
+      event(
+        ExperimentEventTypes.bleRelayStarted,
+        1300,
+        senderCrc: 5,
+        protocolTimestampMs: 9000,
+        packetType: 'sos',
+        status: 'active',
+        hopOut: 1,
+      ),
+      event(
+        ExperimentEventTypes.bleRelayStarted,
+        2300,
+        senderCrc: 5,
+        protocolTimestampMs: 9000,
+        packetType: 'sos',
+        status: 'active',
+        hopOut: 1,
+      ),
+    ]);
+
+    expect(validation?.hopIn, 0);
+    expect(validation?.hopOut, 1);
+    expect(validation?.passed, true);
+  });
+
+  test('current packet ignores later duplicate raw RX', () {
+    final metrics = service.calculate(
+      events: [
+        event(
+          ExperimentEventTypes.blePacketAccepted,
+          1000,
+          senderCrc: 7,
+          protocolTimestampMs: 9000,
+          packetType: 'sos',
+          status: 'active',
+          hopIn: 0,
+        ),
+        event(
+          ExperimentEventTypes.blePacketStored,
+          1050,
+          senderCrc: 7,
+          protocolTimestampMs: 9000,
+          packetType: 'sos',
+          status: 'active',
+        ),
+        event(
+          ExperimentEventTypes.bleRelayQueued,
+          1100,
+          senderCrc: 7,
+          protocolTimestampMs: 9000,
+          packetType: 'sos',
+          status: 'active',
+        ),
+        event(
+          ExperimentEventTypes.bleRelayStarted,
+          1300,
+          senderCrc: 7,
+          protocolTimestampMs: 9000,
+          packetType: 'sos',
+          status: 'active',
+          hopOut: 1,
+        ),
+        event(
+          ExperimentEventTypes.blePacketReceived,
+          10000,
+          senderCrc: 7,
+          protocolTimestampMs: 9000,
+          packetType: 'sos',
+          status: 'active',
+          hopIn: 1,
+        ),
+        event(
+          ExperimentEventTypes.blePacketDuplicate,
+          10000,
+          senderCrc: 7,
+          protocolTimestampMs: 9000,
+          packetType: 'sos',
+          status: 'active',
+          hopIn: 1,
+        ),
+      ],
+      trials: const [],
+    );
+
+    expect(metrics.currentPacket?.receivedAtMs, 1000);
+    expect(metrics.currentPacket?.storedAtMs, 1050);
+    expect(metrics.currentPacket?.relayQueuedAtMs, 1100);
+    expect(metrics.currentPacket?.advertisedAtMs, 1300);
+    expect(metrics.currentPacket?.hopIn, 0);
+    expect(metrics.currentPacket?.hopOut, 1);
+  });
+
+  test('current packet does not attach old TX to newer accepted lifecycle', () {
+    final metrics = service.calculate(
+      events: [
+        event(
+          ExperimentEventTypes.blePacketAccepted,
+          1000,
+          senderCrc: 9,
+          protocolTimestampMs: 9000,
+          packetType: 'sos',
+          status: 'active',
+          hopIn: 0,
+        ),
+        event(
+          ExperimentEventTypes.bleRelayStarted,
+          1300,
+          senderCrc: 9,
+          protocolTimestampMs: 9000,
+          packetType: 'sos',
+          status: 'active',
+          hopOut: 1,
+        ),
+        event(
+          ExperimentEventTypes.blePacketAccepted,
+          5000,
+          senderCrc: 9,
+          protocolTimestampMs: 9000,
+          packetType: 'sos',
+          status: 'active',
+          hopIn: 0,
+        ),
+      ],
+      trials: const [],
+    );
+
+    expect(metrics.currentPacket?.receivedAtMs, 5000);
+    expect(metrics.currentPacket?.advertisedAtMs, isNull);
+    expect(metrics.currentPacket?.hopOut, isNull);
+  });
 
   test('advertise requested is not counted as successful TX', () {
     final metrics = service.calculate(

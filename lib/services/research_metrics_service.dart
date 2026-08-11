@@ -100,11 +100,7 @@ class ResearchMetricsService {
         )
         .map((event) => event.hopOut!)
         .toList();
-    final localRelayLatencies = localLatencySamples(
-      events,
-      startType: ExperimentEventTypes.blePacketReceived,
-      endType: ExperimentEventTypes.bleRelayStarted,
-    );
+    final localRelayLatencies = initialRelayLatencySamples(events);
     final e2eLatencies = endToEndLatencySamples(events);
     final ackTerminationLatencies = localLatencySamples(
       events,
@@ -175,6 +171,27 @@ class ResearchMetricsService {
     return samples;
   }
 
+  List<int> initialRelayLatencySamples(List<ExperimentEvent> events) {
+    final acceptedByKey = <String, ExperimentEvent>{};
+    final completedKeys = <String>{};
+    final samples = <int>[];
+    for (final event in events) {
+      final key = logicalPacketKey(event);
+      if (key == null) continue;
+      if (event.eventType == ExperimentEventTypes.blePacketAccepted) {
+        acceptedByKey.putIfAbsent(key, () => event);
+      } else if (event.eventType == ExperimentEventTypes.bleRelayStarted &&
+          !completedKeys.contains(key)) {
+        final accepted = acceptedByKey[key];
+        if (accepted == null) continue;
+        final interval = localIntervalMs(accepted, event);
+        if (interval != null) samples.add(interval);
+        completedKeys.add(key);
+      }
+    }
+    return samples;
+  }
+
   List<int> endToEndLatencySamples(List<ExperimentEvent> events) {
     final sourceStarts = <String, int>{};
     final samples = <int>[];
@@ -204,19 +221,22 @@ class ResearchMetricsService {
   }
 
   HopValidation? latestHopValidationFromEvents(List<ExperimentEvent> events) {
-    final startsByKey = <String, ExperimentEvent>{};
+    final acceptedByKey = <String, ExperimentEvent>{};
+    final completedKeys = <String>{};
     HopValidation? latest;
     for (final event in events) {
       final key = logicalPacketKey(event);
       if (key == null) continue;
-      if (event.eventType == ExperimentEventTypes.blePacketReceived &&
+      if (event.eventType == ExperimentEventTypes.blePacketAccepted &&
           event.hopIn != null) {
-        startsByKey[key] = event;
+        acceptedByKey.putIfAbsent(key, () => event);
       } else if (event.eventType == ExperimentEventTypes.bleRelayStarted &&
-          event.hopOut != null) {
-        final start = startsByKey[key];
-        if (start?.hopIn != null) {
-          latest = validateHop(hopIn: start!.hopIn!, hopOut: event.hopOut!);
+          event.hopOut != null &&
+          !completedKeys.contains(key)) {
+        final accepted = acceptedByKey[key];
+        if (accepted?.hopIn != null) {
+          latest = validateHop(hopIn: accepted!.hopIn!, hopOut: event.hopOut!);
+          completedKeys.add(key);
         }
       }
     }
@@ -224,43 +244,46 @@ class ResearchMetricsService {
   }
 
   CurrentPacketSnapshot? currentPacketSnapshot(List<ExperimentEvent> events) {
-    ExperimentEvent? latestRx;
+    ExperimentEvent? latestAccepted;
     for (final event in events.reversed) {
-      if (event.eventType == ExperimentEventTypes.blePacketReceived) {
-        latestRx = event;
+      if (event.eventType == ExperimentEventTypes.blePacketAccepted) {
+        latestAccepted = event;
         break;
       }
     }
-    if (latestRx == null) return null;
-    final key = logicalPacketKey(latestRx);
+    if (latestAccepted == null) return null;
+    final acceptedAt = _wallTime(latestAccepted);
+    final key = logicalPacketKey(latestAccepted);
     ExperimentEvent? stored;
     ExperimentEvent? queued;
     ExperimentEvent? relayStarted;
     if (key != null) {
       for (final event in events) {
         if (logicalPacketKey(event) != key) continue;
+        if (_wallTime(event) < acceptedAt) continue;
         if (event.eventType == ExperimentEventTypes.blePacketStored) {
-          stored = event;
+          stored ??= event;
         } else if (event.eventType == ExperimentEventTypes.bleRelayQueued) {
-          queued = event;
+          queued ??= event;
         } else if (event.eventType == ExperimentEventTypes.bleRelayStarted) {
-          relayStarted = event;
+          relayStarted ??= event;
         }
       }
     }
-    final detail = _detail(latestRx);
+    final detail = _detail(latestAccepted);
     return CurrentPacketSnapshot(
-      senderCrc: latestRx.senderCrc,
-      protocolTimestampMs: latestRx.protocolTimestampMs,
-      status: latestRx.status ?? detail['status']?.toString(),
-      packetType: latestRx.packetType ?? detail['kind']?.toString(),
-      hopIn: latestRx.hopIn,
-      rssi: latestRx.rssi,
+      senderCrc: latestAccepted.senderCrc,
+      protocolTimestampMs: latestAccepted.protocolTimestampMs,
+      status: latestAccepted.status ?? detail['status']?.toString(),
+      packetType: latestAccepted.packetType ?? detail['kind']?.toString(),
+      hopIn: latestAccepted.hopIn,
+      rssi: latestAccepted.rssi,
       fromServer: detail['from_server'] is bool
           ? detail['from_server'] as bool
           : null,
-      payloadHash: latestRx.payloadHash,
-      receivedAtMs: latestRx.eventTimestampMs ?? latestRx.timestampMs,
+      payloadHash: latestAccepted.payloadHash,
+      receivedAtMs:
+          latestAccepted.eventTimestampMs ?? latestAccepted.timestampMs,
       storedAtMs: stored?.eventTimestampMs ?? stored?.timestampMs,
       relayQueuedAtMs: queued?.eventTimestampMs ?? queued?.timestampMs,
       hopOut: relayStarted?.hopOut,

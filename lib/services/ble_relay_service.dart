@@ -371,11 +371,11 @@ class BleRelayService {
       return processingResultForAckApplyResult(result);
     }
 
+    await _logSosRelayTerminatedByAck(packet);
     await _advertiser.advertiseLatestOrStop(preemptCurrent: true);
     final nextAckHop = packet.hopCount >= MeshConfig.maxProtocolHop
         ? MeshConfig.maxProtocolHop
         : packet.hopCount + 1;
-    await _logSosRelayTerminatedByAck(packet);
     await _experimentLogger.logEvent(
       eventType: ExperimentEventTypes.bleRelayQueued,
       deviceId: SyncService().deviceId,
@@ -579,6 +579,8 @@ class BleRelayService {
       hopOut: message.hopCount,
       rssi: rssi,
       payloadHash: packet.identity,
+      eventTimestampMs: rxAtMs,
+      elapsedRealtimeMs: receivedElapsedRealtimeMs,
       protocolTimestampMs: packet.timestampMs,
       packetType: 'sos',
       status: message.status.name,
@@ -752,12 +754,40 @@ class BleRelayService {
       whereArgs: [packet.senderCrc, ackTimestamp, 'acked'],
     );
     if (rows.isEmpty) return;
-    final eventAt = DateTime.now().millisecondsSinceEpoch;
     for (final row in rows) {
+      final messageId = row['id']?.toString();
+      if (messageId == null) continue;
+      final existing = await db.rawQuery(
+        '''
+        SELECT COUNT(*) AS count
+        FROM experiment_events
+        WHERE event_type = ?
+          AND message_id = ?
+          AND sender_crc = ?
+          AND protocol_timestamp_ms = ?
+          AND packet_type = ?
+          AND status = ?
+        ''',
+        [
+          ExperimentEventTypes.sosRelayTerminatedByAck,
+          messageId,
+          packet.senderCrc,
+          ackTimestamp,
+          'ack',
+          packet.status.name,
+        ],
+      );
+      final existingCount = existing.first['count'] as int? ?? 0;
+      if (existingCount > 0) continue;
+
+      await _advertiser.stopAdvertisingIfCurrentMessage(messageId);
+      if (_advertiser.currentAdvertisedMessageId == messageId) continue;
+
+      final eventAt = DateTime.now().millisecondsSinceEpoch;
       await _experimentLogger.logEvent(
         eventType: ExperimentEventTypes.sosRelayTerminatedByAck,
         deviceId: SyncService().deviceId,
-        messageId: row['id']?.toString(),
+        messageId: messageId,
         senderCrc: packet.senderCrc,
         hopIn: packet.hopCount,
         rssi: null,

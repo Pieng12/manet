@@ -69,9 +69,9 @@ berbeda untuk setiap Android device.
 ## Metric Scope
 
 Metric pada layar ini bersifat `CURRENT TRIAL / LOCAL DEVICE` atau
-`CURRENT SESSION` kecuali ada log peer yang sudah digabungkan secara eksplisit.
-DSR dan transmission-overhead session tetap session-scoped walaupun ada trial
-aktif. Nilai network-wide tidak boleh dibuat dari asumsi.
+`CURRENT SESSION / LOCAL DEVICE` kecuali ada log peer yang sudah digabungkan
+secara eksplisit. DSR tetap session-scoped walaupun ada trial aktif. Nilai
+network-wide tidak boleh dibuat dari asumsi.
 
 ## Formulas
 
@@ -103,28 +103,32 @@ packet duplicate yang mencapai ResQMesh forwarding policy. Exact repeated
 advertisements yang sudah disaring oleh native receiver/inbox dedup tidak
 termasuk.
 
-Local Relay Processing Latency:
+Initial Local Relay Latency:
 
 ```text
-BLE_RELAY_STARTED timestamp
+first matching BLE_RELAY_STARTED timestamp
 -
-BLE_PACKET_RECEIVED timestamp
+BLE_PACKET_ACCEPTED receive timestamp
 ```
 
-Ini hanya aman untuk event pada device yang sama dan dikorelasikan dengan
-logical packet key (`packet_type`, `sender_crc`, `protocol_timestamp_ms`, dan
-`status`) sehingga tetap cocok saat byte hop berubah dan exact payload hash
-berbeda.
+Ini hanya aman untuk event pada device yang sama. Anchor-nya adalah accepted
+radio receive yang benar-benar mengubah forwarding state, bukan setiap raw
+`BLE_PACKET_RECEIVED`. Hanya relay pertama untuk logical packet key
+(`packet_type`, `sender_crc`, `protocol_timestamp_ms`, dan `status`) yang
+dihitung. Duplicate RX dan slot retransmission berikutnya tidak menambah sample
+latency awal.
 
 Hop Correctness:
 
 ```text
-hop_out = min(hop_in + 1, 63)
+accepted hop_in -> first matching relay hop_out
+expected hop_out = min(hop_in + 1, 63)
 ```
 
-`63 -> 63` adalah PASS.
+`63 -> 63` adalah PASS. Hop correctness tidak memakai duplicate raw RX karena
+validasi ini mengukur state yang benar-benar diteruskan.
 
-Transmission Overhead:
+Local TX / Successful Trial:
 
 ```text
 successful transmission starts
@@ -133,6 +137,9 @@ successful valid trials
 ```
 
 Jika tidak ada successful valid trial, nilai ditampilkan sebagai `N/A`.
+Ini adalah local-device transmission metric. Ini bukan total network-wide
+transmission overhead. Network-wide overhead requires merged peer logs from all
+participating nodes.
 
 ## E2E Latency
 
@@ -154,10 +161,16 @@ RSSI ditampilkan sebagai statistik observasional: count, min, mean, median, dan
 max. RSSI hanya diambil dari `BLE_PACKET_RECEIVED` dan tidak dikonversi langsung
 menjadi meter.
 
-Hop dipisah menjadi `hop_in` dan `hop_out`. Current Packet di LIVE membangun
-snapshot dari RX terbaru dan lifecycle event dengan logical packet key yang
-sama. Hop In sample hanya berasal dari `BLE_PACKET_RECEIVED`. Hop Out sample
-hanya berasal dari `BLE_RELAY_STARTED`.
+Hop dipisah menjadi `hop_in` dan `hop_out`. Hop In sample deskriptif hanya
+berasal dari `BLE_PACKET_RECEIVED`. Hop Out sample hanya berasal dari
+`BLE_RELAY_STARTED`.
+
+Current Packet di LIVE membangun snapshot dari latest accepted logical
+forwarding lifecycle, bukan dari raw duplicate advertisement terbaru. Anchor-nya
+adalah `BLE_PACKET_ACCEPTED`, lalu `BLE_PACKET_STORED`, `BLE_RELAY_QUEUED`, dan
+first matching `BLE_RELAY_STARTED` hanya ditempel jika timestamp-nya sama atau
+lebih baru dari accepted RX. Jika belum ada relay setelah accepted RX, `Hop Out`
+dan `Advertised At` ditampilkan kosong.
 
 ## ACK Metrics
 
@@ -173,8 +186,9 @@ ACK packet dan SOS terminal state tetap diperlakukan sesuai semantik P8.
 Relay lokal yang berhenti karena ACK dicatat dengan event produksi
 `SOS_RELAY_TERMINATED_BY_ACK`, lalu dipasangkan deterministik dengan
 `ACK_RECEIVED` lewat logical ACK key (`sender_crc`, `protocol_timestamp_ms`,
-dan `status`). Event termination dicatat saat state/queue relay lokal sudah
-terkonfirmasi terminasi, bukan saat ACK baru diterima.
+dan `status`). Event termination dicatat saat matching local SOS forwarding
+sudah terkonfirmasi berhenti/tersuppressed, sebelum menunggu startup ACK
+advertising. Duplicate ACK tidak boleh membuat sample termination kedua.
 
 ## Device Metadata
 
