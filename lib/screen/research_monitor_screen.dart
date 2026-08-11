@@ -36,7 +36,8 @@ class _ResearchMonitorScreenState extends State<ResearchMonitorScreen>
 
   ExperimentSession? _session;
   ExperimentTrial? _trial;
-  ExperimentMetrics? _metrics;
+  ExperimentMetrics? _sessionMetrics;
+  ExperimentMetrics? _trialMetrics;
   List<ExperimentEvent> _events = const [];
   Map<String, dynamic> _capabilities = const {};
   int _queueSize = 0;
@@ -96,11 +97,14 @@ class _ResearchMonitorScreenState extends State<ResearchMonitorScreen>
       trialId: trial?.trialId,
       limit: 200,
     );
-    final metrics = session == null
+    final sessionMetrics = session == null
+        ? null
+        : await _metricsService.loadMetrics(sessionId: session.sessionId);
+    final trialMetrics = session == null || trial == null
         ? null
         : await _metricsService.loadMetrics(
             sessionId: session.sessionId,
-            trialId: trial?.trialId,
+            trialId: trial.trialId,
           );
     final capabilities = await NativeBridgeService.getBleCapabilities();
     final queueSize = await _relayQueue.queueSize();
@@ -113,7 +117,8 @@ class _ResearchMonitorScreenState extends State<ResearchMonitorScreen>
       _session = session;
       _trial = trial;
       _events = events;
-      _metrics = metrics;
+      _sessionMetrics = sessionMetrics;
+      _trialMetrics = trialMetrics;
       _capabilities = capabilities;
       _queueSize = queueSize;
       _sosQueueSize = sosQueueSize;
@@ -166,7 +171,8 @@ class _ResearchMonitorScreenState extends State<ResearchMonitorScreen>
   }
 
   Widget _buildLiveTab() {
-    final currentPacket = _metrics?.currentPacket;
+    final currentPacket =
+        _trialMetrics?.currentPacket ?? _sessionMetrics?.currentPacket;
     return _scroll(
       children: [
         _section('Experiment Session', [
@@ -209,6 +215,24 @@ class _ResearchMonitorScreenState extends State<ResearchMonitorScreen>
                   ? '-'
                   : _time(currentPacket.receivedAtMs!),
             ),
+            _kv(
+              'Stored At',
+              currentPacket.storedAtMs == null
+                  ? '-'
+                  : _time(currentPacket.storedAtMs!),
+            ),
+            _kv(
+              'Relay Queued At',
+              currentPacket.relayQueuedAtMs == null
+                  ? '-'
+                  : _time(currentPacket.relayQueuedAtMs!),
+            ),
+            _kv(
+              'Advertised At',
+              currentPacket.advertisedAtMs == null
+                  ? '-'
+                  : _time(currentPacket.advertisedAtMs!),
+            ),
           ],
         ]),
         _systemSummary(),
@@ -217,90 +241,106 @@ class _ResearchMonitorScreenState extends State<ResearchMonitorScreen>
   }
 
   Widget _buildMetricsTab() {
-    final metrics = _metrics;
-    if (metrics == null) {
+    final sessionMetrics = _sessionMetrics;
+    if (sessionMetrics == null) {
       return _scroll(
         children: [
           _emptyPanel('Start a research session to calculate metrics.'),
         ],
       );
     }
+    final trialMetrics = _trialMetrics;
+    final packetMetrics = trialMetrics ?? sessionMetrics;
+    final packetScope = trialMetrics == null
+        ? 'CURRENT SESSION'
+        : 'CURRENT TRIAL';
     return _scroll(
       children: [
         _metricGrid([
-          _metric('DSR', _percent(metrics.dsrPercent), 'CURRENT SESSION'),
           _metric(
-            'RX -> Relay Start',
-            _statMs(metrics.localRelayLatencyMs),
-            'LOCAL DEVICE',
+            'DSR',
+            _percent(sessionMetrics.dsrPercent),
+            'CURRENT SESSION',
           ),
           _metric(
-            'Duplicate Ratio',
-            _percent(metrics.duplicateRatioPercent),
-            'LOCAL DEVICE',
+            'RX -> Relay Start',
+            _statMs(packetMetrics.localRelayLatencyMs),
+            '$packetScope / LOCAL DEVICE',
+          ),
+          _metric(
+            'Logical Duplicate Ratio',
+            _percent(packetMetrics.duplicateRatioPercent),
+            '$packetScope / LOCAL DEVICE',
           ),
           _metric(
             'TX Success',
-            metrics.txSuccessCount.toString(),
-            'LOCAL DEVICE',
+            packetMetrics.txSuccessCount.toString(),
+            '$packetScope / LOCAL DEVICE',
           ),
           _metric(
             'E2E Latency',
-            metrics.e2eRequiresPeerLog
+            packetMetrics.e2eRequiresPeerLog
                 ? 'Requires peer log'
-                : _statMs(metrics.e2eLatencyMs),
+                : _statMs(packetMetrics.e2eLatencyMs),
             'REQUIRES PEER LOG',
           ),
           _metric(
             'TX Overhead',
-            metrics.transmissionOverhead?.toStringAsFixed(2) ?? 'N/A',
-            'SESSION',
+            sessionMetrics.transmissionOverhead?.toStringAsFixed(2) ?? 'N/A',
+            'CURRENT SESSION',
           ),
         ]),
         _section('Packet Counts', [
-          _kv('Unique Accepted', metrics.acceptedCount.toString()),
-          _kv('Duplicate Received', metrics.duplicateCount.toString()),
-          _kv('Stale Received', metrics.staleCount.toString()),
-          _kv('Invalid Received', metrics.invalidCount.toString()),
-          _kv('ACK Suppressed', metrics.ackSuppressedCount.toString()),
+          _kv('Scope', packetScope),
+          _kv('Unique Accepted', packetMetrics.acceptedCount.toString()),
+          _kv('Logical Duplicate', packetMetrics.duplicateCount.toString()),
+          _kv('Stale Received', packetMetrics.staleCount.toString()),
+          _kv('Invalid Received', packetMetrics.invalidCount.toString()),
+          _kv('ACK Suppressed', packetMetrics.ackSuppressedCount.toString()),
         ]),
-        _section('RSSI', _statsRows(metrics.rssiStats, suffix: ' dBm')),
+        _section('RSSI', _statsRows(packetMetrics.rssiStats, suffix: ' dBm')),
         _section('Hop Metrics', [
-          _kv('Max Hop In', metrics.hopInStats.max?.toString() ?? 'N/A'),
+          _kv('Scope', packetScope),
+          _kv('Max Hop In', packetMetrics.hopInStats.max?.toString() ?? 'N/A'),
           _kv(
             'Mean Hop In',
-            metrics.hopInStats.mean?.toStringAsFixed(2) ?? 'N/A',
+            packetMetrics.hopInStats.mean?.toStringAsFixed(2) ?? 'N/A',
           ),
-          _kv('Max Hop Out', metrics.hopOutStats.max?.toString() ?? 'N/A'),
+          _kv(
+            'Max Hop Out',
+            packetMetrics.hopOutStats.max?.toString() ?? 'N/A',
+          ),
           _kv(
             'Mean Hop Out',
-            metrics.hopOutStats.mean?.toStringAsFixed(2) ?? 'N/A',
+            packetMetrics.hopOutStats.mean?.toStringAsFixed(2) ?? 'N/A',
           ),
-          if (metrics.latestHopValidation == null)
+          if (packetMetrics.latestHopValidation == null)
             _kv('Hop Validation', 'N/A')
           else
             _kv(
               'Hop Validation',
-              metrics.latestHopValidation!.passed
+              packetMetrics.latestHopValidation!.passed
                   ? 'PASS'
-                  : 'FAIL expected ${metrics.latestHopValidation!.expectedHopOut} actual ${metrics.latestHopValidation!.hopOut}',
+                  : 'FAIL expected ${packetMetrics.latestHopValidation!.expectedHopOut} actual ${packetMetrics.latestHopValidation!.hopOut}',
             ),
         ]),
         _section('ACK Metrics', [
-          _kv('ACK Received', metrics.ackReceivedCount.toString()),
-          _kv('ACK Accepted', metrics.ackAcceptedCount.toString()),
-          _kv('ACK Duplicate', metrics.ackDuplicateCount.toString()),
-          _kv('ACK Stale', metrics.ackStaleCount.toString()),
-          _kv('ACK Invalid', metrics.ackInvalidCount.toString()),
+          _kv('Scope', packetScope),
+          _kv('ACK Received', packetMetrics.ackReceivedCount.toString()),
+          _kv('ACK Accepted', packetMetrics.ackAcceptedCount.toString()),
+          _kv('ACK Duplicate', packetMetrics.ackDuplicateCount.toString()),
+          _kv('ACK Stale', packetMetrics.ackStaleCount.toString()),
+          _kv('ACK Invalid', packetMetrics.ackInvalidCount.toString()),
           _kv(
             'ACK Termination Latency',
-            _statMs(metrics.ackTerminationLatencyMs),
+            _statMs(packetMetrics.ackTerminationLatencyMs),
           ),
         ]),
         _section('Transmission', [
-          _kv('TX Attempt Count', metrics.txAttemptCount.toString()),
-          _kv('TX Success Count', metrics.txSuccessCount.toString()),
-          _kv('Relay Slot Count', metrics.relaySlotCount.toString()),
+          _kv('Scope', packetScope),
+          _kv('TX Attempt Count', packetMetrics.txAttemptCount.toString()),
+          _kv('TX Success Count', packetMetrics.txSuccessCount.toString()),
+          _kv('Relay Slot Count', packetMetrics.relaySlotCount.toString()),
         ]),
       ],
     );
@@ -503,25 +543,30 @@ class _ResearchMonitorScreenState extends State<ResearchMonitorScreen>
     final targetHop = int.tryParse(_targetHopController.text.trim()) ?? 0;
     final timeoutSeconds = int.tryParse(_trialTimeoutController.text.trim());
     final metadata = await NativeBridgeService.getDeviceMetadata();
-    await _researchService.startSession(
-      deviceId: _syncService.deviceId,
-      name: _sessionNameController.text,
-      nodeRole: _nodeRole,
-      targetHop: targetHop,
-      topologyLabel: _topologyController.text,
-      scenarioLabel: _scenarioController.text,
-      notes: _notesController.text,
-      trialTimeoutSeconds: timeoutSeconds == null || timeoutSeconds <= 0
-          ? null
-          : timeoutSeconds,
-      deviceManufacturer: metadata['manufacturer']?.toString(),
-      deviceModel: metadata['model']?.toString() ?? 'unknown',
-      androidVersion: metadata['androidRelease']?.toString() ?? 'unknown',
-      androidSdk: _asInt(metadata['androidSdk']),
-      appVersion: metadata['appVersionName']?.toString() ?? 'research',
-      appVersionCode: metadata['appVersionCode']?.toString(),
-      buildId: MeshConfig.buildId,
-    );
+    try {
+      await _researchService.startSession(
+        deviceId: _syncService.deviceId,
+        name: _sessionNameController.text,
+        nodeRole: _nodeRole,
+        targetHop: targetHop,
+        topologyLabel: _topologyController.text,
+        scenarioLabel: _scenarioController.text,
+        notes: _notesController.text,
+        trialTimeoutSeconds: timeoutSeconds == null || timeoutSeconds <= 0
+            ? null
+            : timeoutSeconds,
+        deviceManufacturer: metadata['manufacturer']?.toString(),
+        deviceModel: metadata['model']?.toString() ?? 'unknown',
+        androidVersion: metadata['androidRelease']?.toString() ?? 'unknown',
+        androidSdk: _asInt(metadata['androidSdk']),
+        appVersion: metadata['appVersionName']?.toString() ?? 'research',
+        appVersionCode: metadata['appVersionCode']?.toString(),
+        buildId: MeshConfig.buildId,
+      );
+    } on StateError catch (e) {
+      if (mounted) ResqFeedback.error(context, e.message);
+      return;
+    }
     await _logger.logEvent(
       eventType: 'RESEARCH_SESSION_STARTED',
       deviceId: _syncService.deviceId,
@@ -533,7 +578,12 @@ class _ResearchMonitorScreenState extends State<ResearchMonitorScreen>
   Future<void> _endSession() async {
     final session = _session;
     if (session == null) return;
-    await _researchService.endSession(session.sessionId);
+    try {
+      await _researchService.endSession(session.sessionId);
+    } on StateError catch (e) {
+      if (mounted) ResqFeedback.error(context, e.message);
+      return;
+    }
     await _refresh();
   }
 

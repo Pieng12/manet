@@ -15,6 +15,7 @@ void main() {
     String type,
     int timestamp, {
     String? payloadHash = 'packet-a',
+    int? senderCrc,
     int? hop,
     int? hopIn,
     int? hopOut,
@@ -29,6 +30,7 @@ void main() {
       sessionId: 'session-a',
       trialId: 'trial-a',
       eventType: type,
+      senderCrc: senderCrc,
       timestampMs: timestamp,
       eventTimestampMs: timestamp,
       elapsedRealtimeMs: elapsedRealtimeMs,
@@ -104,6 +106,24 @@ void main() {
     expect(metrics.duplicateCount, 1);
     expect(metrics.staleCount, 1);
     expect(metrics.duplicateRatioPercent, closeTo(50, 0.01));
+  });
+
+  test('logical duplicate ratio is policy-level and excludes stale', () {
+    final metrics = service.calculate(
+      events: [
+        event(ExperimentEventTypes.blePacketAccepted, 1000),
+        event(ExperimentEventTypes.blePacketDuplicate, 1001),
+        event(ExperimentEventTypes.blePacketDuplicate, 1002),
+        event(ExperimentEventTypes.blePacketDuplicate, 1003),
+        event(ExperimentEventTypes.blePacketStale, 1004),
+      ],
+      trials: const [],
+    );
+
+    expect(metrics.acceptedCount, 1);
+    expect(metrics.duplicateCount, 3);
+    expect(metrics.staleCount, 1);
+    expect(metrics.duplicateRatioPercent, closeTo(75, 0.01));
   });
 
   test('hop validation accepts expected increments and saturated 63', () {
@@ -275,6 +295,280 @@ void main() {
 
     expect(samples, [120]);
   });
+
+  test('local latency uses wall clocks when only start has monotonic', () {
+    final samples = service.localLatencySamples(
+      [
+        event(
+          ExperimentEventTypes.blePacketReceived,
+          1000,
+          elapsedRealtimeMs: 5000,
+        ),
+        event(ExperimentEventTypes.bleRelayStarted, 1286),
+      ],
+      startType: ExperimentEventTypes.blePacketReceived,
+      endType: ExperimentEventTypes.bleRelayStarted,
+    );
+
+    expect(samples, [286]);
+  });
+
+  test('local latency uses wall clocks when only end has monotonic', () {
+    final samples = service.localLatencySamples(
+      [
+        event(ExperimentEventTypes.blePacketReceived, 1000),
+        event(
+          ExperimentEventTypes.bleRelayStarted,
+          1286,
+          elapsedRealtimeMs: 999999,
+        ),
+      ],
+      startType: ExperimentEventTypes.blePacketReceived,
+      endType: ExperimentEventTypes.bleRelayStarted,
+    );
+
+    expect(samples, [286]);
+  });
+
+  test('negative local latency is ignored', () {
+    final samples = service.localLatencySamples(
+      [
+        event(ExperimentEventTypes.blePacketReceived, 2000),
+        event(ExperimentEventTypes.bleRelayStarted, 1000),
+      ],
+      startType: ExperimentEventTypes.blePacketReceived,
+      endType: ExperimentEventTypes.bleRelayStarted,
+    );
+
+    expect(samples, isEmpty);
+  });
+
+  test('E2E latency ignores monotonic clocks and uses wall time only', () {
+    final samples = service.endToEndLatencySamples([
+      event(
+        'SOURCE_FIRST_ADVERTISE',
+        1000,
+        payloadHash: 'e2e',
+        elapsedRealtimeMs: 999999,
+      ),
+      event(
+        'DESTINATION_FIRST_RECEIVE',
+        3420,
+        payloadHash: 'e2e',
+        elapsedRealtimeMs: 100,
+      ),
+    ]);
+
+    expect(samples, [2420]);
+  });
+
+  test(
+    'local relay latency correlates logical state across changed payload hash',
+    () {
+      final samples = service.localLatencySamples(
+        [
+          event(
+            ExperimentEventTypes.blePacketReceived,
+            1000,
+            payloadHash: 'HASH-HOP-1',
+            senderCrc: 123,
+            protocolTimestampMs: 100000,
+            packetType: 'sos',
+            status: 'active',
+            hopIn: 1,
+          ),
+          event(
+            ExperimentEventTypes.bleRelayStarted,
+            1286,
+            payloadHash: 'HASH-HOP-2',
+            senderCrc: 123,
+            protocolTimestampMs: 100000,
+            packetType: 'sos',
+            status: 'active',
+            hopOut: 2,
+          ),
+        ],
+        startType: ExperimentEventTypes.blePacketReceived,
+        endType: ExperimentEventTypes.bleRelayStarted,
+      );
+
+      expect(samples, [286]);
+    },
+  );
+
+  test(
+    'ACK termination latency uses later termination event and logical key',
+    () {
+      final metrics = service.calculate(
+        events: [
+          event(
+            ExperimentEventTypes.ackReceived,
+            10000,
+            payloadHash: 'ACK-RX-HASH',
+            senderCrc: 321,
+            protocolTimestampMs: 9000,
+            packetType: 'ack',
+            status: 'resolved',
+            elapsedRealtimeMs: 510000,
+          ),
+          event(
+            ExperimentEventTypes.sosRelayTerminatedByAck,
+            10145,
+            payloadHash: 'ACK-END-HASH',
+            senderCrc: 321,
+            protocolTimestampMs: 9000,
+            packetType: 'ack',
+            status: 'resolved',
+          ),
+        ],
+        trials: const [],
+      );
+
+      expect(metrics.ackTerminationLatencyMs.median, 145);
+      expect(metrics.ackTerminationLatencyMs.median, isNot(0));
+    },
+  );
+
+  test('hop samples use only RX and actual relay start canonical events', () {
+    final metrics = service.calculate(
+      events: [
+        event(
+          ExperimentEventTypes.blePacketReceived,
+          1000,
+          hopIn: 1,
+          senderCrc: 1,
+          protocolTimestampMs: 1000,
+          packetType: 'sos',
+          status: 'active',
+        ),
+        event(ExperimentEventTypes.sosTransactionCommitted, 1001, hopIn: 1),
+        event(ExperimentEventTypes.blePacketAccepted, 1002, hopIn: 1),
+        event(ExperimentEventTypes.blePacketStored, 1003, hopOut: 2),
+        event(ExperimentEventTypes.bleRelayQueued, 1004, hopOut: 2),
+        event(
+          ExperimentEventTypes.bleRelayStarted,
+          1100,
+          hopOut: 2,
+          senderCrc: 1,
+          protocolTimestampMs: 1000,
+          packetType: 'sos',
+          status: 'active',
+        ),
+      ],
+      trials: const [],
+    );
+
+    expect(metrics.hopInStats.count, 1);
+    expect(metrics.hopOutStats.count, 1);
+  });
+
+  test('hop validation correlates RX and relay start by logical state', () {
+    HopValidation? validationFor(int hopIn, int hopOut) {
+      return service.latestHopValidationFromEvents([
+        event(
+          ExperimentEventTypes.blePacketReceived,
+          1000,
+          payloadHash: 'rx-$hopIn',
+          senderCrc: 99,
+          protocolTimestampMs: 100000,
+          packetType: 'sos',
+          status: 'active',
+          hopIn: hopIn,
+        ),
+        event(
+          ExperimentEventTypes.bleRelayStarted,
+          1100,
+          payloadHash: 'tx-$hopOut',
+          senderCrc: 99,
+          protocolTimestampMs: 100000,
+          packetType: 'sos',
+          status: 'active',
+          hopOut: hopOut,
+        ),
+      ]);
+    }
+
+    expect(validationFor(1, 2)?.passed, true);
+    expect(validationFor(63, 63)?.passed, true);
+    expect(validationFor(1, 3)?.passed, false);
+  });
+
+  test('current packet does not show TX before actual relay start', () {
+    final metrics = service.calculate(
+      events: [
+        event(
+          ExperimentEventTypes.blePacketReceived,
+          1000,
+          payloadHash: 'rx-hop-1',
+          senderCrc: 77,
+          protocolTimestampMs: 100000,
+          packetType: 'sos',
+          status: 'active',
+          hopIn: 1,
+        ),
+        event(
+          ExperimentEventTypes.blePacketStored,
+          1010,
+          payloadHash: 'stored-hop-2',
+          senderCrc: 77,
+          protocolTimestampMs: 100000,
+          packetType: 'sos',
+          status: 'active',
+          hopOut: 2,
+        ),
+        event(
+          ExperimentEventTypes.bleRelayQueued,
+          1020,
+          payloadHash: 'queued-hop-2',
+          senderCrc: 77,
+          protocolTimestampMs: 100000,
+          packetType: 'sos',
+          status: 'active',
+          hopOut: 2,
+        ),
+      ],
+      trials: const [],
+    );
+
+    expect(metrics.currentPacket?.hopOut, isNull);
+    expect(metrics.currentPacket?.advertisedAtMs, isNull);
+    expect(metrics.currentPacket?.storedAtMs, 1010);
+    expect(metrics.currentPacket?.relayQueuedAtMs, 1020);
+  });
+
+  test(
+    'current packet populates advertised fields only from relay started',
+    () {
+      final metrics = service.calculate(
+        events: [
+          event(
+            ExperimentEventTypes.blePacketReceived,
+            1000,
+            payloadHash: 'rx-hop-1',
+            senderCrc: 77,
+            protocolTimestampMs: 100000,
+            packetType: 'sos',
+            status: 'active',
+            hopIn: 1,
+          ),
+          event(
+            ExperimentEventTypes.bleRelayStarted,
+            1286,
+            payloadHash: 'tx-hop-2',
+            senderCrc: 77,
+            protocolTimestampMs: 100000,
+            packetType: 'sos',
+            status: 'active',
+            hopOut: 2,
+          ),
+        ],
+        trials: const [],
+      );
+
+      expect(metrics.currentPacket?.hopOut, 2);
+      expect(metrics.currentPacket?.advertisedAtMs, 1286);
+    },
+  );
 
   test('advertise requested is not counted as successful TX', () {
     final metrics = service.calculate(

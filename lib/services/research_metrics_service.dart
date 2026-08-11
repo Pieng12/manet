@@ -85,11 +85,19 @@ class ResearchMetricsService {
         .map((event) => event.rssi!)
         .toList();
     final hopInSamples = events
-        .where((event) => event.hopIn != null)
+        .where(
+          (event) =>
+              event.eventType == ExperimentEventTypes.blePacketReceived &&
+              event.hopIn != null,
+        )
         .map((event) => event.hopIn!)
         .toList();
     final hopOutSamples = events
-        .where((event) => event.hopOut != null)
+        .where(
+          (event) =>
+              event.eventType == ExperimentEventTypes.bleRelayStarted &&
+              event.hopOut != null,
+        )
         .map((event) => event.hopOut!)
         .toList();
     final localRelayLatencies = localLatencySamples(
@@ -150,18 +158,18 @@ class ResearchMetricsService {
     required String startType,
     required String endType,
   }) {
-    final startsByPayload = <String, int>{};
+    final startsByKey = <String, ExperimentEvent>{};
     final samples = <int>[];
     for (final event in events) {
-      final key = _latencyKey(event);
+      final key = logicalPacketKey(event);
       if (key == null) continue;
       if (event.eventType == startType) {
-        startsByPayload[key] = _monotonicTime(event);
+        startsByKey[key] = event;
       } else if (event.eventType == endType) {
-        final start = startsByPayload[key];
+        final start = startsByKey[key];
         if (start == null) continue;
-        final end = _monotonicTime(event);
-        if (end >= start) samples.add(end - start);
+        final interval = localIntervalMs(start, event);
+        if (interval != null) samples.add(interval);
       }
     }
     return samples;
@@ -171,14 +179,14 @@ class ResearchMetricsService {
     final sourceStarts = <String, int>{};
     final samples = <int>[];
     for (final event in events) {
-      final key = _latencyKey(event);
+      final key = logicalPacketKey(event);
       if (key == null) continue;
       if (event.eventType == 'SOURCE_FIRST_ADVERTISE') {
-        sourceStarts[key] = _monotonicTime(event);
+        sourceStarts[key] = _wallTime(event);
       } else if (event.eventType == 'DESTINATION_FIRST_RECEIVE') {
         final start = sourceStarts[key];
         if (start == null) continue;
-        final end = _monotonicTime(event);
+        final end = _wallTime(event);
         if (end >= start) samples.add(end - start);
       }
     }
@@ -196,14 +204,23 @@ class ResearchMetricsService {
   }
 
   HopValidation? latestHopValidationFromEvents(List<ExperimentEvent> events) {
-    for (final event in events.reversed) {
-      final hopIn = event.hopIn;
-      final hopOut = event.hopOut;
-      if (hopIn != null && hopOut != null) {
-        return validateHop(hopIn: hopIn, hopOut: hopOut);
+    final startsByKey = <String, ExperimentEvent>{};
+    HopValidation? latest;
+    for (final event in events) {
+      final key = logicalPacketKey(event);
+      if (key == null) continue;
+      if (event.eventType == ExperimentEventTypes.blePacketReceived &&
+          event.hopIn != null) {
+        startsByKey[key] = event;
+      } else if (event.eventType == ExperimentEventTypes.bleRelayStarted &&
+          event.hopOut != null) {
+        final start = startsByKey[key];
+        if (start?.hopIn != null) {
+          latest = validateHop(hopIn: start!.hopIn!, hopOut: event.hopOut!);
+        }
       }
     }
-    return null;
+    return latest;
   }
 
   CurrentPacketSnapshot? currentPacketSnapshot(List<ExperimentEvent> events) {
@@ -215,13 +232,19 @@ class ResearchMetricsService {
       }
     }
     if (latestRx == null) return null;
-    final payloadHash = latestRx.payloadHash;
-    ExperimentEvent? latestTx;
-    if (payloadHash != null) {
-      for (final event in events.reversed) {
-        if (event.payloadHash == payloadHash && event.hopOut != null) {
-          latestTx = event;
-          break;
+    final key = logicalPacketKey(latestRx);
+    ExperimentEvent? stored;
+    ExperimentEvent? queued;
+    ExperimentEvent? relayStarted;
+    if (key != null) {
+      for (final event in events) {
+        if (logicalPacketKey(event) != key) continue;
+        if (event.eventType == ExperimentEventTypes.blePacketStored) {
+          stored = event;
+        } else if (event.eventType == ExperimentEventTypes.bleRelayQueued) {
+          queued = event;
+        } else if (event.eventType == ExperimentEventTypes.bleRelayStarted) {
+          relayStarted = event;
         }
       }
     }
@@ -232,15 +255,49 @@ class ResearchMetricsService {
       status: latestRx.status ?? detail['status']?.toString(),
       packetType: latestRx.packetType ?? detail['kind']?.toString(),
       hopIn: latestRx.hopIn,
-      hopOut: latestTx?.hopOut,
       rssi: latestRx.rssi,
       fromServer: detail['from_server'] is bool
           ? detail['from_server'] as bool
           : null,
-      payloadHash: payloadHash,
+      payloadHash: latestRx.payloadHash,
       receivedAtMs: latestRx.eventTimestampMs ?? latestRx.timestampMs,
-      advertisedAtMs: latestTx?.eventTimestampMs ?? latestTx?.timestampMs,
+      storedAtMs: stored?.eventTimestampMs ?? stored?.timestampMs,
+      relayQueuedAtMs: queued?.eventTimestampMs ?? queued?.timestampMs,
+      hopOut: relayStarted?.hopOut,
+      advertisedAtMs:
+          relayStarted?.eventTimestampMs ?? relayStarted?.timestampMs,
     );
+  }
+
+  int? localIntervalMs(ExperimentEvent start, ExperimentEvent end) {
+    final startElapsed = start.elapsedRealtimeMs;
+    final endElapsed = end.elapsedRealtimeMs;
+    final interval = startElapsed != null && endElapsed != null
+        ? endElapsed - startElapsed
+        : _wallTime(end) - _wallTime(start);
+    return interval < 0 ? null : interval;
+  }
+
+  int? crossDeviceWallClockIntervalMs(
+    ExperimentEvent start,
+    ExperimentEvent end,
+  ) {
+    final interval = _wallTime(end) - _wallTime(start);
+    return interval < 0 ? null : interval;
+  }
+
+  String? logicalPacketKey(ExperimentEvent event) {
+    final packetType = event.packetType;
+    final status = event.status;
+    final protocolTimestamp = event.protocolTimestampMs;
+    final senderCrc = event.senderCrc;
+    if (packetType != null &&
+        status != null &&
+        protocolTimestamp != null &&
+        senderCrc != null) {
+      return '$packetType|$senderCrc|$protocolTimestamp|$status';
+    }
+    return event.payloadHash ?? event.messageId;
   }
 
   static int _count(Iterable<ExperimentEvent> events, Set<String> types) {
@@ -253,14 +310,8 @@ class ResearchMetricsService {
     return reason != null && reason.contains('INVALID');
   }
 
-  static String? _latencyKey(ExperimentEvent event) {
-    return event.payloadHash ?? event.messageId;
-  }
-
-  static int _monotonicTime(ExperimentEvent event) {
-    return event.elapsedRealtimeMs ??
-        event.eventTimestampMs ??
-        event.timestampMs;
+  static int _wallTime(ExperimentEvent event) {
+    return event.eventTimestampMs ?? event.timestampMs;
   }
 
   static Map<String, dynamic> _detail(ExperimentEvent event) {

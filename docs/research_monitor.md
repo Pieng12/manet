@@ -34,19 +34,44 @@ dicatat ke session `AUTO` ketika tidak ada session penelitian aktif.
 ## Timestamp
 
 Protocol timestamp adalah timestamp ringkas satu detik di payload BLE. Timestamp
-ini dipakai untuk identity packet, state SOS, dan ACK tombstone. Kolom
-`protocol_timestamp_ms` hanya berisi timestamp protokol, bukan waktu event.
+ini dipakai untuk identity packet, state ordering, logical packet/state
+correlation, SOS version matching, dan ACK tombstone. Kolom
+`protocol_timestamp_ms` hanya berisi timestamp protokol, bukan waktu event dan
+bukan clock untuk latency sub-detik.
 
 Research event time disimpan terpisah sebagai `event_timestamp_ms`. Untuk
 packet BLE yang diterima native, nilai ini berasal dari timestamp native receive,
-bukan waktu drain Dart. Jika tersedia, `elapsed_realtime_ms` dipakai untuk
-latency lokal agar tidak terpengaruh perubahan jam sistem.
+bukan waktu drain Dart.
+
+LOCAL SAME DEVICE:
+
+```text
+Jika start dan end sama-sama punya elapsed_realtime_ms:
+  latency = end.elapsed_realtime_ms - start.elapsed_realtime_ms
+
+Jika salah satu tidak punya elapsed_realtime_ms:
+  latency = end.event_timestamp_ms - start.event_timestamp_ms
+```
+
+Never mix clock domains. Jangan pernah mengurangi wall-clock dengan
+`elapsed_realtime_ms`, atau sebaliknya.
+
+CROSS DEVICE:
+
+```text
+E2E latency = destination.event_timestamp_ms - source.event_timestamp_ms
+```
+
+Cross-device latency hanya memakai synchronized wall-clock research time.
+`elapsed_realtime_ms` tidak boleh dipakai antarperangkat karena origin-nya
+berbeda untuk setiap Android device.
 
 ## Metric Scope
 
-Metric pada layar ini bersifat `LOCAL DEVICE` atau `CURRENT SESSION` kecuali ada
-log peer yang sudah digabungkan secara eksplisit. Nilai network-wide tidak boleh
-dibuat dari asumsi.
+Metric pada layar ini bersifat `CURRENT TRIAL / LOCAL DEVICE` atau
+`CURRENT SESSION` kecuali ada log peer yang sudah digabungkan secara eksplisit.
+DSR dan transmission-overhead session tetap session-scoped walaupun ada trial
+aktif. Nilai network-wide tidak boleh dibuat dari asumsi.
 
 ## Formulas
 
@@ -62,18 +87,21 @@ x 100%
 Trial `INVALID`, `RUNNING`, dan `COMPLETED` tanpa result eksplisit tidak masuk
 denominator.
 
-Duplicate Ratio:
+Logical Duplicate Ratio:
 
 ```text
-duplicate receptions
+BLE_PACKET_DUPLICATE
 ------------------------------
-BLE_PACKET_ACCEPTED + duplicate receptions
+BLE_PACKET_ACCEPTED + BLE_PACKET_DUPLICATE
 x 100%
 ```
 
 Accepted count berasal hanya dari event canonical `BLE_PACKET_ACCEPTED`.
 Diagnostic stored/queued events tidak menambah accepted count. Stale packet
-tidak dihitung sebagai duplicate.
+tidak dihitung sebagai duplicate. Logical Duplicate Ratio hanya menghitung
+packet duplicate yang mencapai ResQMesh forwarding policy. Exact repeated
+advertisements yang sudah disaring oleh native receiver/inbox dedup tidak
+termasuk.
 
 Local Relay Processing Latency:
 
@@ -84,7 +112,9 @@ BLE_PACKET_RECEIVED timestamp
 ```
 
 Ini hanya aman untuk event pada device yang sama dan dikorelasikan dengan
-`payload_hash`, bukan hanya sender CRC.
+logical packet key (`packet_type`, `sender_crc`, `protocol_timestamp_ms`, dan
+`status`) sehingga tetap cocok saat byte hop berubah dan exact payload hash
+berbeda.
 
 Hop Correctness:
 
@@ -125,7 +155,9 @@ max. RSSI hanya diambil dari `BLE_PACKET_RECEIVED` dan tidak dikonversi langsung
 menjadi meter.
 
 Hop dipisah menjadi `hop_in` dan `hop_out`. Current Packet di LIVE membangun
-snapshot dari RX terbaru dan event output dengan `payload_hash` yang sama.
+snapshot dari RX terbaru dan lifecycle event dengan logical packet key yang
+sama. Hop In sample hanya berasal dari `BLE_PACKET_RECEIVED`. Hop Out sample
+hanya berasal dari `BLE_RELAY_STARTED`.
 
 ## ACK Metrics
 
@@ -140,7 +172,9 @@ ACK metrics memisahkan:
 ACK packet dan SOS terminal state tetap diperlakukan sesuai semantik P8.
 Relay lokal yang berhenti karena ACK dicatat dengan event produksi
 `SOS_RELAY_TERMINATED_BY_ACK`, lalu dipasangkan deterministik dengan
-`ACK_RECEIVED` lewat `payload_hash`.
+`ACK_RECEIVED` lewat logical ACK key (`sender_crc`, `protocol_timestamp_ms`,
+dan `status`). Event termination dicatat saat state/queue relay lokal sudah
+terkonfirmasi terminasi, bukan saat ACK baru diterima.
 
 ## Device Metadata
 

@@ -34,39 +34,62 @@ class ResearchSessionService {
   }) async {
     final db = await _db;
     final now = DateTime.now().millisecondsSinceEpoch;
-    await db.update(
-      'experiment_sessions',
-      {'ended_at': now, 'status': 'COMPLETED'},
-      where: 'session_kind = ? AND ended_at IS NULL',
-      whereArgs: const ['RESEARCH'],
-    );
-    final session = ExperimentSession(
-      sessionId: const Uuid().v4(),
-      deviceId: deviceId,
-      deviceModel: deviceModel,
-      androidVersion: androidVersion,
-      forwardingMode: MeshConfig.forwardingMode.logValue,
-      maxHop: MeshConfig.legacyHopMetadata,
-      messageLifetimeMs: MeshConfig.defaultMessageLifetime.inMilliseconds,
-      relayCooldownMs: MeshConfig.relayCooldown.inMilliseconds,
-      startedAt: now,
-      name: name.trim().isEmpty ? _defaultSessionName(now) : name.trim(),
-      nodeRole: nodeRole,
-      targetHop: targetHop,
-      topologyLabel: topologyLabel.trim(),
-      scenarioLabel: scenarioLabel.trim(),
-      notes: notes?.trim(),
-      status: 'RUNNING',
-      appVersion: appVersion,
-      trialTimeoutSeconds: trialTimeoutSeconds,
-      sessionKind: 'RESEARCH',
-      deviceManufacturer: deviceManufacturer,
-      androidSdk: androidSdk,
-      appVersionCode: appVersionCode,
-      buildId: buildId ?? MeshConfig.buildId,
-    );
-    await db.insert('experiment_sessions', session.toDbMap());
-    return session;
+    return db.transaction((txn) async {
+      final activeRows = await txn.query(
+        'experiment_sessions',
+        where: 'session_kind = ? AND ended_at IS NULL',
+        whereArgs: const ['RESEARCH'],
+        orderBy: 'started_at DESC',
+        limit: 1,
+      );
+      if (activeRows.isNotEmpty) {
+        final active = ExperimentSession.fromDbMap(activeRows.first);
+        final running = await txn.query(
+          'experiment_trials',
+          where: 'session_id = ? AND status = ?',
+          whereArgs: [active.sessionId, 'RUNNING'],
+          limit: 1,
+        );
+        if (running.isNotEmpty) {
+          throw StateError(
+            'A trial is currently running. Finish or invalidate it before starting a new session.',
+          );
+        }
+      }
+      await txn.update(
+        'experiment_sessions',
+        {'ended_at': now, 'status': 'COMPLETED'},
+        where: 'session_kind = ? AND ended_at IS NULL',
+        whereArgs: const ['RESEARCH'],
+      );
+      final session = ExperimentSession(
+        sessionId: const Uuid().v4(),
+        deviceId: deviceId,
+        deviceModel: deviceModel,
+        androidVersion: androidVersion,
+        forwardingMode: MeshConfig.forwardingMode.logValue,
+        maxHop: MeshConfig.legacyHopMetadata,
+        messageLifetimeMs: MeshConfig.defaultMessageLifetime.inMilliseconds,
+        relayCooldownMs: MeshConfig.relayCooldown.inMilliseconds,
+        startedAt: now,
+        name: name.trim().isEmpty ? _defaultSessionName(now) : name.trim(),
+        nodeRole: nodeRole,
+        targetHop: targetHop,
+        topologyLabel: topologyLabel.trim(),
+        scenarioLabel: scenarioLabel.trim(),
+        notes: notes?.trim(),
+        status: 'RUNNING',
+        appVersion: appVersion,
+        trialTimeoutSeconds: trialTimeoutSeconds,
+        sessionKind: 'RESEARCH',
+        deviceManufacturer: deviceManufacturer,
+        androidSdk: androidSdk,
+        appVersionCode: appVersionCode,
+        buildId: buildId ?? MeshConfig.buildId,
+      );
+      await txn.insert('experiment_sessions', session.toDbMap());
+      return session;
+    });
   }
 
   Future<ExperimentSession?> currentSession() async {
@@ -84,15 +107,28 @@ class ResearchSessionService {
 
   Future<void> endSession(String sessionId) async {
     final db = await _db;
-    await db.update(
-      'experiment_sessions',
-      {
-        'ended_at': DateTime.now().millisecondsSinceEpoch,
-        'status': 'COMPLETED',
-      },
-      where: 'session_id = ?',
-      whereArgs: [sessionId],
-    );
+    await db.transaction((txn) async {
+      final running = await txn.query(
+        'experiment_trials',
+        where: 'session_id = ? AND status = ?',
+        whereArgs: [sessionId, 'RUNNING'],
+        limit: 1,
+      );
+      if (running.isNotEmpty) {
+        throw StateError(
+          'A trial is currently running. Finish or invalidate it before ending the session.',
+        );
+      }
+      await txn.update(
+        'experiment_sessions',
+        {
+          'ended_at': DateTime.now().millisecondsSinceEpoch,
+          'status': 'COMPLETED',
+        },
+        where: 'session_id = ?',
+        whereArgs: [sessionId],
+      );
+    });
   }
 
   Future<ExperimentTrial> startTrial({

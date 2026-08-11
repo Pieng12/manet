@@ -56,6 +56,8 @@ class CurrentPacketSnapshot {
   final bool? fromServer;
   final String? payloadHash;
   final int? receivedAtMs;
+  final int? storedAtMs;
+  final int? relayQueuedAtMs;
   final int? advertisedAtMs;
 
   const CurrentPacketSnapshot({
@@ -69,6 +71,8 @@ class CurrentPacketSnapshot {
     this.fromServer,
     this.payloadHash,
     this.receivedAtMs,
+    this.storedAtMs,
+    this.relayQueuedAtMs,
     this.advertisedAtMs,
   });
 }

@@ -1,6 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pkmproject/database_schema.dart';
 import 'package:pkmproject/services/experiment_logger.dart';
+import 'package:pkmproject/services/research_metrics_service.dart';
 import 'package:pkmproject/services/research_session_service.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
@@ -22,6 +23,18 @@ void main() {
   tearDown(() async {
     await db.close();
   });
+
+  Future<String> createSession({String name = 'CTRL-H3'}) async {
+    final session = await research.startSession(
+      deviceId: 'device-a',
+      name: name,
+      nodeRole: 'RELAY',
+      targetHop: 3,
+      topologyLabel: 'A -> R -> B',
+      scenarioLabel: 'LOS-5M',
+    );
+    return session.sessionId;
+  }
 
   test('create session and current session stores research metadata', () async {
     final session = await research.startSession(
@@ -88,6 +101,67 @@ void main() {
       throwsA(isA<StateError>()),
     );
   });
+
+  test(
+    'start session rejects while active session has running trial',
+    () async {
+      final oldSessionId = await createSession(name: 'OLD');
+      await research.startTrial(sessionId: oldSessionId);
+
+      expect(
+        () => research.startSession(
+          deviceId: 'device-a',
+          name: 'NEW',
+          nodeRole: 'RELAY',
+          targetHop: 3,
+          topologyLabel: 'A -> R -> B',
+          scenarioLabel: 'LOS-5M',
+        ),
+        throwsA(isA<StateError>()),
+      );
+
+      final rows = await db.query('experiment_sessions');
+      final current = await research.currentSession();
+      expect(rows, hasLength(1));
+      expect(current?.sessionId, oldSessionId);
+      expect(current?.endedAt, isNull);
+    },
+  );
+
+  test('end session rejects while trial is running', () async {
+    final sessionId = await createSession();
+    await research.startTrial(sessionId: sessionId);
+
+    expect(() => research.endSession(sessionId), throwsA(isA<StateError>()));
+
+    final current = await research.currentSession();
+    expect(current?.sessionId, sessionId);
+    expect(current?.endedAt, isNull);
+  });
+
+  test(
+    'end session succeeds after SUCCESS FAILED or INVALID terminal trials',
+    () async {
+      Future<void> assertCanEndAfter(String result) async {
+        final sessionId = await createSession(name: result);
+        final trial = await research.startTrial(sessionId: sessionId);
+        if (result == 'INVALID') {
+          await research.invalidateTrial(trial.trialId);
+        } else {
+          await research.finishTrial(trial.trialId, result: result);
+        }
+
+        await research.endSession(sessionId);
+
+        final session = await research.sessionById(sessionId);
+        expect(session?.endedAt, isNotNull);
+      }
+
+      await assertCanEndAfter('SUCCESS');
+      await assertCanEndAfter('FAILED');
+      await assertCanEndAfter('INVALID');
+    },
+  );
 
   test(
     'AUTO session stays separate from active RESEARCH session query',
@@ -235,4 +309,39 @@ void main() {
     expect(trials.single.result, 'FAILED');
     expect(trials.single.failureReason, 'TIMEOUT');
   });
+
+  test(
+    'session DSR remains scoped while current trial metrics are separate',
+    () async {
+      final sessionId = await createSession(name: 'SCOPE');
+      for (var i = 0; i < 29; i++) {
+        final trial = await research.startTrial(sessionId: sessionId);
+        await research.finishTrial(trial.trialId, result: 'SUCCESS');
+      }
+      final failed = await research.startTrial(sessionId: sessionId);
+      await research.finishTrial(failed.trialId, result: 'FAILED');
+      final running = await research.startTrial(sessionId: sessionId);
+
+      await logger.logEvent(
+        eventType: ExperimentEventTypes.blePacketAccepted,
+        deviceId: 'device-a',
+        payloadHash: 'current-trial',
+      );
+      final metrics = ResearchMetricsService(
+        logger: logger,
+        researchSessionService: research,
+      );
+
+      final sessionMetrics = await metrics.loadMetrics(sessionId: sessionId);
+      final trialMetrics = await metrics.loadMetrics(
+        sessionId: sessionId,
+        trialId: running.trialId,
+      );
+
+      expect(sessionMetrics.dsrPercent, closeTo(96.67, 0.01));
+      expect(sessionMetrics.validCompletedTrials, 30);
+      expect(trialMetrics.dsrPercent, isNull);
+      expect(trialMetrics.acceptedCount, 1);
+    },
+  );
 }

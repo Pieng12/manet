@@ -375,7 +375,7 @@ class BleRelayService {
     final nextAckHop = packet.hopCount >= MeshConfig.maxProtocolHop
         ? MeshConfig.maxProtocolHop
         : packet.hopCount + 1;
-    await _logSosRelayTerminatedByAck(packet, receivedAtMs: receivedAtMs);
+    await _logSosRelayTerminatedByAck(packet);
     await _experimentLogger.logEvent(
       eventType: ExperimentEventTypes.bleRelayQueued,
       deviceId: SyncService().deviceId,
@@ -742,10 +742,7 @@ class BleRelayService {
     );
   }
 
-  Future<void> _logSosRelayTerminatedByAck(
-    BlePacket packet, {
-    int? receivedAtMs,
-  }) async {
+  Future<void> _logSosRelayTerminatedByAck(BlePacket packet) async {
     final db = await _dbHelper.database;
     final ackTimestamp = canonicalProtocolTimestamp(packet.timestampMs);
     final rows = await db.query(
@@ -755,7 +752,7 @@ class BleRelayService {
       whereArgs: [packet.senderCrc, ackTimestamp, 'acked'],
     );
     if (rows.isEmpty) return;
-    final eventAt = receivedAtMs ?? DateTime.now().millisecondsSinceEpoch;
+    final eventAt = DateTime.now().millisecondsSinceEpoch;
     for (final row in rows) {
       await _experimentLogger.logEvent(
         eventType: ExperimentEventTypes.sosRelayTerminatedByAck,
@@ -769,7 +766,11 @@ class BleRelayService {
         protocolTimestampMs: packet.timestampMs,
         packetType: 'ack',
         status: packet.status.name,
-        detail: {'ack_timestamp_ms': ackTimestamp},
+        detail: {
+          'ack_timestamp_ms': ackTimestamp,
+          'termination_key':
+              'ack|${packet.senderCrc}|$ackTimestamp|${packet.status.name}',
+        },
       );
     }
   }
