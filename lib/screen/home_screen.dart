@@ -44,6 +44,9 @@ class _HomeScreenState extends State<HomeScreen>
   bool _isSending = false;
   bool _isBleAdvertisingRunning = false;
   bool _isBleScanningRunning = false;
+  bool _isForegroundServiceRunning = false;
+  bool _isBluetoothEnabled = false;
+  bool _isBleStateRefreshing = false;
   String _currentDeviceId = "Loading...";
 
   @override
@@ -61,9 +64,8 @@ class _HomeScreenState extends State<HomeScreen>
       LogsTab(logs: _logs, onClearLogs: _clearLogs),
     ];
 
-    _isBleAdvertisingRunning = _bleAdvertiserService.isAdvertising;
-    _isBleScanningRunning = NativeBridgeService.isBleWakeUpScanning;
     _currentDeviceId = _syncService.deviceId;
+    unawaited(_refreshBleRuntimeState());
 
     _bleAdvertisingSub = _bleAdvertiserService.onAdvertisingChanged.listen((
       isRunning,
@@ -74,11 +76,7 @@ class _HomeScreenState extends State<HomeScreen>
     });
     _relayLogSub = _bleRelayService.logStream.listen(_log);
     _statusTimer = Timer.periodic(const Duration(seconds: 3), (_) {
-      if (mounted) {
-        setState(() {
-          _isBleScanningRunning = NativeBridgeService.isBleWakeUpScanning;
-        });
-      }
+      unawaited(_refreshBleRuntimeState());
     });
 
     _dbHelper.initialize().catchError((e) {
@@ -246,7 +244,10 @@ class _HomeScreenState extends State<HomeScreen>
 
   @override
   Widget build(BuildContext context) {
-    final isAnyBleRunning = _isBleScanningRunning || _isBleAdvertisingRunning;
+    final isAnyBleRunning =
+        _isBleScanningRunning ||
+        _isBleAdvertisingRunning ||
+        _isForegroundServiceRunning;
 
     return Scaffold(
       backgroundColor: ResqColors.ink,
@@ -342,6 +343,7 @@ class _HomeScreenState extends State<HomeScreen>
           ServiceStatusBar(
             isBleScanning: _isBleScanningRunning,
             isBleAdvertising: _isBleAdvertisingRunning,
+            isForegroundServiceRunning: _isForegroundServiceRunning,
             isSyncingEnabled: !SyncService.offlineOnly,
             onToggle: _toggleBleRelay,
           ),
@@ -354,21 +356,75 @@ class _HomeScreenState extends State<HomeScreen>
     );
   }
 
+  BleRuntimeState _currentBleRuntimeState() {
+    return BleRuntimeState(
+      scanActive: _isBleScanningRunning,
+      advertisingActive: _isBleAdvertisingRunning,
+      foregroundServiceActive: _isForegroundServiceRunning,
+      bluetoothEnabled: _isBluetoothEnabled,
+    );
+  }
+
+  Future<BleRuntimeState> _refreshBleRuntimeState({bool force = false}) async {
+    if (_isBleStateRefreshing && !force) return _currentBleRuntimeState();
+    _isBleStateRefreshing = true;
+    try {
+      final state = await NativeBridgeService.getBleRuntimeState();
+      if (mounted) {
+        setState(() {
+          _isBleScanningRunning = state.scanActive;
+          _isBleAdvertisingRunning = state.advertisingActive;
+          _isForegroundServiceRunning = state.foregroundServiceActive;
+          _isBluetoothEnabled = state.bluetoothEnabled;
+        });
+      }
+      return state;
+    } finally {
+      _isBleStateRefreshing = false;
+    }
+  }
+
   Future<void> _toggleBleRelay() async {
     try {
-      if (_isBleScanningRunning || _isBleAdvertisingRunning) {
+      final initialState = await _refreshBleRuntimeState(force: true);
+      if (initialState.relayActuallyRunning) {
         await NativeBridgeService.setRelayModeEnabled(false);
         await NativeBridgeService.stopBleWakeUpScan();
         await BackgroundServiceManager.stopBackgroundService();
-        _log('BLE relay stopped.');
-        if (mounted) ResqFeedback.info(context, 'Relay BLE dihentikan.');
+
+        final stoppedState = await _refreshBleRuntimeState(force: true);
+        if (stoppedState.stopVerified) {
+          _log('BLE relay stopped.');
+          if (mounted) ResqFeedback.info(context, 'Relay BLE dihentikan.');
+        } else {
+          _log('BLE relay stop incomplete: ${stoppedState.toLogMap()}');
+          if (mounted) {
+            ResqFeedback.warning(
+              context,
+              'Relay BLE belum sepenuhnya berhenti. Periksa status service/scan.',
+            );
+          }
+        }
       } else {
         await NativeBridgeService.setRelayModeEnabled(true);
         await BackgroundServiceManager.startBackgroundService();
+        await NativeBridgeService.startBleWakeUpScan();
         await BackgroundServiceManager.requestSchedulerTick();
-        _log('BLE relay started.');
-        if (mounted) {
-          ResqFeedback.success(context, 'Relay BLE aktif memantau sekitar.');
+
+        final startedState = await _refreshBleRuntimeState(force: true);
+        if (startedState.startVerified) {
+          _log('BLE relay started.');
+          if (mounted) {
+            ResqFeedback.success(context, 'Relay BLE aktif memantau sekitar.');
+          }
+        } else {
+          _log('BLE relay start incomplete: ${startedState.toLogMap()}');
+          if (mounted) {
+            ResqFeedback.warning(
+              context,
+              'Relay BLE belum sepenuhnya aktif. Periksa Bluetooth dan service.',
+            );
+          }
         }
       }
     } catch (e) {
@@ -379,12 +435,6 @@ class _HomeScreenState extends State<HomeScreen>
           'Gagal mengubah status relay. Periksa Bluetooth dan izin.',
         );
       }
-    }
-    if (mounted) {
-      setState(() {
-        _isBleScanningRunning = NativeBridgeService.isBleWakeUpScanning;
-        _isBleAdvertisingRunning = _bleAdvertiserService.isAdvertising;
-      });
     }
   }
 

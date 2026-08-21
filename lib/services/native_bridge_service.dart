@@ -1,5 +1,44 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:pkmproject/config/mesh_config.dart';
+
+class BleRuntimeState {
+  final bool scanActive;
+  final bool advertisingActive;
+  final bool foregroundServiceActive;
+  final bool bluetoothEnabled;
+
+  const BleRuntimeState({
+    required this.scanActive,
+    required this.advertisingActive,
+    required this.foregroundServiceActive,
+    required this.bluetoothEnabled,
+  });
+
+  factory BleRuntimeState.fromCapabilities(Map<String, dynamic> capabilities) {
+    return BleRuntimeState(
+      scanActive: capabilities['nativeScanActive'] == true,
+      advertisingActive: capabilities['nativeAdvertisingActive'] == true,
+      foregroundServiceActive: capabilities['foregroundServiceActive'] == true,
+      bluetoothEnabled: capabilities['bluetoothEnabled'] == true,
+    );
+  }
+
+  bool get relayActuallyRunning =>
+      scanActive || advertisingActive || foregroundServiceActive;
+
+  bool get startVerified => foregroundServiceActive && scanActive;
+
+  bool get stopVerified =>
+      !scanActive && !advertisingActive && !foregroundServiceActive;
+
+  Map<String, bool> toLogMap() => {
+    'nativeScanActive': scanActive,
+    'nativeAdvertisingActive': advertisingActive,
+    'foregroundServiceActive': foregroundServiceActive,
+    'bluetoothEnabled': bluetoothEnabled,
+  };
+}
 
 class NativeBridgeService {
   static const MethodChannel _platform = MethodChannel(
@@ -9,6 +48,11 @@ class NativeBridgeService {
   // Track whether native BLE wake-up scan is active
   static bool _isBleWakeUpScanning = false;
   static bool get isBleWakeUpScanning => _isBleWakeUpScanning;
+
+  @visibleForTesting
+  static void debugSetBleWakeUpScanningForTest(bool isScanning) {
+    _isBleWakeUpScanning = isScanning;
+  }
 
   static Future<bool> startBleWakeUpScan() async {
     try {
@@ -75,6 +119,12 @@ class NativeBridgeService {
       print("Failed to read BLE capabilities: '${e.message}'.");
       return const <String, dynamic>{};
     }
+  }
+
+  static Future<BleRuntimeState> getBleRuntimeState() async {
+    final state = BleRuntimeState.fromCapabilities(await getBleCapabilities());
+    _isBleWakeUpScanning = state.scanActive;
+    return state;
   }
 
   static Future<Map<String, dynamic>> getDeviceMetadata() async {

@@ -5,6 +5,7 @@ import 'package:pkmproject/widgets/status_indicator.dart';
 class ServiceStatusBar extends StatelessWidget {
   final bool isBleScanning;
   final bool isBleAdvertising;
+  final bool isForegroundServiceRunning;
   final bool isSyncingEnabled;
   final VoidCallback? onToggle;
 
@@ -12,13 +13,15 @@ class ServiceStatusBar extends StatelessWidget {
     super.key,
     required this.isBleScanning,
     required this.isBleAdvertising,
+    this.isForegroundServiceRunning = false,
     required this.isSyncingEnabled,
     this.onToggle,
   });
 
   @override
   Widget build(BuildContext context) {
-    final isAnyRunning = isBleScanning || isBleAdvertising;
+    final isAnyRunning =
+        isBleScanning || isBleAdvertising || isForegroundServiceRunning;
 
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
@@ -45,6 +48,13 @@ class ServiceStatusBar extends StatelessWidget {
                   isActive: isBleAdvertising,
                   activeIcon: Icons.bluetooth_searching,
                   inactiveIcon: Icons.bluetooth_disabled,
+                  activeColor: ResqColors.safe,
+                ),
+                StatusIndicator(
+                  label: 'BLE Service',
+                  isActive: isForegroundServiceRunning,
+                  activeIcon: Icons.settings_input_antenna,
+                  inactiveIcon: Icons.power_off,
                   activeColor: ResqColors.safe,
                 ),
                 StatusIndicator(
