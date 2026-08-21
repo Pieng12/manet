@@ -76,14 +76,20 @@ class NativeBleInboxWorker(
                             }
                             "isNativeBleAdvertising" -> {
                                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                                    result.success(NativeBleAdvertiser.isCurrentlyAdvertising())
+                                    result.success(
+                                        NativeBleAdvertiser.isCurrentlyAdvertising(
+                                            applicationContext
+                                        )
+                                    )
                                 } else {
                                     result.success(false)
                                 }
                             }
                             "getNativeBleAdvertisingStatus" -> {
                                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                                    result.success(NativeBleAdvertiser.statusMap())
+                                    result.success(
+                                        NativeBleAdvertiser.statusMap(applicationContext)
+                                    )
                                 } else {
                                     result.success(
                                         mapOf(

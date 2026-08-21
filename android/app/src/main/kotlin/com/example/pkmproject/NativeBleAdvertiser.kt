@@ -27,7 +27,7 @@ object NativeBleAdvertiser {
     private var advertiserStatus = "stopped"
     private var lastErrorCode: String? = null
     private var pendingStartCallback: ((Boolean, String, String?) -> Unit)? = null
-    private val mainHandler = Handler(Looper.getMainLooper())
+    private val mainHandler by lazy { Handler(Looper.getMainLooper()) }
     private var advertiseGeneration = 0L
     private var activeAdvertiseCallback: AdvertiseCallback? = null
 
@@ -167,6 +167,10 @@ object NativeBleAdvertiser {
         return isAdvertising
     }
 
+    fun isCurrentlyAdvertising(context: Context): Boolean {
+        return statusMap(context)["active"] == true
+    }
+
     fun statusMap(): Map<String, Any?> {
         return mapOf(
             "status" to advertiserStatus,
@@ -174,6 +178,25 @@ object NativeBleAdvertiser {
             "errorCode" to lastErrorCode,
             "connectable" to currentConnectable,
             "debugVisible" to currentDebugVisible
+        )
+    }
+
+    fun statusMap(context: Context): Map<String, Any?> {
+        val bluetoothAdapter = getBluetoothAdapter(context)
+        val bluetoothEnabled = bluetoothAdapter?.isEnabled == true
+        val advertiserAvailable = if (bluetoothEnabled) {
+            bluetoothAdapter?.bluetoothLeAdvertiser != null
+        } else {
+            false
+        }
+        return NativeBleRuntimeTelemetry.advertisingStatusMap(
+            rawStatus = advertiserStatus,
+            rawActive = isAdvertising,
+            rawErrorCode = lastErrorCode,
+            connectable = currentConnectable,
+            debugVisible = currentDebugVisible,
+            bluetoothEnabled = bluetoothEnabled,
+            advertiserAvailable = advertiserAvailable
         )
     }
 

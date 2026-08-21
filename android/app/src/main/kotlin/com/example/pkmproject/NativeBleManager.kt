@@ -20,10 +20,56 @@ object NativeBleManager {
     private var nativeScanActive = false
     private var lastScanErrorCode: String? = null
 
+    internal data class ScanStopTelemetry(
+        val success: Boolean,
+        val active: Boolean,
+        val errorCode: String?
+    )
+
+    internal fun stopTelemetryForUnavailable(errorCode: String): ScanStopTelemetry {
+        return ScanStopTelemetry(success = true, active = false, errorCode = errorCode)
+    }
+
+    internal fun stopTelemetryForStopAttempt(
+        success: Boolean,
+        exceptionName: String? = null
+    ): ScanStopTelemetry {
+        return ScanStopTelemetry(
+            success = success,
+            active = false,
+            errorCode = if (success) null else exceptionName
+        )
+    }
+
+    internal fun scanStatusMapForTest(
+        rawNativeScanActive: Boolean,
+        rawLastScanErrorCode: String?,
+        bluetoothEnabled: Boolean,
+        bleSupported: Boolean,
+        scannerAvailable: Boolean
+    ): Map<String, Any?> {
+        val effectiveScannerAvailable = bluetoothEnabled && scannerAvailable
+        val effectiveScanActive =
+            bluetoothEnabled && rawNativeScanActive && effectiveScannerAvailable
+        return mapOf(
+            "nativeScanActive" to effectiveScanActive,
+            "lastScanErrorCode" to rawLastScanErrorCode,
+            "bluetoothEnabled" to bluetoothEnabled,
+            "bleSupported" to bleSupported,
+            "scannerAvailable" to effectiveScannerAvailable
+        )
+    }
+
     private fun getBluetoothAdapter(context: Context): BluetoothAdapter? {
         val bluetoothManager =
             context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
         return bluetoothManager.adapter
+    }
+
+    private fun applyStopTelemetry(telemetry: ScanStopTelemetry): Boolean {
+        nativeScanActive = telemetry.active
+        lastScanErrorCode = telemetry.errorCode
+        return telemetry.success
     }
 
     fun startBleScan(
@@ -102,34 +148,63 @@ object NativeBleManager {
 
     fun stopBleScan(context: Context): Boolean {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
-            return false
+            return applyStopTelemetry(
+                ScanStopTelemetry(
+                    success = false,
+                    active = false,
+                    errorCode = "SDK_UNSUPPORTED"
+                )
+            )
         }
 
         val bluetoothAdapter = getBluetoothAdapter(context)
-        val scanner = bluetoothAdapter?.bluetoothLeScanner ?: return false
+        if (bluetoothAdapter == null) {
+            Log.i(TAG, "Bluetooth adapter unavailable; scan marked inactive")
+            return applyStopTelemetry(stopTelemetryForUnavailable("BLUETOOTH_UNAVAILABLE"))
+        }
+
+        if (!bluetoothAdapter.isEnabled) {
+            Log.i(TAG, "Bluetooth disabled; scan marked inactive")
+            return applyStopTelemetry(stopTelemetryForUnavailable("BLUETOOTH_DISABLED"))
+        }
+
+        val scanner = bluetoothAdapter.bluetoothLeScanner
+        if (scanner == null) {
+            Log.i(TAG, "BLE scanner unavailable; scan marked inactive")
+            return applyStopTelemetry(stopTelemetryForUnavailable("SCANNER_UNAVAILABLE"))
+        }
 
         return try {
             scanner.stopScan(buildScanPendingIntent(context))
-            nativeScanActive = false
             Log.i(TAG, "BLE scan stopped")
-            true
+            applyStopTelemetry(stopTelemetryForStopAttempt(success = true))
         } catch (e: Exception) {
             Log.e(TAG, "Error stopping scan: ${e.message}", e)
-            lastScanErrorCode = e.javaClass.simpleName
-            false
+            applyStopTelemetry(
+                stopTelemetryForStopAttempt(
+                    success = false,
+                    exceptionName = e.javaClass.simpleName
+                )
+            )
         }
     }
 
     fun statusMap(context: Context): Map<String, Any?> {
         val adapter = getBluetoothAdapter(context)
-        return mapOf(
-            "nativeScanActive" to nativeScanActive,
-            "lastScanErrorCode" to lastScanErrorCode,
-            "bluetoothEnabled" to (adapter?.isEnabled == true),
-            "bleSupported" to context.packageManager.hasSystemFeature(
+        val bluetoothEnabled = adapter?.isEnabled == true
+        val scannerAvailable = if (bluetoothEnabled) {
+            adapter?.bluetoothLeScanner != null
+        } else {
+            false
+        }
+        return scanStatusMapForTest(
+            rawNativeScanActive = nativeScanActive,
+            rawLastScanErrorCode = lastScanErrorCode,
+            bluetoothEnabled = bluetoothEnabled,
+            bleSupported = context.packageManager.hasSystemFeature(
                 android.content.pm.PackageManager.FEATURE_BLUETOOTH_LE
             ),
-            "scannerAvailable" to (adapter?.bluetoothLeScanner != null)
+            scannerAvailable = scannerAvailable
         )
     }
 

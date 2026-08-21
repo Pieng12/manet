@@ -312,14 +312,16 @@ class MeshBackgroundService : Service() {
                     }
                     "isNativeBleAdvertising" -> {
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                            result.success(NativeBleAdvertiser.isCurrentlyAdvertising())
+                            result.success(
+                                NativeBleAdvertiser.isCurrentlyAdvertising(this)
+                            )
                         } else {
                             result.success(false)
                         }
                     }
                     "getNativeBleAdvertisingStatus" -> {
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                            result.success(NativeBleAdvertiser.statusMap())
+                            result.success(NativeBleAdvertiser.statusMap(this))
                         } else {
                             result.success(
                                 mapOf(
@@ -571,21 +573,25 @@ class MeshBackgroundService : Service() {
         val adapter = bluetoothManager.adapter
         val scanStatus = NativeBleManager.statusMap(this)
         val advertiseStatus = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-            NativeBleAdvertiser.statusMap()
+            NativeBleAdvertiser.statusMap(this)
         } else {
             mapOf("status" to "unsupported", "active" to false, "errorCode" to "SDK_UNSUPPORTED")
         }
+        val bluetoothEnabled = adapter?.isEnabled == true
         return mapOf(
             "sdkInt" to Build.VERSION.SDK_INT,
             "androidRelease" to Build.VERSION.RELEASE,
             "deviceManufacturer" to Build.MANUFACTURER,
             "deviceModel" to Build.MODEL,
-            "bluetoothEnabled" to (adapter?.isEnabled == true),
+            "bluetoothEnabled" to bluetoothEnabled,
             "bleSupported" to packageManager.hasSystemFeature(
                 android.content.pm.PackageManager.FEATURE_BLUETOOTH_LE
             ),
             "scannerAvailable" to scanStatus["scannerAvailable"],
-            "advertiserAvailable" to (adapter?.bluetoothLeAdvertiser != null),
+            "advertiserAvailable" to (
+                bluetoothEnabled &&
+                    adapter?.bluetoothLeAdvertiser != null
+                ),
             "multipleAdvertisementSupported" to (adapter?.isMultipleAdvertisementSupported == true),
             "scanPermission" to NativeBlePermissions.hasScanPermission(this),
             "advertisePermission" to NativeBlePermissions.hasAdvertisePermission(this),
