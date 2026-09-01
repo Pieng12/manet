@@ -8,6 +8,7 @@ typedef BleInboxProcessor =
       int? receivedElapsedRealtimeMs,
       String? deviceAddress,
       String? observationId,
+      String? observerKey,
     });
 typedef BleInboxItemHandler = Future<void> Function(String id);
 
@@ -31,6 +32,7 @@ class NativeBleInboxDrainService {
       );
       final deviceAddress = item['device_address'] as String?;
       final observationId = item['observation_id'] as String? ?? id;
+      final observerKey = item['observer_key'] as String?;
       if (id == null || payloadBase64 == null || payloadBase64.isEmpty) {
         continue;
       }
@@ -44,6 +46,7 @@ class NativeBleInboxDrainService {
           receivedElapsedRealtimeMs: receivedElapsedRealtimeMs,
           deviceAddress: deviceAddress,
           observationId: observationId,
+          observerKey: observerKey,
         );
       } catch (_) {
         result = BleProcessingResult.failedRetryable;

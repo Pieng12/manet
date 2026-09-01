@@ -26,6 +26,7 @@ enum class NativeBleInboxStoreStatus {
 data class NativeBleInboxStoreResult(
     val id: String,
     val observationId: String,
+    val observerKey: String,
     val status: NativeBleInboxStoreStatus,
     val shouldScheduleWorker: Boolean
 )
@@ -192,6 +193,7 @@ object NativeBleInbox {
                     NativeBleInboxStoreResult(
                         id = item.getString("id"),
                         observationId = observationId,
+                        observerKey = observerKey,
                         status = NativeBleInboxStoreStatus.KNOWN_PROCESSED_DUPLICATE,
                         shouldScheduleWorker = false
                     )
@@ -203,6 +205,7 @@ object NativeBleInbox {
                 NativeBleInboxStoreResult(
                     id = item.getString("id"),
                     observationId = observationId,
+                    observerKey = observerKey,
                     status = NativeBleInboxStoreStatus.EXISTING_PENDING,
                     shouldScheduleWorker = true
                 )
@@ -242,6 +245,7 @@ object NativeBleInbox {
             NativeBleInboxStoreResult(
                 id = id,
                 observationId = observationId,
+                observerKey = observerKey,
                 status = NativeBleInboxStoreStatus.NEW_PENDING,
                 shouldScheduleWorker = true
             )

@@ -173,6 +173,7 @@ class BleRelayService {
     int? receivedElapsedRealtimeMs,
     String? deviceAddress,
     String? observationId,
+    String? observerKey,
   }) async {
     try {
       final payload = base64Decode(payloadBase64);
@@ -183,6 +184,7 @@ class BleRelayService {
         receivedElapsedRealtimeMs: receivedElapsedRealtimeMs,
         deviceAddress: deviceAddress,
         observationId: observationId,
+        observerKey: observerKey,
       );
     } on FormatException catch (e) {
       _log('Invalid BLE payload: $e');
@@ -197,6 +199,7 @@ class BleRelayService {
     int? receivedElapsedRealtimeMs,
     String? deviceAddress,
     String? observationId,
+    String? observerKey,
   }) async {
     final packet = BlePacket.unpack(payload);
     if (packet == null) {
@@ -205,7 +208,16 @@ class BleRelayService {
     }
 
     _log('Received BLE payload ${_hex(payload)} -> ${_describePacket(packet)}');
-    final rxAtMs = receivedAtMs ?? DateTime.now().millisecondsSinceEpoch;
+    final processingNowMs = DateTime.now().millisecondsSinceEpoch;
+    final rxAtMs = effectiveObservationTime(
+      receivedAtMs: receivedAtMs,
+      processingNowMs: processingNowMs,
+    );
+    final effectiveObserverKey = _trickleObserverKey(
+      packet,
+      deviceAddress,
+      observerKey: observerKey,
+    );
     await _experimentLogger.logEvent(
       eventType: ExperimentEventTypes.blePacketReceived,
       deviceId: SyncService().deviceId,
@@ -225,8 +237,9 @@ class BleRelayService {
         'from_server': packet.fromServer,
         if (observationId?.trim().isNotEmpty == true)
           'observation_id': observationId!.trim(),
-        if (deviceAddress?.trim().isNotEmpty == true)
-          'observer_key': _trickleObserverKey(packet, deviceAddress),
+        'observer_key': effectiveObserverKey,
+        if (receivedAtMs != null && receivedAtMs != rxAtMs)
+          'receive_time_fallback_reason': 'invalid_or_future_received_at',
       },
     );
 
@@ -246,6 +259,7 @@ class BleRelayService {
           receivedElapsedRealtimeMs: receivedElapsedRealtimeMs,
           deviceAddress: deviceAddress,
           observationId: observationId,
+          observerKey: observerKey,
         );
       }
     } catch (e) {
@@ -472,9 +486,13 @@ class BleRelayService {
     int? receivedElapsedRealtimeMs,
     String? deviceAddress,
     String? observationId,
+    String? observerKey,
   }) async {
     final now = DateTime.now().millisecondsSinceEpoch;
-    final rxAtMs = receivedAtMs ?? now;
+    final rxAtMs = effectiveObservationTime(
+      receivedAtMs: receivedAtMs,
+      processingNowMs: now,
+    );
     final suppressedByAck = await _dbHelper.isSuppressedByAckTombstone(
       senderCrc: packet.senderCrc,
       sosTimestampMs: packet.timestampMs,
@@ -520,7 +538,9 @@ class BleRelayService {
           packet: packet,
           deviceAddress: deviceAddress,
           observationId: observationId,
+          observerKey: observerKey,
           nowMs: rxAtMs,
+          processedAtMs: now,
           rssi: rssi,
           receivedAtMs: rxAtMs,
           receivedElapsedRealtimeMs: receivedElapsedRealtimeMs,
@@ -540,6 +560,10 @@ class BleRelayService {
           detail: {
             if (MeshConfig.forwardingMode == ForwardingMode.trickle)
               'trickle_observation_recorded': observed,
+            if (MeshConfig.forwardingMode == ForwardingMode.trickle &&
+                !observed)
+              'trickle_observation_ignored_reason':
+                  'duplicate_or_delayed_old_interval_observation',
           },
         );
       } else if (decision.reason == ForwardingDecisionReason.dropStale) {
@@ -654,6 +678,7 @@ class BleRelayService {
         receivedElapsedRealtimeMs: receivedElapsedRealtimeMs,
         deviceAddress: deviceAddress,
         observationId: observationId,
+        observerKey: observerKey,
         logInconsistentHeard: storeResult.trickleInconsistentHeard,
         resetPerformed: storeResult.trickleResetPerformed,
       );
@@ -778,22 +803,29 @@ class BleRelayService {
     required int nowMs,
     String? deviceAddress,
     String? observationId,
+    String? observerKey,
     int? rssi,
     int? receivedAtMs,
     int? receivedElapsedRealtimeMs,
+    int? processedAtMs,
   }) async {
     if (MeshConfig.forwardingMode != ForwardingMode.trickle) return false;
-    final observerKey = _trickleObserverKey(packet, deviceAddress);
+    final effectiveObserverKey = _trickleObserverKey(
+      packet,
+      deviceAddress,
+      observerKey: observerKey,
+    );
     final effectiveObservationId = observationId?.trim().isNotEmpty == true
         ? observationId!.trim()
-        : '${packet.identity}|$observerKey|${receivedElapsedRealtimeMs ?? receivedAtMs ?? nowMs}';
+        : '${packet.identity}|$effectiveObserverKey|${receivedAtMs ?? nowMs}';
     final recorded = await _relayQueue.recordConsistentSosObservation(
       messageId: existing.id,
       observationId: effectiveObservationId,
-      observerKey: observerKey,
+      observerKey: effectiveObserverKey,
       nowMs: nowMs,
     );
     if (recorded) {
+      final state = await _relayQueue.trickleStateFor(existing.id);
       await _experimentLogger.logEvent(
         eventType: ExperimentEventTypes.trickleConsistentHeard,
         deviceId: SyncService().deviceId,
@@ -810,7 +842,20 @@ class BleRelayService {
         status: packet.status.name,
         detail: {
           'observation_id': effectiveObservationId,
-          'observer_key': observerKey,
+          'observer_key': effectiveObserverKey,
+          'received_at': receivedAtMs,
+          if (processedAtMs != null) 'processed_at': processedAtMs,
+          if (processedAtMs != null && receivedAtMs != null)
+            'processing_delay_ms': processedAtMs - receivedAtMs,
+          'Imin': MeshConfig.trickleImin.inMilliseconds,
+          'Imax': MeshConfig.trickleImax.inMilliseconds,
+          'k': MeshConfig.trickleRedundancyConstant,
+          if (state != null) 'I': state.intervalMs,
+          if (state != null) 'c': state.consistencyCount,
+          if (state != null) 'transmit_at': state.transmitAt,
+          if (state != null) 'interval_started_at': state.intervalStartedAt,
+          if (state != null) 'interval_end_at': state.intervalEndAt,
+          if (state != null) 'phase': state.phase,
           'logical_identity':
               '${packet.senderCrc}|${packet.timestampMs}|${packet.status.name}',
         },
@@ -831,6 +876,7 @@ class BleRelayService {
     int? receivedElapsedRealtimeMs,
     String? deviceAddress,
     String? observationId,
+    String? observerKey,
   }) async {
     if (MeshConfig.forwardingMode != ForwardingMode.trickle) return;
     final state = await _relayQueue.trickleStateFor(message.id);
@@ -851,7 +897,11 @@ class BleRelayService {
       if (observationId?.trim().isNotEmpty == true)
         'observation_id': observationId!.trim(),
       if (packet != null)
-        'observer_key': _trickleObserverKey(packet, deviceAddress),
+        'observer_key': _trickleObserverKey(
+          packet,
+          deviceAddress,
+          observerKey: observerKey,
+        ),
     };
     if (logInconsistentHeard) {
       await _experimentLogger.logEvent(
@@ -895,7 +945,15 @@ class BleRelayService {
     );
   }
 
-  String _trickleObserverKey(BlePacket packet, String? deviceAddress) {
+  String _trickleObserverKey(
+    BlePacket packet,
+    String? deviceAddress, {
+    String? observerKey,
+  }) {
+    final nativeObserverKey = observerKey?.trim();
+    if (nativeObserverKey != null && nativeObserverKey.isNotEmpty) {
+      return nativeObserverKey;
+    }
     final normalized = deviceAddress?.trim();
     if (normalized != null &&
         normalized.isNotEmpty &&
@@ -903,6 +961,18 @@ class BleRelayService {
       return 'ble:$normalized';
     }
     return 'unknown:${packet.senderCrc}:${packet.timestampMs}:${packet.status.name}';
+  }
+
+  static int effectiveObservationTime({
+    required int? receivedAtMs,
+    required int processingNowMs,
+    Duration maxFutureSkew = const Duration(minutes: 5),
+  }) {
+    if (receivedAtMs == null || receivedAtMs <= 0) return processingNowMs;
+    if (receivedAtMs > processingNowMs + maxFutureSkew.inMilliseconds) {
+      return processingNowMs;
+    }
+    return receivedAtMs;
   }
 
   Future<void> _tryGatewaySync() async {

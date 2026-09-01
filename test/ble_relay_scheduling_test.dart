@@ -167,4 +167,45 @@ void main() {
 
     expect(incoming.hopCount, MeshConfig.maxProtocolHop);
   });
+
+  test('effective observation time validates native receive timestamp', () {
+    const processingNow = 100000;
+
+    expect(
+      BleRelayService.effectiveObservationTime(
+        receivedAtMs: 90000,
+        processingNowMs: processingNow,
+      ),
+      90000,
+    );
+    expect(
+      BleRelayService.effectiveObservationTime(
+        receivedAtMs: null,
+        processingNowMs: processingNow,
+      ),
+      processingNow,
+    );
+    expect(
+      BleRelayService.effectiveObservationTime(
+        receivedAtMs: 0,
+        processingNowMs: processingNow,
+      ),
+      processingNow,
+    );
+    expect(
+      BleRelayService.effectiveObservationTime(
+        receivedAtMs: -1,
+        processingNowMs: processingNow,
+      ),
+      processingNow,
+    );
+    expect(
+      BleRelayService.effectiveObservationTime(
+        receivedAtMs:
+            processingNow + const Duration(hours: 1).inMilliseconds,
+        processingNowMs: processingNow,
+      ),
+      processingNow,
+    );
+  });
 }

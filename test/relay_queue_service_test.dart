@@ -537,6 +537,106 @@ void main() {
   });
 
   test(
+    'relay queue records observations by native receive time, not processing time',
+    () async {
+      final trickle = RelayQueueService(
+        database: db,
+        random: Random(1),
+        mode: ForwardingMode.trickle,
+      );
+      final sos = message('trickle-receive-time', senderCrc: 4360);
+      await trickle.storeAndQueueSos(message: sos, nextEligibleAt: now);
+      final initial = (await trickle.trickleStateFor(sos.id))!;
+      final item = (await trickle.getItem(sos.id, 'sos'))!;
+
+      await trickle.handleTrickleQueueEvent(
+        item: item,
+        nowMs: initial.intervalEndAt,
+      );
+      final advanced = (await trickle.trickleStateFor(sos.id))!;
+      expect(advanced.intervalStartedAt, initial.intervalEndAt);
+
+      final oldReceive = initial.intervalStartedAt + 4000;
+      expect(
+        await trickle.recordConsistentSosObservation(
+          messageId: sos.id,
+          observationId: 'old-native-obs',
+          observerKey: 'ble:AA',
+          nowMs: oldReceive,
+        ),
+        isFalse,
+      );
+
+      final currentReceive = advanced.intervalStartedAt + 2000;
+      expect(
+        await trickle.recordConsistentSosObservation(
+          messageId: sos.id,
+          observationId: 'current-native-obs',
+          observerKey: 'ble:AA',
+          nowMs: currentReceive,
+        ),
+        isTrue,
+      );
+      expect(
+        await trickle.recordConsistentSosObservation(
+          messageId: sos.id,
+          observationId: 'current-native-obs',
+          observerKey: 'ble:AA',
+          nowMs: currentReceive + 1,
+        ),
+        isFalse,
+      );
+
+      final state = await trickle.trickleStateFor(sos.id);
+      final observations = await db.query('trickle_observations');
+      expect(state!.consistencyCount, 1);
+      expect(observations, hasLength(1));
+      expect(observations.single['observation_id'], 'current-native-obs');
+    },
+  );
+
+  test(
+    'same native observation through direct and inbox paths increments c once',
+    () async {
+      final trickle = RelayQueueService(
+        database: db,
+        random: Random(1),
+        mode: ForwardingMode.trickle,
+      );
+      final sos = message('trickle-direct-inbox', senderCrc: 4361);
+      await trickle.storeAndQueueSos(message: sos, nextEligibleAt: now);
+
+      for (final source in ['direct', 'inbox']) {
+        final recorded = await trickle.recordConsistentSosObservation(
+          messageId: sos.id,
+          observationId: 'obs-123',
+          observerKey: 'ble:AA:BB',
+          nowMs: now + (source == 'direct' ? 100 : 200),
+        );
+        expect(recorded, source == 'direct');
+      }
+
+      var state = await trickle.trickleStateFor(sos.id);
+      expect(state!.consistencyCount, 1);
+
+      final reverse = message('trickle-inbox-direct', senderCrc: 4362);
+      await trickle.storeAndQueueSos(message: reverse, nextEligibleAt: now);
+      for (final source in ['inbox', 'direct']) {
+        final recorded = await trickle.recordConsistentSosObservation(
+          messageId: reverse.id,
+          observationId: 'obs-456',
+          observerKey: 'ble:CC:DD',
+          nowMs: now + (source == 'inbox' ? 300 : 400),
+        );
+        expect(recorded, source == 'inbox');
+      }
+
+      state = await trickle.trickleStateFor(reverse.id);
+      expect(state!.consistencyCount, 1);
+    },
+  );
+
+  test(
     'trickle interval end doubles I and schedules the next transmit',
     () async {
       final trickle = RelayQueueService(

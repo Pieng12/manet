@@ -145,9 +145,11 @@ successful valid trials
 ```
 
 Jika tidak ada successful valid trial, nilai ditampilkan sebagai `N/A`.
-Ini adalah local-device transmission metric. Ini bukan total network-wide
+Ini adalah local-device transmission metric berbasis event canonical
+`BLE_ADVERTISE_STARTED` dengan `packet_type=sos`. Ini bukan total network-wide
 transmission overhead. Network-wide overhead requires merged peer logs from all
-participating nodes.
+participating nodes. `BLE_RELAY_STARTED` dipakai untuk bukti relay/hop/latency
+dan tidak dijumlahkan lagi sebagai TX kedua.
 
 ## E2E Latency
 
@@ -161,7 +163,8 @@ source_first_advertise_timestamp
 ```
 
 `source_first_advertise_timestamp` berasal dari successful SOS TX start
-(`BLE_ADVERTISE_STARTED`/`BLE_RELAY_STARTED`), bukan dari `SOS_CREATED`.
+canonical `BLE_ADVERTISE_STARTED` dengan `packet_type=sos`, bukan dari
+`SOS_CREATED`.
 Jika bukti peer tidak ada, Research Monitor menampilkan `Requires peer log`.
 Jangan menghitung E2E dari clock device yang tidak disinkronkan.
 
@@ -219,6 +222,13 @@ Jika `device_address` tidak tersedia, native memakai fallback
 `unknown:<burstStartedAt>` sebagai discriminator berbasis burst. Tanpa alamat
 BLE yang usable, dua transmitter fisik berbeda dengan payload sama dalam bucket
 burst yang sama tidak selalu bisa dibedakan reliabel.
+
+Untuk Trickle consistency count, interval membership memakai `received_at`
+wall-clock dari native BLE receive. Jika `received_at` null, nol/negatif, atau
+jauh di masa depan terhadap waktu processing, Dart memakai waktu processing
+sebagai fallback dan mencatat alasan fallback pada detail event receive.
+`received_elapsed_realtime_ms` tetap hanya untuk latency diagnostik pada device
+yang sama.
 
 Event audit Trickle yang harus dipakai:
 

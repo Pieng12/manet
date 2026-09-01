@@ -124,9 +124,11 @@ Hitung metrik dari event export:
   `GATEWAY_UPLOAD_STARTED.timestamp_ms`.
 - Logical duplicate ratio: jumlah `BLE_PACKET_DUPLICATE` dibagi
   `BLE_PACKET_ACCEPTED + BLE_PACKET_DUPLICATE`.
-- Forwarding overhead network-wide: jumlah successful SOS TX starts dari
-  `BLE_ADVERTISE_STARTED`/`BLE_RELAY_STARTED` di log gabungan semua node dibagi
-  pesan logical SOS yang delivered. `BLE_ADVERTISE_REQUESTED` dan
+- Forwarding overhead network-wide: jumlah successful SOS radio TX starts dari
+  event canonical `BLE_ADVERTISE_STARTED` dengan `packet_type=sos` di log
+  gabungan semua node dibagi pesan logical SOS yang delivered.
+  `BLE_RELAY_STARTED` dipakai untuk bukti relay/hop/latency dan tidak
+  dijumlahkan lagi sebagai TX kedua. `BLE_ADVERTISE_REQUESTED` dan
   `TRICKLE_TX_SUPPRESSED` bukan TX sukses.
 
 Timestamp lintas perangkat bergantung pada sinkronisasi clock. Untuk durasi
@@ -146,6 +148,11 @@ memakai interval `[Imin, Imax]`, consistency counter `k`, waktu transmit acak
 sekali per `observation_id`; raw BLE repeat dalam burst yang sama tidak
 menambah `c`, tetapi burst independen berikutnya dari observer yang sama dapat
 menjadi observation baru.
+Membership interval Trickle memakai `received_at` wall-clock dari native BLE
+receive. Waktu drain/processing Dart hanya dipakai sebagai fallback jika metadata
+receive null, nol/negatif, atau jauh di masa depan. Jangan membandingkan
+`received_elapsed_realtime_ms` dengan interval SQLite karena clock domain-nya
+berbeda.
 
 ## Catatan P5 untuk Uji Perangkat Fisik
 

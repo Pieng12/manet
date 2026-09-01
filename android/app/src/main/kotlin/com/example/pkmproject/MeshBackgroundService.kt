@@ -131,6 +131,7 @@ class MeshBackgroundService : Service() {
                     val payloadBase64 = intent.getStringExtra("payload")
                     val inboxId = intent.getStringExtra("inbox_id")
                     val observationId = intent.getStringExtra("observation_id")
+                    val observerKey = intent.getStringExtra("observer_key")
                     val deviceAddress = intent.getStringExtra("device_address")
                     val rssi = intent.getIntExtra("rssi", 0)
                     val receivedAt = intent.getLongExtra("received_at", 0L)
@@ -142,6 +143,7 @@ class MeshBackgroundService : Service() {
                         rssi,
                         inboxId = inboxId,
                         observationId = observationId,
+                        observerKey = observerKey,
                         receivedAt = receivedAt,
                         receivedElapsedRealtimeMs = receivedElapsedRealtimeMs
                     )
@@ -440,6 +442,7 @@ class MeshBackgroundService : Service() {
         retryCount: Int = 0,
         inboxId: String? = null,
         observationId: String? = null,
+        observerKey: String? = null,
         receivedAt: Long = 0L,
         receivedElapsedRealtimeMs: Long = 0L
     ) {
@@ -451,6 +454,7 @@ class MeshBackgroundService : Service() {
             retryCount,
             inboxId,
             observationId,
+            observerKey,
             receivedAt,
             receivedElapsedRealtimeMs
         )
@@ -464,6 +468,7 @@ class MeshBackgroundService : Service() {
         retryCount: Int = 0,
         inboxId: String? = null,
         observationId: String? = null,
+        observerKey: String? = null,
         receivedAt: Long = 0L,
         receivedElapsedRealtimeMs: Long = 0L
     ) {
@@ -486,6 +491,7 @@ class MeshBackgroundService : Service() {
                         retryCount + 1,
                         inboxId,
                         observationId,
+                        observerKey,
                         receivedAt,
                         receivedElapsedRealtimeMs
                     )
@@ -508,6 +514,7 @@ class MeshBackgroundService : Service() {
                     "payload" to payloadBase64,
                     "inbox_id" to (inboxId ?: ""),
                     "observation_id" to (observationId ?: inboxId ?: ""),
+                    "observer_key" to (observerKey ?: ""),
                     "device_address" to (deviceAddress ?: ""),
                     "rssi" to rssi,
                     "received_at" to receivedAt.takeIf { it > 0L },

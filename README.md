@@ -68,6 +68,9 @@ untuk consistency count Trickle. Alamat BLE dipakai hanya sebagai metadata
 sementara dari Android scanner, bukan identitas node permanen. Better-hop tidak
 hilang di native dedupe karena perubahan hop mengubah raw payload 17 byte dan
 hash payload observasi.
+Interval membership Trickle memakai `received_at` wall-clock dari native BLE
+receive; waktu processing Dart hanya fallback untuk metadata receive yang null,
+nol/negatif, atau future-corrupt.
 
 Scheduler BLE dimiliki oleh background Dart isolate. UI isolate hanya mengirim
 command dan membaca state. Saat queue belum eligible, `RelayQueueService`

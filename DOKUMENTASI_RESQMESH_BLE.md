@@ -105,6 +105,13 @@ burst sehingga tidak collapse permanen. Tanpa alamat BLE, dua transmitter fisik
 berbeda dengan payload sama dalam bucket burst yang sama tidak selalu bisa
 dibedakan reliabel.
 
+`observer_key`, `observation_id`, `received_at`, `received_elapsed_realtime_ms`,
+`device_address`, payload, dan RSSI dipropagasi dari native inbox/direct service
+ke Dart. Untuk membership interval Trickle, Dart memakai `received_at` wall
+clock yang tervalidasi; jika null, nol/negatif, atau jauh di masa depan, Dart
+fallback ke waktu processing lokal. `received_elapsed_realtime_ms` hanya untuk
+diagnostik latency lokal dan tidak dibandingkan dengan interval Trickle SQLite.
+
 ## Format Payload BLE 17 Byte
 
 Semua packet memakai panjang tetap 17 byte.
@@ -331,9 +338,11 @@ Metrik utama:
 - gateway latency;
 - ACK latency;
 - logical duplicate ratio: `duplicates / (accepted + duplicates)`;
-- forwarding overhead network-wide: total successful SOS TX starts
-  (`BLE_ADVERTISE_STARTED`/`BLE_RELAY_STARTED`) dari log gabungan dibagi SOS
-  logical yang delivered. Event suppressed tidak dihitung sebagai TX;
+- forwarding overhead network-wide: total successful SOS radio TX starts dari
+  event canonical `BLE_ADVERTISE_STARTED` dengan `packet_type=sos` pada log
+  gabungan dibagi SOS logical yang delivered. `BLE_RELAY_STARTED` dipakai untuk
+  bukti relay/hop/latency dan tidak dijumlahkan lagi sebagai TX kedua. Event
+  suppressed tidak dihitung sebagai TX;
 - RSSI terhadap keberhasilan penerimaan.
 
 Panduan lengkap ada di

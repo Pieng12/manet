@@ -159,6 +159,7 @@ class BleWakeUpReceiver : BroadcastReceiver() {
             putExtra("payload", payloadBase64)
             putExtra("inbox_id", inboxId)
             putExtra("observation_id", storeResult.observationId)
+            putExtra("observer_key", storeResult.observerKey)
             putExtra("device_address", deviceAddress)
             putExtra("rssi", rssi)
             putExtra("received_at", receivedAt)

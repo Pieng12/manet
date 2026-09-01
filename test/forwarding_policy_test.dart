@@ -19,6 +19,21 @@ void main() {
     expect(MeshConfig.trickleImax.inMilliseconds, MeshConfig.trickleImaxMs);
   });
 
+  test('trickle default interval sequence caps at 256 seconds', () {
+    expect(MeshConfig.trickleIminMs, 8000);
+    expect(MeshConfig.trickleImaxDoublings, 5);
+    expect(MeshConfig.trickleImaxMs, 256000);
+    expect(
+      [
+        for (var i = 0; i <= MeshConfig.trickleImaxDoublings + 2; i++)
+          MeshConfig.trickleIminMs * (1 << i) > MeshConfig.trickleImaxMs
+              ? MeshConfig.trickleImaxMs
+              : MeshConfig.trickleIminMs * (1 << i),
+      ],
+      [8000, 16000, 32000, 64000, 128000, 256000, 256000, 256000],
+    );
+  });
+
   BlePacket sosPacket({
     int? timestampMs,
     int hopCount = 0,

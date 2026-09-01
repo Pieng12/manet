@@ -29,6 +29,7 @@ void main() {
             receivedElapsedRealtimeMs,
             deviceAddress,
             observationId,
+            observerKey,
           }) async => results.removeAt(0),
       acknowledge: (id) async => acknowledged.add(id),
       fail: (id) async => failed.add(id),
@@ -55,6 +56,7 @@ void main() {
             receivedElapsedRealtimeMs,
             deviceAddress,
             observationId,
+            observerKey,
           }) async => BleProcessingResult.failedRetryable,
       acknowledge: (id) async => acknowledged.add(id),
       fail: (id) async => failed.add(id),
@@ -81,6 +83,7 @@ void main() {
             receivedElapsedRealtimeMs,
             deviceAddress,
             observationId,
+            observerKey,
           }) async {
             throw StateError('sqlite locked');
           },
@@ -97,6 +100,7 @@ void main() {
     int? receivedAt;
     int? elapsedAt;
     String? seenObservationId;
+    String? seenObserverKey;
 
     final completed = await service.drain(
       items: [
@@ -107,6 +111,7 @@ void main() {
           'received_at': 123456,
           'received_elapsed_realtime_ms': 654321,
           'observation_id': 'obs-123',
+          'observer_key': 'ble:AA:BB',
         },
       ],
       process:
@@ -117,10 +122,12 @@ void main() {
             receivedElapsedRealtimeMs,
             deviceAddress,
             observationId,
+            observerKey,
           }) async {
             receivedAt = receivedAtMs;
             elapsedAt = receivedElapsedRealtimeMs;
             seenObservationId = observationId;
+            seenObserverKey = observerKey;
             return BleProcessingResult.accepted;
           },
       acknowledge: (_) async {},
@@ -131,5 +138,6 @@ void main() {
     expect(receivedAt, 123456);
     expect(elapsedAt, 654321);
     expect(seenObservationId, 'obs-123');
+    expect(seenObserverKey, 'ble:AA:BB');
   });
 }

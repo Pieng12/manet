@@ -99,4 +99,22 @@ void main() {
       );
     },
   );
+
+  test('native observer metadata is propagated into Trickle consistency logs', () {
+    final inboxDrain = read('lib/services/native_ble_inbox_drain_service.dart');
+    final main = read('lib/main.dart');
+    final relay = read('lib/services/ble_relay_service.dart');
+    final nativeService = read(
+      'android/app/src/main/kotlin/com/example/pkmproject/MeshBackgroundService.kt',
+    );
+
+    expect(inboxDrain, contains("item['observer_key']"));
+    expect(inboxDrain, contains('observerKey: observerKey'));
+    expect(main, contains("args['observer_key']"));
+    expect(main, contains('observerKey: observerKey'));
+    expect(nativeService, contains('"observer_key" to (observerKey ?: "")'));
+    expect(relay, contains('observerKey: observerKey'));
+    expect(relay, contains("'observer_key': effectiveObserverKey"));
+    expect(relay, contains('nativeObserverKey'));
+  });
 }
