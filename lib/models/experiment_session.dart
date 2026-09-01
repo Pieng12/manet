@@ -23,6 +23,11 @@ class ExperimentSession {
   final int? androidSdk;
   final String? appVersionCode;
   final String? buildId;
+  final int? trickleIminMs;
+  final int? trickleImaxMs;
+  final int? trickleImaxDoublings;
+  final int? trickleK;
+  final int? sosAdvertiseBurstMs;
 
   const ExperimentSession({
     required this.sessionId,
@@ -49,6 +54,11 @@ class ExperimentSession {
     this.androidSdk,
     this.appVersionCode,
     this.buildId,
+    this.trickleIminMs,
+    this.trickleImaxMs,
+    this.trickleImaxDoublings,
+    this.trickleK,
+    this.sosAdvertiseBurstMs,
   });
 
   Map<String, dynamic> toDbMap() {
@@ -77,6 +87,11 @@ class ExperimentSession {
       'android_sdk': androidSdk,
       'app_version_code': appVersionCode,
       'build_id': buildId,
+      'trickle_imin_ms': trickleIminMs,
+      'trickle_imax_ms': trickleImaxMs,
+      'trickle_imax_doublings': trickleImaxDoublings,
+      'trickle_k': trickleK,
+      'sos_advertise_burst_ms': sosAdvertiseBurstMs,
     };
   }
 
@@ -106,6 +121,11 @@ class ExperimentSession {
       androidSdk: map['android_sdk'] as int?,
       appVersionCode: map['app_version_code']?.toString(),
       buildId: map['build_id'] as String?,
+      trickleIminMs: map['trickle_imin_ms'] as int?,
+      trickleImaxMs: map['trickle_imax_ms'] as int?,
+      trickleImaxDoublings: map['trickle_imax_doublings'] as int?,
+      trickleK: map['trickle_k'] as int?,
+      sosAdvertiseBurstMs: map['sos_advertise_burst_ms'] as int?,
     );
   }
 }

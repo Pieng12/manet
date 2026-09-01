@@ -10,7 +10,6 @@ void main() {
     () {
       final source = read('lib/screen/research_monitor_screen.dart');
 
-      expect(source, isNot(contains("values: const ['controlled_epidemic'")));
       expect(source, contains('MeshConfig.forwardingMode.logValue'));
     },
   );

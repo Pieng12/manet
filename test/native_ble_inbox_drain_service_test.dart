@@ -27,6 +27,7 @@ void main() {
             rssi,
             receivedAtMs,
             receivedElapsedRealtimeMs,
+            deviceAddress,
           }) async => results.removeAt(0),
       acknowledge: (id) async => acknowledged.add(id),
       fail: (id) async => failed.add(id),
@@ -51,6 +52,7 @@ void main() {
             rssi,
             receivedAtMs,
             receivedElapsedRealtimeMs,
+            deviceAddress,
           }) async => BleProcessingResult.failedRetryable,
       acknowledge: (id) async => acknowledged.add(id),
       fail: (id) async => failed.add(id),
@@ -75,6 +77,7 @@ void main() {
             rssi,
             receivedAtMs,
             receivedElapsedRealtimeMs,
+            deviceAddress,
           }) async {
             throw StateError('sqlite locked');
           },
@@ -107,6 +110,7 @@ void main() {
             rssi,
             receivedAtMs,
             receivedElapsedRealtimeMs,
+            deviceAddress,
           }) async {
             receivedAt = receivedAtMs;
             elapsedAt = receivedElapsedRealtimeMs;

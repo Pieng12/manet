@@ -21,7 +21,7 @@ Konfigurasi runtime utama berada di `lib/config/mesh_config.dart`.
 | --- | --- | --- |
 | `RESQMESH_MODE` | `offline` | Mode aplikasi: `offline` atau `gateway`. |
 | `RESQMESH_API_BASE_URL` | backend default | Base URL API saat mode gateway. |
-| `RESQMESH_FORWARDING_MODE` | `controlled_epidemic` | `controlled_epidemic` atau `basic`. |
+| `RESQMESH_FORWARDING_MODE` | `trickle` | `trickle` atau `basic`. |
 | `protocolLength` | `17` | Panjang payload BLE. |
 | `manufacturerId` | `0xFFFF` | Manufacturer ID penelitian internal. |
 | `legacyHopMetadata` | `5` | Nilai legacy/metadata, bukan cutoff relay aktif. |
@@ -29,9 +29,10 @@ Konfigurasi runtime utama berada di `lib/config/mesh_config.dart`.
 | `defaultMessageLifetime` | `6 jam` | Nilai legacy/metadata, bukan cutoff SOS aktif. |
 | `ackLifetime` | `2 menit` | Nilai legacy/metadata, bukan TTL ACK aktif. |
 | `basicFloodingInterval` | `2 detik` | Interval tetap basic flooding sebelum jitter. |
-| `basicFloodingSlotDuration` | `2 detik` | Durasi slot advertising aktual untuk basic flooding. |
-| `adaptiveBackoffBase` | `10 detik` | Backoff awal setelah relay sukses. |
-| `adaptiveBackoffMax` | `5 menit` | Batas atas adaptive backoff. |
+| `sosAdvertiseBurstDuration` | `2 detik` | Durasi satu burst advertising SOS untuk basic dan Trickle. |
+| `trickleImin` | `8 detik` | Interval minimum Trickle untuk SOS. |
+| `trickleImaxDoublings` | `5` | Jumlah doubling dari `Imin` sampai `Imax`. |
+| `trickleRedundancyConstant` | `1` | Nilai `k`; suppress TX jika consistency count sudah mencapai batas. |
 | `scanAllAdvertisements` | `false` | Scanner default hanya manufacturer filter. |
 | `connectableAdvertising` | `false` | Advertising default non-connectable. |
 
@@ -156,18 +157,17 @@ relay count. SOS tetap berada di queue sampai ACK server diterima, state yang
 lebih baru menggantikannya, atau dilakukan administrative deletion.
 
 Perbedaan mode diterapkan di `RelayQueueService`, yaitu scheduler yang memilih
-packet berikutnya dari persistent queue. Controlled persistent epidemic
-forwarding default memakai:
+packet berikutnya dari persistent queue. Mode `trickle` default memakai:
 
 - dedup berbasis identity packet;
 - fairness antar SOS;
-- adaptive backoff;
-- cooldown;
+- interval Trickle `[Imin, Imax]`;
+- consistency counter dan suppression;
 - jitter;
 - relay count sebagai metrik saja.
 
 Basic flooding disediakan sebagai pembanding eksperimen dan memakai interval
-tetap pendek plus jitter, bukan adaptive exponential backoff.
+tetap pendek plus jitter, tanpa Trickle suppression.
 ACK tetap prioritas tinggi, tetapi scheduler membatasi slot ACK beruntun agar
 SOS eligible mendapat giliran setelah batas fairness.
 
@@ -340,9 +340,9 @@ flutter test
 flutter build apk --debug
 ```
 
-Unit test mencakup protocol pack/unpack, hop saturasi, persistent SOS,
-adaptive backoff, forwarding policy, relay queue, ACK anti-message, gateway
-contract, dan experiment logger.
+Unit test mencakup protocol pack/unpack, hop saturasi, persistent SOS, Trickle
+scheduler, forwarding policy, relay queue, ACK anti-message, gateway contract,
+dan experiment logger.
 
 ## Kompatibilitas dan Limitasi
 

@@ -7,6 +7,7 @@ import 'package:pkmproject/database_schema.dart';
 import 'package:pkmproject/models/ack_apply_result.dart';
 import 'package:pkmproject/models/forwarding_decision.dart';
 import 'package:pkmproject/models/sos_message.dart';
+import 'package:pkmproject/models/trickle_state.dart';
 import 'package:pkmproject/services/ble_relay_service.dart';
 import 'package:pkmproject/services/ble_protocol.dart';
 import 'package:pkmproject/services/database_helper.dart';
@@ -26,7 +27,13 @@ void main() {
     await db.execute(createSosMessagesTableSql);
     await db.execute(createRelayQueueTableSql);
     await db.execute(createAckTombstonesTableSql);
-    queue = RelayQueueService(database: db, random: Random(1));
+    await db.execute(createTrickleStatesTableSql);
+    await db.execute(createTrickleObservationsTableSql);
+    queue = RelayQueueService(
+      database: db,
+      random: Random(1),
+      mode: ForwardingMode.basicFlooding,
+    );
     now = DateTime.utc(2026, 8, 4, 12).millisecondsSinceEpoch;
   });
 
@@ -85,30 +92,36 @@ void main() {
   });
 
   test(
-    'round robin returns oldest relayed item after adaptive backoff and jitter',
+    'basic flooding returns relayed SOS after fixed interval and jitter',
     () async {
+      final basicQueue = RelayQueueService(
+        database: db,
+        random: Random(1),
+        mode: ForwardingMode.basicFlooding,
+      );
       final messages = [message('a'), message('b'), message('c')];
       for (final item in messages) {
         await insertMessage(item);
-        await queue.enqueueSos(item);
+        await basicQueue.enqueueSos(item, nextEligibleAt: now);
       }
 
-      final first = await queue.nextEligible(now);
-      await queue.markRelayed(first!, nowMs: now);
-      final second = await queue.nextEligible(now);
-      await queue.markRelayed(second!, nowMs: now + 1);
-      final third = await queue.nextEligible(now);
-      await queue.markRelayed(third!, nowMs: now + 2);
+      final first = await basicQueue.nextEligible(now);
+      await basicQueue.markRelayed(first!, nowMs: now);
+      final second = await basicQueue.nextEligible(now);
+      await basicQueue.markRelayed(second!, nowMs: now + 1);
+      final third = await basicQueue.nextEligible(now);
+      await basicQueue.markRelayed(third!, nowMs: now + 2);
 
-      final afterSlot = now + MeshConfig.relaySlotDuration.inMilliseconds;
-      expect(await queue.nextEligible(afterSlot), isNull);
+      final beforeInterval =
+          now + MeshConfig.basicFloodingInterval.inMilliseconds - 1;
+      expect(await basicQueue.nextEligible(beforeInterval), isNull);
 
-      final afterCooldown =
+      final afterInterval =
           now +
-          queue.adaptiveBackoffForRelayCount(1).inMilliseconds +
+          MeshConfig.basicFloodingInterval.inMilliseconds +
           MeshConfig.relayJitterMax.inMilliseconds +
           1;
-      final next = await queue.nextEligible(afterCooldown);
+      final next = await basicQueue.nextEligible(afterInterval);
 
       expect(next, isNotNull);
       expect(next!.messageId, first.messageId);
@@ -139,7 +152,7 @@ void main() {
   });
 
   test(
-    'advertising success increments queue and SOS counters with backoff jitter',
+    'advertising success increments counters and reschedules with jitter',
     () async {
       final sos = message('success');
       await insertMessage(sos);
@@ -166,7 +179,7 @@ void main() {
         queued.nextEligibleAt,
         greaterThanOrEqualTo(
           now +
-              queue.adaptiveBackoffForRelayCount(1).inMilliseconds +
+              MeshConfig.basicFloodingInterval.inMilliseconds +
               MeshConfig.relayJitterMin.inMilliseconds,
         ),
       );
@@ -174,7 +187,7 @@ void main() {
         queued.nextEligibleAt,
         lessThanOrEqualTo(
           now +
-              queue.adaptiveBackoffForRelayCount(1).inMilliseconds +
+              MeshConfig.basicFloodingInterval.inMilliseconds +
               MeshConfig.relayJitterMax.inMilliseconds,
         ),
       );
@@ -202,15 +215,8 @@ void main() {
     expect(stored.relayCount, MeshConfig.relayCountMetricSample);
   });
 
-  test('adaptive backoff increases but never disables message', () async {
-    final first = queue.adaptiveBackoffForRelayCount(0);
-    final later = queue.adaptiveBackoffForRelayCount(4);
-    final capped = queue.adaptiveBackoffForRelayCount(99);
-
-    expect(later, greaterThan(first));
-    expect(capped, MeshConfig.adaptiveBackoffMax);
-
-    final sos = message('backoff')..relayCount = 99;
+  test('relay count never disables persistent SOS scheduling', () async {
+    final sos = message('relay-count-metric')..relayCount = 99;
     await insertMessage(sos);
     await queue.enqueueSos(sos);
     final item = await queue.nextEligible(now);
@@ -391,33 +397,103 @@ void main() {
     expect(next, isNotNull);
   });
 
+  test('basic flooding and trickle produce different SOS schedules', () async {
+    final basic = RelayQueueService(
+      database: db,
+      random: Random(1),
+      mode: ForwardingMode.basicFlooding,
+    );
+    final trickle = RelayQueueService(
+      database: db,
+      random: Random(1),
+      mode: ForwardingMode.trickle,
+    );
+    final basicMessage = message('basic-schedule', senderCrc: 4100);
+    final trickleMessage = message('trickle-schedule', senderCrc: 4200);
+
+    await basic.storeAndQueueSos(message: basicMessage, nextEligibleAt: now);
+    await trickle.storeAndQueueSos(
+      message: trickleMessage,
+      nextEligibleAt: now,
+    );
+    final basicItem = await basic.getItem(basicMessage.id, 'sos');
+    final trickleItem = await trickle.getItem(trickleMessage.id, 'sos');
+
+    expect(basicItem!.nextEligibleAt, now);
+    expect(trickleItem!.nextEligibleAt, isNot(now));
+    expect(
+      trickleItem.nextEligibleAt,
+      inInclusiveRange(
+        now + MeshConfig.trickleImin.inMilliseconds ~/ 2,
+        now + MeshConfig.trickleImin.inMilliseconds - 1,
+      ),
+    );
+  });
+
   test(
-    'basic flooding and controlled epidemic produce different schedules',
-    () {
-      final basic = RelayQueueService(
+    'trickle suppresses queue transmission when consistency reaches k',
+    () async {
+      final trickle = RelayQueueService(
         database: db,
         random: Random(1),
-        mode: ForwardingMode.basicFlooding,
+        mode: ForwardingMode.trickle,
       );
-      final controlled = RelayQueueService(
-        database: db,
-        random: Random(1),
-        mode: ForwardingMode.controlledEpidemic,
-      );
+      final sos = message('trickle-suppress', senderCrc: 4300);
+      await trickle.storeAndQueueSos(message: sos, nextEligibleAt: now);
+      var item = (await trickle.getItem(sos.id, 'sos'))!;
 
-      final basicNext = basic.sosCooldownEligibleAt(now, relayCount: 5);
-      final controlledNext = controlled.sosCooldownEligibleAt(
-        now,
-        relayCount: 5,
-      );
-
-      expect(basicNext, isNot(controlledNext));
       expect(
-        basicNext,
-        lessThan(
-          now +
-              MeshConfig.adaptiveBackoffBase.inMilliseconds +
-              MeshConfig.relayJitterMax.inMilliseconds,
+        await trickle.recordConsistentSosObservation(
+          messageId: sos.id,
+          observerKey: 'AA:BB:CC:DD:EE:FF',
+          nowMs: now + 1,
+        ),
+        isTrue,
+      );
+      final decision = await trickle.handleTrickleQueueEvent(
+        item: item,
+        nowMs: item.nextEligibleAt,
+      );
+      item = (await trickle.getItem(sos.id, 'sos'))!;
+
+      expect(decision.type, TrickleTransmitDecisionType.suppressTransmit);
+      expect(decision.shouldAdvertise, isFalse);
+      expect(item.queueState, RelayQueueService.stateQueued);
+      expect(item.relayCount, 0);
+      expect(item.nextEligibleAt, decision.state.intervalEndAt);
+    },
+  );
+
+  test(
+    'trickle interval end doubles I and schedules the next transmit',
+    () async {
+      final trickle = RelayQueueService(
+        database: db,
+        random: Random(1),
+        mode: ForwardingMode.trickle,
+      );
+      final sos = message('trickle-double', senderCrc: 4400);
+      await trickle.storeAndQueueSos(message: sos, nextEligibleAt: now);
+      final initial = (await trickle.trickleStateFor(sos.id))!;
+      final item = (await trickle.getItem(sos.id, 'sos'))!;
+
+      final decision = await trickle.handleTrickleQueueEvent(
+        item: item,
+        nowMs: initial.intervalEndAt,
+      );
+      final queued = (await trickle.getItem(sos.id, 'sos'))!;
+
+      expect(decision.type, TrickleTransmitDecisionType.intervalAdvanced);
+      expect(
+        decision.state.intervalMs,
+        MeshConfig.trickleImin.inMilliseconds * 2,
+      );
+      expect(queued.nextEligibleAt, decision.nextEligibleAt);
+      expect(
+        queued.nextEligibleAt,
+        inInclusiveRange(
+          initial.intervalEndAt + MeshConfig.trickleImin.inMilliseconds,
+          initial.intervalEndAt + MeshConfig.trickleImin.inMilliseconds * 2 - 1,
         ),
       );
     },
@@ -700,8 +776,8 @@ void main() {
     expect(await queue.queueSize(), 1);
   });
 
-  test('DROP_COOLDOWN decision is stored as deferred queue item', () async {
-    final sos = message('cooldown');
+  test('accepted SOS is stored as immediate queue work', () async {
+    final sos = message('accepted-immediate');
     sos.hopCount = 3;
     sos.lastRelayedAt = now - const Duration(seconds: 2).inMilliseconds;
     await insertMessage(sos);
@@ -721,13 +797,13 @@ void main() {
       existingMessage: sos,
     );
 
-    expect(decision.reason, ForwardingDecisionReason.dropCooldown);
-    await queue.enqueueSos(sos, nextEligibleAt: decision.nextEligibleAt);
+    expect(decision.reason, ForwardingDecisionReason.relayAccepted);
+    await queue.enqueueSos(sos, nextEligibleAt: now);
 
     final item = await queue.getItem(sos.id, 'sos');
     expect(item, isNotNull);
-    expect(item!.nextEligibleAt, decision.nextEligibleAt);
-    expect(await queue.nextEligible(now), isNull);
+    expect(item!.nextEligibleAt, now);
+    expect(await queue.nextEligible(now), isNotNull);
   });
 
   test(
@@ -1014,45 +1090,36 @@ void main() {
     },
   );
 
-  test(
-    'better-hop state ordering is consistent in controlled epidemic mode',
-    () async {
-      final controlledQueue = RelayQueueService(
-        database: db,
-        random: Random(1),
-        mode: ForwardingMode.controlledEpidemic,
-      );
-      final existing = message(
-        'controlled-better-hop',
-        senderCrc: 5959,
-        updatedAt: now,
-        hopCount: 4,
-      );
-      await controlledQueue.storeAndQueueSos(
-        message: existing,
-        nextEligibleAt: now,
-      );
+  test('better-hop state ordering is consistent in trickle mode', () async {
+    final trickleQueue = RelayQueueService(
+      database: db,
+      random: Random(1),
+      mode: ForwardingMode.trickle,
+    );
+    final existing = message(
+      'trickle-better-hop',
+      senderCrc: 5959,
+      updatedAt: now,
+      hopCount: 4,
+    );
+    await trickleQueue.storeAndQueueSos(message: existing, nextEligibleAt: now);
 
-      final better = message(
-        'controlled-better-hop',
-        senderCrc: 5959,
-        updatedAt: now,
-        hopCount: 2,
-      );
+    final better = message(
+      'trickle-better-hop',
+      senderCrc: 5959,
+      updatedAt: now,
+      hopCount: 2,
+    );
 
-      expect(
-        await controlledQueue.storeAndQueueSos(
-          message: better,
-          nextEligibleAt: now,
-        ),
-        true,
-      );
-      final stored = SOSMessage.fromDbMap(
-        (await db.query('sos_messages')).single,
-      );
-      expect(stored.hopCount, 2);
-    },
-  );
+    expect(
+      await trickleQueue.storeAndQueueSos(message: better, nextEligibleAt: now),
+      true,
+    );
+    final stored = SOSMessage.fromDbMap(
+      (await db.query('sos_messages')).single,
+    );
+    expect(stored.hopCount, 2);
+  });
 
   test('upsertMessageInDb preserves better-hop preferred state', () async {
     final existing = message(
@@ -1416,19 +1483,22 @@ void main() {
   );
 
   test(
-    'basic flooding and controlled epidemic use different slot durations',
+    'basic flooding and trickle share the SOS advertising burst duration',
     () {
       final basic = RelayQueueService(
         database: db,
         mode: ForwardingMode.basicFlooding,
       );
-      final controlled = RelayQueueService(
+      final trickle = RelayQueueService(
         database: db,
-        mode: ForwardingMode.controlledEpidemic,
+        mode: ForwardingMode.trickle,
       );
 
-      expect(basic.slotDurationForMode(), MeshConfig.basicFloodingSlotDuration);
-      expect(controlled.slotDurationForMode(), MeshConfig.relaySlotDuration);
+      expect(basic.slotDurationForMode(), MeshConfig.sosAdvertiseBurstDuration);
+      expect(
+        trickle.slotDurationForMode(),
+        MeshConfig.sosAdvertiseBurstDuration,
+      );
     },
   );
 

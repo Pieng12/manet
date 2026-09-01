@@ -126,12 +126,12 @@ void main() {
       await queue.markAdvertisingStarted(
         item,
         nowMs: now,
-        slotDuration: MeshConfig.relaySlotDuration,
+        slotDuration: MeshConfig.sosAdvertiseBurstDuration,
       );
       final afterStart = (await queue.getItem(message.id, 'sos'))!;
       expect(
         afterStart.nextEligibleAt,
-        now + MeshConfig.relaySlotDuration.inMilliseconds,
+        now + MeshConfig.sosAdvertiseBurstDuration.inMilliseconds,
       );
 
       await queue.markAdvertisingBlocked(

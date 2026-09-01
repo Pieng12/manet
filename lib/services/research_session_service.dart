@@ -86,6 +86,12 @@ class ResearchSessionService {
         androidSdk: androidSdk,
         appVersionCode: appVersionCode,
         buildId: buildId ?? MeshConfig.buildId,
+        trickleIminMs: MeshConfig.trickleImin.inMilliseconds,
+        trickleImaxMs: MeshConfig.trickleImax.inMilliseconds,
+        trickleImaxDoublings: MeshConfig.trickleImaxDoublings,
+        trickleK: MeshConfig.trickleRedundancyConstant,
+        sosAdvertiseBurstMs:
+            MeshConfig.sosAdvertiseBurstDuration.inMilliseconds,
       );
       await txn.insert('experiment_sessions', session.toDbMap());
       return session;

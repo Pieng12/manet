@@ -68,7 +68,7 @@ void main() {
     );
     final incoming = BleRelayService.messageFromSosPacket(incomingPacket, now);
 
-    expect(decision.reason, ForwardingDecisionReason.dropCooldown);
+    expect(decision.reason, ForwardingDecisionReason.relayAccepted);
     expect(BleRelayService.isSosStateImprovement(incoming, current), true);
     expect(
       BleRelayService.determineSosNextEligibleAt(

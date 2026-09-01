@@ -146,11 +146,19 @@ class BleRelayService {
   Future<void> activateForMessage(SOSMessage message) async {
     await _dbHelper.ensureMonotonicStateTimestamp(message);
     await start();
+    final now = DateTime.now().millisecondsSinceEpoch;
     await _advertiser.enqueueSosForAdvertising(
       message,
-      nextEligibleAt: DateTime.now().millisecondsSinceEpoch,
+      nextEligibleAt: now,
       preemptCurrent: true,
     );
+    if (MeshConfig.forwardingMode == ForwardingMode.trickle) {
+      await _logTrickleReset(
+        message: message,
+        reason: 'local_source_state',
+        nowMs: now,
+      );
+    }
     await WorkManagerService.registerSyncTask();
     await _tryGatewaySync();
   }
@@ -160,6 +168,7 @@ class BleRelayService {
     int? rssi,
     int? receivedAtMs,
     int? receivedElapsedRealtimeMs,
+    String? deviceAddress,
   }) async {
     try {
       final payload = base64Decode(payloadBase64);
@@ -168,6 +177,7 @@ class BleRelayService {
         rssi: rssi,
         receivedAtMs: receivedAtMs,
         receivedElapsedRealtimeMs: receivedElapsedRealtimeMs,
+        deviceAddress: deviceAddress,
       );
     } on FormatException catch (e) {
       _log('Invalid BLE payload: $e');
@@ -180,6 +190,7 @@ class BleRelayService {
     int? rssi,
     int? receivedAtMs,
     int? receivedElapsedRealtimeMs,
+    String? deviceAddress,
   }) async {
     final packet = BlePacket.unpack(payload);
     if (packet == null) {
@@ -223,6 +234,7 @@ class BleRelayService {
           rssi: rssi,
           receivedAtMs: rxAtMs,
           receivedElapsedRealtimeMs: receivedElapsedRealtimeMs,
+          deviceAddress: deviceAddress,
         );
       }
     } catch (e) {
@@ -308,10 +320,7 @@ class BleRelayService {
         isPrioritySosStatus(incoming.status)) {
       return nowMs;
     }
-    return relayQueue.sosCooldownEligibleAt(
-      nowMs,
-      relayCount: incoming.relayCount,
-    );
+    return relayQueue.nextSosEligibleAt(nowMs);
   }
 
   Future<BleProcessingResult> _processAck(
@@ -450,6 +459,7 @@ class BleRelayService {
     int? rssi,
     int? receivedAtMs,
     int? receivedElapsedRealtimeMs,
+    String? deviceAddress,
   }) async {
     final now = DateTime.now().millisecondsSinceEpoch;
     final rxAtMs = receivedAtMs ?? now;
@@ -493,6 +503,15 @@ class BleRelayService {
       if (decision.reason == ForwardingDecisionReason.dropDuplicate &&
           existing != null) {
         await _dbHelper.incrementDuplicateCount(existing.id);
+        final observed = await _recordTrickleConsistentHeard(
+          existing: existing,
+          packet: packet,
+          deviceAddress: deviceAddress,
+          nowMs: now,
+          rssi: rssi,
+          receivedAtMs: rxAtMs,
+          receivedElapsedRealtimeMs: receivedElapsedRealtimeMs,
+        );
         await _experimentLogger.logEvent(
           eventType: ExperimentEventTypes.blePacketDuplicate,
           deviceId: SyncService().deviceId,
@@ -505,6 +524,10 @@ class BleRelayService {
           protocolTimestampMs: packet.timestampMs,
           packetType: 'sos',
           status: packet.status.name,
+          detail: {
+            if (MeshConfig.forwardingMode == ForwardingMode.trickle)
+              'trickle_observation_recorded': observed,
+          },
         );
       } else if (decision.reason == ForwardingDecisionReason.dropStale) {
         await _experimentLogger.logEvent(
@@ -604,6 +627,17 @@ class BleRelayService {
     if (!stored) {
       _log('SOS_TRANSACTION_SKIPPED ${packet.identity}');
       return BleProcessingResult.stale;
+    }
+    if (MeshConfig.forwardingMode == ForwardingMode.trickle) {
+      await _logTrickleReset(
+        message: message,
+        reason: isNewerState ? 'inconsistent_or_better_state' : 'new_state',
+        nowMs: nextEligibleAt,
+        packet: packet,
+        rssi: rssi,
+        receivedAtMs: rxAtMs,
+        receivedElapsedRealtimeMs: receivedElapsedRealtimeMs,
+      );
     }
     await _experimentLogger.logEvent(
       eventType: ExperimentEventTypes.sosTransactionCommitted,
@@ -717,6 +751,121 @@ class BleRelayService {
     _log('${decision.reason.code} ${packet.identity} hop=${message.hopCount}');
     await _tryGatewaySync();
     return BleProcessingResult.accepted;
+  }
+
+  Future<bool> _recordTrickleConsistentHeard({
+    required SOSMessage existing,
+    required BlePacket packet,
+    required int nowMs,
+    String? deviceAddress,
+    int? rssi,
+    int? receivedAtMs,
+    int? receivedElapsedRealtimeMs,
+  }) async {
+    if (MeshConfig.forwardingMode != ForwardingMode.trickle) return false;
+    final observerKey = _trickleObserverKey(packet, deviceAddress);
+    final recorded = await _relayQueue.recordConsistentSosObservation(
+      messageId: existing.id,
+      observerKey: observerKey,
+      nowMs: nowMs,
+    );
+    if (recorded) {
+      await _experimentLogger.logEvent(
+        eventType: ExperimentEventTypes.trickleConsistentHeard,
+        deviceId: SyncService().deviceId,
+        messageId: existing.id,
+        senderCrc: packet.senderCrc,
+        hopCount: packet.hopCount,
+        hopIn: packet.hopCount,
+        rssi: rssi,
+        payloadHash: packet.identity,
+        eventTimestampMs: receivedAtMs,
+        elapsedRealtimeMs: receivedElapsedRealtimeMs,
+        protocolTimestampMs: packet.timestampMs,
+        packetType: 'sos',
+        status: packet.status.name,
+        detail: {
+          'observer_key': observerKey,
+          'logical_identity':
+              '${packet.senderCrc}|${packet.timestampMs}|${packet.status.name}',
+        },
+      );
+    }
+    return recorded;
+  }
+
+  Future<void> _logTrickleReset({
+    required SOSMessage message,
+    required String reason,
+    required int nowMs,
+    BlePacket? packet,
+    int? rssi,
+    int? receivedAtMs,
+    int? receivedElapsedRealtimeMs,
+  }) async {
+    if (MeshConfig.forwardingMode != ForwardingMode.trickle) return;
+    final state = await _relayQueue.trickleStateFor(message.id);
+    final detail = {
+      'reset_reason': reason,
+      'Imin': MeshConfig.trickleImin.inMilliseconds,
+      'Imax': MeshConfig.trickleImax.inMilliseconds,
+      'k': MeshConfig.trickleRedundancyConstant,
+      'sos_advertise_burst_ms':
+          MeshConfig.sosAdvertiseBurstDuration.inMilliseconds,
+      if (state != null) 'I': state.intervalMs,
+      if (state != null) 'c': state.consistencyCount,
+      if (state != null) 'transmit_at': state.transmitAt,
+      if (state != null) 'interval_started_at': state.intervalStartedAt,
+      if (state != null) 'interval_end_at': state.intervalEndAt,
+      if (state != null) 'phase': state.phase,
+    };
+    await _experimentLogger.logEvent(
+      eventType: ExperimentEventTypes.trickleInconsistentHeard,
+      deviceId: SyncService().deviceId,
+      messageId: message.id,
+      senderCrc: message.senderCrc,
+      hopCount: message.hopCount,
+      hopIn: packet?.hopCount,
+      hopOut: message.hopCount,
+      rssi: rssi,
+      payloadHash: packet?.identity,
+      eventTimestampMs: receivedAtMs ?? nowMs,
+      elapsedRealtimeMs: receivedElapsedRealtimeMs,
+      protocolTimestampMs: packet?.timestampMs ?? message.updatedAt,
+      packetType: 'sos',
+      status: message.status.name,
+      detail: detail,
+    );
+    await _experimentLogger.logEvent(
+      eventType: ExperimentEventTypes.trickleReset,
+      deviceId: SyncService().deviceId,
+      messageId: message.id,
+      senderCrc: message.senderCrc,
+      hopCount: message.hopCount,
+      packetType: 'sos',
+      status: message.status.name,
+      detail: detail,
+    );
+    await _experimentLogger.logEvent(
+      eventType: ExperimentEventTypes.trickleIntervalStarted,
+      deviceId: SyncService().deviceId,
+      messageId: message.id,
+      senderCrc: message.senderCrc,
+      hopCount: message.hopCount,
+      packetType: 'sos',
+      status: message.status.name,
+      detail: detail,
+    );
+  }
+
+  String _trickleObserverKey(BlePacket packet, String? deviceAddress) {
+    final normalized = deviceAddress?.trim();
+    if (normalized != null &&
+        normalized.isNotEmpty &&
+        normalized != 'unknown') {
+      return normalized;
+    }
+    return 'unknown:${packet.senderCrc}:${packet.hopCount}';
   }
 
   Future<void> _tryGatewaySync() async {

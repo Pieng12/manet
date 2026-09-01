@@ -5,15 +5,9 @@ import 'package:pkmproject/services/ble_protocol.dart';
 import 'package:pkmproject/utils/sos_status_priority.dart';
 
 class ForwardingPolicy {
-  const ForwardingPolicy({
-    this.mode = MeshConfig.forwardingMode,
-    this.adaptiveBackoffBase = MeshConfig.adaptiveBackoffBase,
-    this.adaptiveBackoffMax = MeshConfig.adaptiveBackoffMax,
-  });
+  const ForwardingPolicy({this.mode = MeshConfig.forwardingMode});
 
   final ForwardingMode mode;
-  final Duration adaptiveBackoffBase;
-  final Duration adaptiveBackoffMax;
 
   ForwardingDecision decideSos({
     required BlePacket packet,
@@ -61,47 +55,6 @@ class ForwardingPolicy {
     }
 
     final nextHopCount = _saturateHop(packet.hopCount + 1);
-    if (mode == ForwardingMode.basicFlooding) {
-      return ForwardingDecision(
-        shouldStore: true,
-        shouldRelay: true,
-        reason: ForwardingDecisionReason.relayAccepted,
-        nextHopCount: nextHopCount,
-      );
-    }
-
-    if (packet.status == SOSMessageStatus.cancelled ||
-        packet.status == SOSMessageStatus.resolved) {
-      return ForwardingDecision(
-        shouldStore: true,
-        shouldRelay: true,
-        reason: ForwardingDecisionReason.relayAccepted,
-        nextHopCount: nextHopCount,
-      );
-    }
-
-    if (_hasNewerTimestamp(packet, existingMessage)) {
-      return ForwardingDecision(
-        shouldStore: true,
-        shouldRelay: true,
-        reason: ForwardingDecisionReason.relayAccepted,
-        nextHopCount: nextHopCount,
-      );
-    }
-
-    final lastRelayedAt = existingMessage?.lastRelayedAt ?? 0;
-    final backoff = adaptiveBackoffForRelayCount(
-      existingMessage?.relayCount ?? 0,
-    );
-    if (lastRelayedAt > 0 && nowMs - lastRelayedAt < backoff.inMilliseconds) {
-      return ForwardingDecision(
-        shouldStore: true,
-        shouldRelay: false,
-        reason: ForwardingDecisionReason.dropCooldown,
-        nextEligibleAt: lastRelayedAt + backoff.inMilliseconds,
-      );
-    }
-
     return ForwardingDecision(
       shouldStore: true,
       shouldRelay: true,
@@ -120,11 +73,6 @@ class ForwardingPolicy {
     final ackTimestamp = message.ackReceivedAt;
     if (ackTimestamp == null) return false;
     return ackTimestamp >= packet.timestampMs;
-  }
-
-  bool _hasNewerTimestamp(BlePacket packet, SOSMessage? message) {
-    if (message == null) return false;
-    return packet.timestampMs > message.updatedAt;
   }
 
   ForwardingDecisionReason? _staleOrDuplicateReason(
@@ -147,16 +95,6 @@ class ForwardingPolicy {
     if (incomingBestHop < message.hopCount) return null;
 
     return ForwardingDecisionReason.dropDuplicate;
-  }
-
-  Duration adaptiveBackoffForRelayCount(int relayCount) {
-    final exponent = relayCount.clamp(0, 8);
-    final baseMs = adaptiveBackoffBase.inMilliseconds;
-    final candidateMs = baseMs * (1 << exponent);
-    final cappedMs = candidateMs > adaptiveBackoffMax.inMilliseconds
-        ? adaptiveBackoffMax.inMilliseconds
-        : candidateMs;
-    return Duration(milliseconds: cappedMs);
   }
 
   int _saturateHop(int hopCount) {

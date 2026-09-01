@@ -70,7 +70,7 @@ class NativeBleInboxProtocolTest {
     }
 
     @Test
-    fun exactProcessedDuplicateDoesNotCreateAnotherInboxRecord() {
+    fun exactProcessedDuplicateReopensRecordForTrickleObservation() {
         val payload = hex("52 4D C6 A2 99 A9 E2 6F 7D 0E 45 FD 2A 83 1F 00 01")
         val first = NativeBleInbox.storeForTest("[]", payload, "dev", -60, 1000L)
         val items = JSONArray(first.itemsJson)
@@ -85,10 +85,10 @@ class NativeBleInboxProtocolTest {
             NativeBleInboxStoreStatus.KNOWN_PROCESSED_DUPLICATE,
             duplicate.result.status
         )
-        assertFalse(duplicate.result.shouldScheduleWorker)
+        assertTrue(duplicate.result.shouldScheduleWorker)
         assertEquals(first.result.id, duplicate.result.id)
         assertEquals(1, after.length())
-        assertEquals("processed", after.getJSONObject(0).getString("state"))
+        assertEquals("pending", after.getJSONObject(0).getString("state"))
         assertEquals(1, after.getJSONObject(0).getInt("duplicate_count"))
     }
 

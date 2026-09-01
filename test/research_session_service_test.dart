@@ -39,7 +39,7 @@ void main() {
   test('create session and current session stores research metadata', () async {
     final session = await research.startSession(
       deviceId: 'device-a',
-      name: 'CEF-H3',
+      name: 'TRICKLE-H3',
       nodeRole: 'RELAY',
       targetHop: 3,
       topologyLabel: 'A -> R -> B',
@@ -50,7 +50,7 @@ void main() {
     final current = await research.currentSession();
 
     expect(current!.sessionId, session.sessionId);
-    expect(current.name, 'CEF-H3');
+    expect(current.name, 'TRICKLE-H3');
     expect(current.nodeRole, 'RELAY');
     expect(current.targetHop, 3);
     expect(current.status, 'RUNNING');

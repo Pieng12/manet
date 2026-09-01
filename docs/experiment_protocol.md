@@ -10,7 +10,7 @@ Mode offline BLE:
 ```bash
 flutter run \
   --dart-define=RESQMESH_MODE=offline \
-  --dart-define=RESQMESH_FORWARDING_MODE=controlled_epidemic
+  --dart-define=RESQMESH_FORWARDING_MODE=trickle
 ```
 
 Mode gateway:
@@ -19,7 +19,7 @@ Mode gateway:
 flutter run \
   --dart-define=RESQMESH_MODE=gateway \
   --dart-define=RESQMESH_API_BASE_URL=https://example.com/api \
-  --dart-define=RESQMESH_FORWARDING_MODE=controlled_epidemic
+  --dart-define=RESQMESH_FORWARDING_MODE=trickle
 ```
 
 Pembanding basic flooding:
@@ -125,13 +125,13 @@ dalam satu perangkat, gunakan event dari session yang sama.
 Catatan forwarding terbaru: `max_hop`, `message_lifetime_ms`, dan
 `relay_cooldown_ms` pada session adalah metadata eksperimen/legacy. SOS aktif
 diteruskan secara persistent sampai ACK server, state lebih baru, atau deletion.
-Hitung dampak adaptive backoff dari `relay_count`, `last_relayed_at`, dan event
-advertising.
+Hitung dampak Trickle dari event interval, consistency count, suppression, dan
+advertising sukses.
 
 Timestamp BLE memakai presisi satu detik. Gunakan timestamp canonical dari
 payload/identity saat menghitung duplicate, ACK tombstone, dan recovery queue.
-Mode `basic` memakai slot aktual 2 detik, sedangkan `controlled_epidemic` memakai slot
-default 5 detik plus adaptive backoff.
+Mode `basic` memakai interval tetap pendek plus jitter, sedangkan `trickle`
+memakai interval `[Imin, Imax]`, consistency counter `k`, dan suppression.
 
 ## Catatan P5 untuk Uji Perangkat Fisik
 
@@ -145,10 +145,10 @@ flutter pub get
 dart format --output=none --set-exit-if-changed .
 flutter analyze
 flutter test
-flutter build apk --debug --dart-define=RESQMESH_MODE=offline --dart-define=RESQMESH_FORWARDING_MODE=controlled_epidemic --dart-define=RESQMESH_BLE_DEBUG_VISIBLE=true
+flutter build apk --debug --dart-define=RESQMESH_MODE=offline --dart-define=RESQMESH_FORWARDING_MODE=trickle --dart-define=RESQMESH_BLE_DEBUG_VISIBLE=true
 flutter build apk --debug --dart-define=RESQMESH_MODE=offline --dart-define=RESQMESH_FORWARDING_MODE=basic --dart-define=RESQMESH_BLE_DEBUG_VISIBLE=true
-flutter build apk --debug --dart-define=RESQMESH_MODE=gateway --dart-define=RESQMESH_FORWARDING_MODE=controlled_epidemic --dart-define=RESQMESH_API_BASE_URL=https://example.com/api
-flutter build apk --release --dart-define=RESQMESH_MODE=offline --dart-define=RESQMESH_FORWARDING_MODE=controlled_epidemic
+flutter build apk --debug --dart-define=RESQMESH_MODE=gateway --dart-define=RESQMESH_FORWARDING_MODE=trickle --dart-define=RESQMESH_API_BASE_URL=https://example.com/api
+flutter build apk --release --dart-define=RESQMESH_MODE=offline --dart-define=RESQMESH_FORWARDING_MODE=trickle
 ```
 
 Event P5 yang perlu diperhatikan: `QUEUE_WAKE_SCHEDULED`,

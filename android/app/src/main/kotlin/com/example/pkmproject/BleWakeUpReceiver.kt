@@ -42,7 +42,8 @@ class BleWakeUpReceiver : BroadcastReceiver() {
                 scanRecord.bytes
             } ?: continue
             val hex = data.joinToString("") { String.format("%02X", it) }
-            val cacheKey = hex
+            val deviceAddress = safeDeviceAddress(scanResult)
+            val cacheKey = dedupeCacheKey(data, deviceAddress, hex)
             val currentTime = System.currentTimeMillis()
             val lastProcessed = lastProcessedPayloads[cacheKey] ?: 0L
 
@@ -59,7 +60,17 @@ class BleWakeUpReceiver : BroadcastReceiver() {
 
             val idLabel = if (id == -1) "raw" else "0x${String.format("%04X", id)}"
             Log.i(TAG, "ResQMesh BLE candidate. ID=$idLabel, RSSI=${scanResult.rssi}")
-            processPotentialPayload(context, data, safeDeviceAddress(scanResult), scanResult.rssi)
+            processPotentialPayload(context, data, deviceAddress, scanResult.rssi)
+        }
+    }
+
+    private fun dedupeCacheKey(payload: ByteArray, deviceAddress: String, hex: String): String {
+        val metadata = NativeBleInbox.protocolMetadata(payload)
+        return if (metadata == null) {
+            "raw|$deviceAddress|$hex"
+        } else {
+            "${metadata.senderCrc}|${metadata.timestampCompact}|${metadata.status}|" +
+                "${metadata.isAck}|$deviceAddress"
         }
     }
 

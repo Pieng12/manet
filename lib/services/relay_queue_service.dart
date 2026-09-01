@@ -5,8 +5,10 @@ import 'package:pkmproject/config/mesh_config.dart';
 import 'package:pkmproject/models/ack_apply_result.dart';
 import 'package:pkmproject/models/relay_queue_item.dart';
 import 'package:pkmproject/models/sos_message.dart';
+import 'package:pkmproject/models/trickle_state.dart';
 import 'package:pkmproject/services/ble_protocol.dart';
 import 'package:pkmproject/services/database_helper.dart';
+import 'package:pkmproject/services/trickle_scheduler.dart';
 import 'package:pkmproject/utils/protocol_timestamp.dart';
 import 'package:pkmproject/utils/sos_state_ordering.dart';
 import 'package:pkmproject/utils/sos_status_priority.dart';
@@ -45,27 +47,24 @@ class RelayQueueService {
   static const String stateRelayed = 'relayed';
   static const String stateFailed = 'failed';
 
-  int sosCooldownEligibleAt(int nowMs, {int relayCount = 0}) {
-    final backoffMs = _mode == ForwardingMode.basicFlooding
-        ? MeshConfig.basicFloodingInterval.inMilliseconds
-        : adaptiveBackoffForRelayCount(relayCount).inMilliseconds;
+  int nextSosEligibleAt(int nowMs) {
     final jitterRange =
         MeshConfig.relayJitterMax.inMilliseconds -
         MeshConfig.relayJitterMin.inMilliseconds;
     final jitter =
         MeshConfig.relayJitterMin.inMilliseconds +
         (jitterRange <= 0 ? 0 : _random.nextInt(jitterRange + 1));
-    return nowMs + backoffMs + jitter;
+    return nowMs + MeshConfig.basicFloodingInterval.inMilliseconds + jitter;
   }
 
-  Duration adaptiveBackoffForRelayCount(int relayCount) {
-    final exponent = relayCount.clamp(0, 8);
-    final candidateMs =
-        MeshConfig.adaptiveBackoffBase.inMilliseconds * (1 << exponent);
-    final cappedMs = candidateMs > MeshConfig.adaptiveBackoffMax.inMilliseconds
-        ? MeshConfig.adaptiveBackoffMax.inMilliseconds
-        : candidateMs;
-    return Duration(milliseconds: cappedMs);
+  int nextAckEligibleAt(int nowMs) {
+    final jitterRange =
+        MeshConfig.relayJitterMax.inMilliseconds -
+        MeshConfig.relayJitterMin.inMilliseconds;
+    final jitter =
+        MeshConfig.relayJitterMin.inMilliseconds +
+        (jitterRange <= 0 ? 0 : _random.nextInt(jitterRange + 1));
+    return nowMs + MeshConfig.relayCooldown.inMilliseconds + jitter;
   }
 
   static String ackMessageId({
@@ -85,10 +84,7 @@ class RelayQueueService {
   }
 
   Duration slotDurationForMode([ForwardingMode? mode]) {
-    final effectiveMode = mode ?? _mode;
-    return effectiveMode == ForwardingMode.basicFlooding
-        ? MeshConfig.basicFloodingSlotDuration
-        : MeshConfig.relaySlotDuration;
+    return MeshConfig.sosAdvertiseBurstDuration;
   }
 
   Future<Database> get _db async => _database ?? _databaseHelper.database;
@@ -155,12 +151,14 @@ class RelayQueueService {
         senderCrc: senderCrc,
         ackTimestampMs: canonicalAckTimestamp,
       );
+      final trickleScheduler = TrickleScheduler(database: txn, random: _random);
       for (final messageId in ackedMessageIds) {
         await txn.delete(
           'relay_queue',
           where: 'message_id = ? AND packet_type = ?',
           whereArgs: [messageId, 'sos'],
         );
+        await trickleScheduler.deleteState(messageId);
       }
 
       final compactMessageId = ackMessageId(
@@ -223,6 +221,7 @@ class RelayQueueService {
       }
 
       final existingRows = await _messageRowsForSenderInExecutor(txn, message);
+      final trickleScheduler = TrickleScheduler(database: txn, random: _random);
       for (final row in existingRows) {
         final existingId = row['id'] as String?;
         if (existingId == null || existingId == message.id) continue;
@@ -236,6 +235,7 @@ class RelayQueueService {
           where: 'id = ?',
           whereArgs: [existingId],
         );
+        await trickleScheduler.deleteState(existingId);
       }
 
       await txn.insert(
@@ -246,13 +246,24 @@ class RelayQueueService {
       if (failAfterStoreForTest) {
         throw StateError('Simulated SOS transaction failure');
       }
+
+      var sosNextEligibleAt = nextEligibleAt;
+      if (_mode == ForwardingMode.trickle) {
+        final state = await trickleScheduler.reset(
+          messageId: message.id,
+          nowMs: nextEligibleAt,
+          reason: latestExisting == null ? 'new_state' : 'state_improved',
+        );
+        sosNextEligibleAt = state.transmitAt;
+      }
+
       await _upsertInExecutor(
         txn,
         RelayQueueItem(
           messageId: message.id,
           packetType: 'sos',
           priority: priority,
-          nextEligibleAt: nextEligibleAt,
+          nextEligibleAt: sosNextEligibleAt,
           relayCount: message.relayCount,
           lastRelayedAt: message.lastRelayedAt,
           queueState: stateQueued,
@@ -404,8 +415,15 @@ class RelayQueueService {
       }
 
       var restored = 0;
+      final trickleScheduler = TrickleScheduler(database: txn, random: _random);
       for (final message in latestBySender.values) {
-        final nextEligibleAt = _recoveredSosEligibleAt(message, now);
+        final nextEligibleAt = _mode == ForwardingMode.trickle
+            ? (await trickleScheduler.ensureState(
+                messageId: message.id,
+                nowMs: now,
+                reason: 'startup_recovery',
+              )).transmitAt
+            : _recoveredSosEligibleAt(message, now);
         await _upsertInExecutor(
           txn,
           RelayQueueItem(
@@ -492,7 +510,7 @@ class RelayQueueService {
   Future<void> markAdvertisingStarted(
     RelayQueueItem item, {
     required int nowMs,
-    Duration slotDuration = MeshConfig.relaySlotDuration,
+    Duration slotDuration = MeshConfig.sosAdvertiseBurstDuration,
   }) async {
     final db = await _db;
     await db.update(
@@ -509,7 +527,8 @@ class RelayQueueService {
   Future<void> markAdvertisingSucceeded(
     RelayQueueItem item, {
     required int nowMs,
-    Duration slotDuration = MeshConfig.relaySlotDuration,
+    Duration slotDuration = MeshConfig.sosAdvertiseBurstDuration,
+    int? nextEligibleAtOverride,
   }) async {
     final db = await _db;
     await db.transaction((txn) async {
@@ -523,10 +542,9 @@ class RelayQueueService {
 
       final current = RelayQueueItem.fromDbMap(rows.first);
       final nextRelayCount = current.relayCount + 1;
-      final nextEligibleAt = sosCooldownEligibleAt(
-        nowMs,
-        relayCount: nextRelayCount,
-      );
+      final nextEligibleAt =
+          nextEligibleAtOverride ??
+          (item.isAck ? nextAckEligibleAt(nowMs) : nextSosEligibleAt(nowMs));
 
       await txn.update(
         'relay_queue',
@@ -598,7 +616,7 @@ WHERE id = ?
   Future<void> markRelayed(
     RelayQueueItem item, {
     required int nowMs,
-    Duration slotDuration = MeshConfig.relaySlotDuration,
+    Duration slotDuration = MeshConfig.sosAdvertiseBurstDuration,
   }) {
     return markAdvertisingSucceeded(
       item,
@@ -607,8 +625,54 @@ WHERE id = ?
     );
   }
 
+  Future<bool> recordConsistentSosObservation({
+    required String messageId,
+    required String observerKey,
+    required int nowMs,
+  }) async {
+    if (_mode != ForwardingMode.trickle) return false;
+    final db = await _db;
+    return TrickleScheduler(
+      database: db,
+      random: _random,
+    ).recordConsistentObservation(
+      messageId: messageId,
+      observerKey: observerKey,
+      nowMs: nowMs,
+    );
+  }
+
+  Future<TrickleState?> trickleStateFor(String messageId) async {
+    final db = await _db;
+    return TrickleScheduler(database: db).stateFor(messageId);
+  }
+
+  Future<TrickleTransmitDecision> handleTrickleQueueEvent({
+    required RelayQueueItem item,
+    required int nowMs,
+  }) async {
+    final db = await _db;
+    final decision = await TrickleScheduler(
+      database: db,
+      random: _random,
+    ).handleQueueEvent(messageId: item.messageId, nowMs: nowMs);
+    if (!decision.shouldAdvertise) {
+      await db.update(
+        'relay_queue',
+        {
+          'next_eligible_at': decision.nextEligibleAt,
+          'queue_state': stateQueued,
+        },
+        where: 'message_id = ? AND packet_type = ?',
+        whereArgs: [item.messageId, item.packetType],
+      );
+    }
+    return decision;
+  }
+
   Future<int> removeMessage(String messageId) async {
     final db = await _db;
+    await TrickleScheduler(database: db).deleteState(messageId);
     return db.delete(
       'relay_queue',
       where: 'message_id = ?',
@@ -618,6 +682,9 @@ WHERE id = ?
 
   Future<int> removeItem(RelayQueueItem item) async {
     final db = await _db;
+    if (item.isSos) {
+      await TrickleScheduler(database: db).deleteState(item.messageId);
+    }
     return db.delete(
       'relay_queue',
       where: 'message_id = ? AND packet_type = ?',
@@ -854,16 +921,7 @@ WHERE id = ?
         message.relayCount <= 0) {
       return nowMs;
     }
-    final backoffMs = adaptiveBackoffForRelayCount(
-      message.relayCount,
-    ).inMilliseconds;
-    final jitterRange =
-        MeshConfig.relayJitterMax.inMilliseconds -
-        MeshConfig.relayJitterMin.inMilliseconds;
-    final jitter =
-        MeshConfig.relayJitterMin.inMilliseconds +
-        (jitterRange <= 0 ? 0 : _random.nextInt(jitterRange + 1));
-    final eligibleAt = message.lastRelayedAt + backoffMs + jitter;
+    final eligibleAt = nextSosEligibleAt(message.lastRelayedAt);
     return eligibleAt < nowMs ? nowMs : eligibleAt;
   }
 

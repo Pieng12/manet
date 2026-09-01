@@ -159,7 +159,6 @@ void backgroundServiceMain() {
   WidgetsFlutterBinding.ensureInitialized();
 
   const backgroundChannel = MethodChannel('id.ac.usu.resqmesh/mesh');
-  final lastProcessedPayloads = <String, int>{};
   BleAdvertiserService().claimSchedulerOwnership();
 
   DatabaseHelper().database.then((_) async {
@@ -208,21 +207,9 @@ void backgroundServiceMain() {
         final receivedElapsedRealtimeMs = _asInt(
           args['received_elapsed_realtime_ms'],
         );
+        final deviceAddress = args['device_address'] as String?;
         final inboxId = args['inbox_id'] as String?;
         if (payloadBase64 == null || payloadBase64.isEmpty) return;
-
-        final now = DateTime.now().millisecondsSinceEpoch;
-        final last = lastProcessedPayloads[payloadBase64] ?? 0;
-        if (now - last < 5000) {
-          if (inboxId != null && inboxId.isNotEmpty) {
-            await NativeBridgeService.acknowledgeBleInboxItem(inboxId);
-          }
-          return;
-        }
-        lastProcessedPayloads[payloadBase64] = now;
-        if (lastProcessedPayloads.length > 50) {
-          lastProcessedPayloads.clear();
-        }
 
         try {
           final result = await BleRelayService().processIncomingBase64(
@@ -230,6 +217,7 @@ void backgroundServiceMain() {
             rssi: rssi,
             receivedAtMs: receivedAtMs,
             receivedElapsedRealtimeMs: receivedElapsedRealtimeMs,
+            deviceAddress: deviceAddress,
           );
           if (inboxId != null && inboxId.isNotEmpty) {
             if (result.shouldAcknowledgeInbox) {

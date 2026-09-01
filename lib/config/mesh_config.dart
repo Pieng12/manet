@@ -1,6 +1,6 @@
 enum ForwardingMode {
   basicFlooding('basic_flooding'),
-  controlledEpidemic('controlled_epidemic');
+  trickle('trickle');
 
   const ForwardingMode(this.logValue);
 
@@ -25,7 +25,7 @@ class MeshConfig {
 
   static const String forwardingModeName = String.fromEnvironment(
     'RESQMESH_FORWARDING_MODE',
-    defaultValue: 'controlled_epidemic',
+    defaultValue: 'trickle',
   );
   static const String buildId = String.fromEnvironment(
     'RESQMESH_BUILD_ID',
@@ -34,7 +34,7 @@ class MeshConfig {
   static const ForwardingMode forwardingMode =
       forwardingModeName == 'basic' || forwardingModeName == 'basic_flooding'
       ? ForwardingMode.basicFlooding
-      : ForwardingMode.controlledEpidemic;
+      : ForwardingMode.trickle;
 
   static const int protocolLength = 17;
   static const int manufacturerId = 0xFFFF;
@@ -48,10 +48,13 @@ class MeshConfig {
   static const Duration ackAdvertiseDuration = Duration(seconds: 10);
   static const Duration relayCooldown = Duration(seconds: 10);
   static const Duration basicFloodingInterval = Duration(seconds: 2);
-  static const Duration basicFloodingSlotDuration = Duration(seconds: 2);
-  static const Duration adaptiveBackoffBase = Duration(seconds: 10);
-  static const Duration adaptiveBackoffMax = Duration(minutes: 5);
-  static const Duration relaySlotDuration = Duration(seconds: 5);
+  static const Duration sosAdvertiseBurstDuration = Duration(seconds: 2);
+  static const Duration trickleImin = Duration(seconds: 8);
+  static const int trickleImaxDoublings = 5;
+  static const int trickleRedundancyConstant = 1;
+  static const int trickleIminMs = 8000;
+  static const int trickleImaxMs = trickleIminMs * (1 << trickleImaxDoublings);
+  static const Duration trickleImax = Duration(milliseconds: trickleImaxMs);
   static const Duration relayJitterMin = Duration(milliseconds: 300);
   static const Duration relayJitterMax = Duration(milliseconds: 1500);
   static const Duration gatewayHealthTimeout = Duration(seconds: 5);

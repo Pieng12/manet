@@ -48,7 +48,7 @@ class _ResearchMonitorScreenState extends State<ResearchMonitorScreen>
   String _eventFilter = 'ALL';
   bool _loading = true;
 
-  final _sessionNameController = TextEditingController(text: 'CEF-H3');
+  final _sessionNameController = TextEditingController(text: 'TRICKLE-H3');
   final _targetHopController = TextEditingController(text: '3');
   final _topologyController = TextEditingController(
     text: 'Android -> Relay -> Destination',

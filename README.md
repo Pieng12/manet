@@ -12,7 +12,7 @@ sudah tersedia:
 
 - Payload BLE connectionless sepanjang 17 byte.
 - ACK-terminated persistent epidemic forwarding.
-- Hop count tersaturasi di 63, adaptive backoff, jitter, dan deduplikasi packet.
+- Hop count tersaturasi di 63, Trickle interval, jitter, dan deduplikasi packet.
 - Persistent relay queue dengan prioritas ACK.
 - ACK gateway sebagai persistent anti-message.
 - Native Android BLE scan/advertising dengan manufacturer filter.
@@ -89,13 +89,13 @@ disaturasi pada 63 agar tidak overflow kembali ke 0.
 
 Mode forwarding:
 
-- `controlled_epidemic` default: scheduler `RelayQueueService` memakai dedup, fairness,
-  adaptive exponential backoff, cooldown, dan jitter.
+- `trickle` default: scheduler `RelayQueueService` memakai interval Trickle
+  (`Imin`, `Imax`, `k`), consistency counter, suppression, fairness, dan jitter.
 - `basic`: scheduler memakai interval dan slot aktual 2 detik plus jitter
   sebagai pembanding eksperimen yang lebih agresif.
 
 ```bash
-flutter run --dart-define=RESQMESH_FORWARDING_MODE=controlled_epidemic
+flutter run --dart-define=RESQMESH_FORWARDING_MODE=trickle
 flutter run --dart-define=RESQMESH_FORWARDING_MODE=basic
 ```
 
@@ -196,8 +196,8 @@ flutter pub get
 dart format --output=none --set-exit-if-changed .
 flutter analyze
 flutter test
-flutter build apk --debug --dart-define=RESQMESH_MODE=offline --dart-define=RESQMESH_FORWARDING_MODE=controlled_epidemic --dart-define=RESQMESH_BLE_DEBUG_VISIBLE=true
-flutter build apk --release --dart-define=RESQMESH_MODE=offline --dart-define=RESQMESH_FORWARDING_MODE=controlled_epidemic
+flutter build apk --debug --dart-define=RESQMESH_MODE=offline --dart-define=RESQMESH_FORWARDING_MODE=trickle --dart-define=RESQMESH_BLE_DEBUG_VISIBLE=true
+flutter build apk --release --dart-define=RESQMESH_MODE=offline --dart-define=RESQMESH_FORWARDING_MODE=trickle
 ```
 
 ## Cara Memulai Sesi Eksperimen

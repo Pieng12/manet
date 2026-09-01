@@ -6,6 +6,7 @@ import 'package:pkmproject/config/mesh_config.dart';
 import 'package:pkmproject/models/ack_apply_result.dart';
 import 'package:pkmproject/models/relay_queue_item.dart';
 import 'package:pkmproject/models/sos_message.dart';
+import 'package:pkmproject/models/trickle_state.dart';
 import 'package:pkmproject/services/android_permission_service.dart';
 import 'package:pkmproject/services/background_service_manager.dart';
 import 'package:pkmproject/services/ble_protocol.dart';
@@ -530,6 +531,58 @@ class BleAdvertiserService {
     );
   }
 
+  Future<void> _logTrickleDecision(
+    SOSMessage message,
+    TrickleTransmitDecision decision,
+  ) async {
+    final state = decision.state;
+    final detail = {
+      'I': state.intervalMs,
+      'Imin': MeshConfig.trickleImin.inMilliseconds,
+      'Imax': MeshConfig.trickleImax.inMilliseconds,
+      'k': MeshConfig.trickleRedundancyConstant,
+      'c': state.consistencyCount,
+      'transmit_at': state.transmitAt,
+      'interval_started_at': state.intervalStartedAt,
+      'interval_end_at': state.intervalEndAt,
+      'phase': state.phase,
+      'next_eligible_at': decision.nextEligibleAt,
+      'reset_reason': state.lastResetReason,
+    };
+    final eventType = switch (decision.type) {
+      TrickleTransmitDecisionType.allowTransmit =>
+        ExperimentEventTypes.trickleTxAllowed,
+      TrickleTransmitDecisionType.suppressTransmit =>
+        ExperimentEventTypes.trickleTxSuppressed,
+      TrickleTransmitDecisionType.intervalAdvanced =>
+        ExperimentEventTypes.trickleIntervalDoubled,
+      TrickleTransmitDecisionType.wait =>
+        ExperimentEventTypes.waitingNextEligible,
+    };
+    await _experimentLogger.logEvent(
+      eventType: eventType,
+      deviceId: 'unknown',
+      messageId: message.id,
+      senderCrc: message.senderCrc,
+      hopCount: message.hopCount,
+      packetType: 'sos',
+      status: message.status.name,
+      detail: detail,
+    );
+    if (decision.type == TrickleTransmitDecisionType.intervalAdvanced) {
+      await _experimentLogger.logEvent(
+        eventType: ExperimentEventTypes.trickleIntervalStarted,
+        deviceId: 'unknown',
+        messageId: message.id,
+        senderCrc: message.senderCrc,
+        hopCount: message.hopCount,
+        packetType: 'sos',
+        status: message.status.name,
+        detail: detail,
+      );
+    }
+  }
+
   Future<void> _startQueuedSos(
     _QueuedAdvertisement queued, {
     bool continueScheduling = true,
@@ -539,6 +592,19 @@ class BleAdvertiserService {
 
     final now = DateTime.now().millisecondsSinceEpoch;
     final originalNextEligibleAt = queued.item.nextEligibleAt;
+    TrickleTransmitDecision? trickleDecision;
+    if (MeshConfig.forwardingMode == ForwardingMode.trickle) {
+      trickleDecision = await _relayQueue.handleTrickleQueueEvent(
+        item: queued.item,
+        nowMs: now,
+      );
+      await _logTrickleDecision(message, trickleDecision);
+      if (!trickleDecision.shouldAdvertise) {
+        await _scheduleNextQueueWake();
+        return;
+      }
+    }
+
     await _relayQueue.markAdvertisingStarted(
       queued.item,
       nowMs: now,
@@ -576,6 +642,7 @@ class BleAdvertiserService {
           queued.item,
           nowMs: succeededAt,
           slotDuration: _relayQueue.slotDurationForMode(),
+          nextEligibleAtOverride: trickleDecision?.nextEligibleAt,
         );
         _resetTransientRetry();
         await _experimentLogger.logEvent(

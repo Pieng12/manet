@@ -11,7 +11,7 @@ import 'package:pkmproject/utils/sos_state_ordering.dart';
 import 'package:pkmproject/utils/sos_status_priority.dart';
 
 class DatabaseHelper {
-  static const int databaseVersion = 9;
+  static const int databaseVersion = 10;
 
   static final DatabaseHelper _instance = DatabaseHelper._internal();
   static Database? _database;
@@ -71,6 +71,8 @@ class DatabaseHelper {
         await db.execute(createSosMessagesTableSql);
         await db.execute(createRelayQueueTableSql);
         await db.execute(createAckTombstonesTableSql);
+        await db.execute(createTrickleStatesTableSql);
+        await db.execute(createTrickleObservationsTableSql);
         await db.execute(createExperimentSessionsTableSql);
         await db.execute(createExperimentTrialsTableSql);
         await db.execute(createExperimentEventsTableSql);
@@ -95,6 +97,7 @@ class DatabaseHelper {
         await ensureRelayQueueTable(db);
         await ensureRelayQueueColumns(db);
         await ensureAckTombstonesTable(db);
+        await ensureTrickleTables(db);
         await ensureExperimentTables(db);
         await ensureExperimentColumns(db);
         await ensureExperimentIndexes(db);
@@ -143,6 +146,28 @@ class DatabaseHelper {
       await ensureExperimentColumns(db);
       await ensureExperimentIndexes(db);
     }
+
+    if (oldVersion < 10) {
+      await ensureTrickleTables(db);
+      await ensureExperimentTables(db);
+      await ensureExperimentColumns(db);
+      await ensureExperimentIndexes(db);
+    }
+  }
+
+  static Future<void> ensureTrickleTables(Database db) async {
+    final tables = await db.rawQuery(
+      "SELECT name FROM sqlite_master WHERE type='table' "
+      "AND name IN ('trickle_states', 'trickle_observations')",
+    );
+    final tableNames = tables.map((row) => row['name'] as String).toSet();
+    if (!tableNames.contains('trickle_states')) {
+      await db.execute(createTrickleStatesTableSql);
+    }
+    if (!tableNames.contains('trickle_observations')) {
+      await db.execute(createTrickleObservationsTableSql);
+    }
+    await db.execute(createTrickleObservationsIndexSql);
   }
 
   static Future<void> ensureAckTombstonesTable(Database db) async {
@@ -312,6 +337,7 @@ class DatabaseHelper {
         where: 'message_id = ?',
         whereArgs: [uuid],
       );
+      await _deleteTrickleState(db, uuid);
       refreshMessages(); // Broadcast change
     }
     return result;
@@ -336,6 +362,7 @@ class DatabaseHelper {
         where: 'message_id = ?',
         whereArgs: [uuid],
       );
+      await _deleteTrickleState(db, uuid);
       refreshMessages();
     }
     return result;
@@ -731,6 +758,7 @@ class DatabaseHelper {
           where: 'message_id = ?',
           whereArgs: [existingId],
         );
+        await _deleteTrickleState(txn, existingId);
       }
 
       // Delete any existing record that matches the sender_id or sender_crc
@@ -796,6 +824,7 @@ class DatabaseHelper {
     await db.transaction((txn) async {
       for (final id in idsToDelete) {
         await txn.delete('sos_messages', where: 'id = ?', whereArgs: [id]);
+        await _deleteTrickleState(txn, id);
       }
     });
     return idsToDelete.length;
@@ -827,6 +856,7 @@ class DatabaseHelper {
     );
 
     if (result > 0) {
+      await _deleteTrickleState(db, messageId);
       refreshMessages(); // Broadcast change
     }
 
@@ -839,5 +869,21 @@ class DatabaseHelper {
 
   static SOSMessage _newerMessage(SOSMessage a, SOSMessage b) {
     return preferredSosState(a, b);
+  }
+
+  static Future<void> _deleteTrickleState(
+    DatabaseExecutor db,
+    String messageId,
+  ) async {
+    await db.delete(
+      'trickle_observations',
+      where: 'message_id = ?',
+      whereArgs: [messageId],
+    );
+    await db.delete(
+      'trickle_states',
+      where: 'message_id = ?',
+      whereArgs: [messageId],
+    );
   }
 }

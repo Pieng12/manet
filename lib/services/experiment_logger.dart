@@ -77,6 +77,14 @@ class ExperimentEventTypes {
   static const bootRecoveryDeferred = 'BOOT_RECOVERY_DEFERRED';
   static const bootRecoveryFailed = 'BOOT_RECOVERY_FAILED';
   static const bootRecoveryCompleted = 'BOOT_RECOVERY_COMPLETED';
+  static const trickleIntervalStarted = 'TRICKLE_INTERVAL_STARTED';
+  static const trickleConsistentHeard = 'TRICKLE_CONSISTENT_HEARD';
+  static const trickleInconsistentHeard = 'TRICKLE_INCONSISTENT_HEARD';
+  static const trickleReset = 'TRICKLE_RESET';
+  static const trickleTxAllowed = 'TRICKLE_TX_ALLOWED';
+  static const trickleTxSuppressed = 'TRICKLE_TX_SUPPRESSED';
+  static const trickleIntervalDoubled = 'TRICKLE_INTERVAL_DOUBLED';
+  static const trickleStateRecovered = 'TRICKLE_STATE_RECOVERED';
 }
 
 class ExperimentLogger {
@@ -142,6 +150,11 @@ class ExperimentLogger {
       androidSdk: androidSdk,
       appVersionCode: appVersionCode,
       buildId: buildId ?? MeshConfig.buildId,
+      trickleIminMs: MeshConfig.trickleImin.inMilliseconds,
+      trickleImaxMs: MeshConfig.trickleImax.inMilliseconds,
+      trickleImaxDoublings: MeshConfig.trickleImaxDoublings,
+      trickleK: MeshConfig.trickleRedundancyConstant,
+      sosAdvertiseBurstMs: MeshConfig.sosAdvertiseBurstDuration.inMilliseconds,
     );
     await db.insert('experiment_sessions', session.toDbMap());
     return session;

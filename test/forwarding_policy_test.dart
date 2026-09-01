@@ -52,7 +52,7 @@ void main() {
     );
   }
 
-  test('new controlled epidemic packet is accepted for relay', () {
+  test('new trickle packet is accepted for relay', () {
     const policy = ForwardingPolicy();
 
     final decision = policy.decideSos(packet: sosPacket(), nowMs: now);
@@ -234,29 +234,6 @@ void main() {
     expect(decision.reason, ForwardingDecisionReason.relayAccepted);
   });
 
-  test('controlled epidemic defers packet during relay cooldown', () {
-    const policy = ForwardingPolicy();
-    final lastRelayedAt = now - const Duration(seconds: 2).inMilliseconds;
-
-    final decision = policy.decideSos(
-      packet: sosPacket(timestampMs: now, hopCount: 0),
-      nowMs: now,
-      existingMessage: existingMessage(
-        updatedAt: now,
-        hopCount: 3,
-        lastRelayedAt: lastRelayedAt,
-      ),
-    );
-
-    expect(decision.shouldStore, true);
-    expect(decision.shouldRelay, false);
-    expect(decision.reason, ForwardingDecisionReason.dropCooldown);
-    expect(
-      decision.nextEligibleAt,
-      lastRelayedAt + MeshConfig.adaptiveBackoffBase.inMilliseconds,
-    );
-  });
-
   test('acked local message suppresses older SOS', () {
     const policy = ForwardingPolicy();
 
@@ -386,7 +363,7 @@ void main() {
     expect(decision.reason, ForwardingDecisionReason.relayAccepted);
   });
 
-  test('basic flooding ignores controlled backoff and relay count metric', () {
+  test('basic flooding ignores relay count metric', () {
     const policy = ForwardingPolicy(mode: ForwardingMode.basicFlooding);
 
     final decision = policy.decideSos(

@@ -16,8 +16,8 @@ ditafsirkan melebihi kemampuan implementasi saat ini.
   penerima.
 - Timestamp ACK dan SOS dicanonicalize ke presisi detik; analisis sub-detik
   harus memakai log lokal, bukan payload BLE.
-- Karena forwarding bersifat persistent sampai ACK, adaptive backoff wajib
-  dipantau pada pengujian baterai multi-jam.
+- Karena forwarding bersifat persistent sampai ACK, interval Trickle dan
+  suppression wajib dipantau pada pengujian baterai multi-jam.
 - Fairness ACK/SOS diverifikasi unit test, tetapi dampaknya pada kepadatan radio
   nyata tetap perlu diuji dengan beberapa perangkat fisik.
 

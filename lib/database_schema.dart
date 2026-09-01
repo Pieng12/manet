@@ -76,6 +76,34 @@ CREATE TABLE ack_tombstones (
 );
 ''';
 
+const String createTrickleStatesTableSql = '''
+CREATE TABLE trickle_states (
+  message_id TEXT PRIMARY KEY,
+  interval_ms INTEGER NOT NULL,
+  interval_started_at INTEGER NOT NULL,
+  transmit_at INTEGER NOT NULL,
+  interval_end_at INTEGER NOT NULL,
+  consistency_count INTEGER NOT NULL DEFAULT 0,
+  phase TEXT NOT NULL,
+  last_reset_reason TEXT NULL,
+  updated_at INTEGER NOT NULL
+);
+''';
+
+const String createTrickleObservationsTableSql = '''
+CREATE TABLE trickle_observations (
+  message_id TEXT NOT NULL,
+  interval_started_at INTEGER NOT NULL,
+  observer_key TEXT NOT NULL,
+  first_seen_at INTEGER NOT NULL,
+  PRIMARY KEY(message_id, interval_started_at, observer_key)
+);
+''';
+
+const String createTrickleObservationsIndexSql =
+    'CREATE INDEX IF NOT EXISTS idx_trickle_observations_message_interval '
+    'ON trickle_observations(message_id, interval_started_at)';
+
 const String createExperimentSessionsTableSql = '''
 CREATE TABLE experiment_sessions (
   session_id TEXT PRIMARY KEY,
@@ -101,7 +129,12 @@ CREATE TABLE experiment_sessions (
   device_manufacturer TEXT NULL,
   android_sdk INTEGER NULL,
   app_version_code TEXT NULL,
-  build_id TEXT NULL
+  build_id TEXT NULL,
+  trickle_imin_ms INTEGER NULL,
+  trickle_imax_ms INTEGER NULL,
+  trickle_imax_doublings INTEGER NULL,
+  trickle_k INTEGER NULL,
+  sos_advertise_burst_ms INTEGER NULL
 );
 ''';
 
@@ -120,6 +153,11 @@ const Map<String, String> experimentSessionColumnDefinitions = {
   'android_sdk': 'INTEGER NULL',
   'app_version_code': 'TEXT NULL',
   'build_id': 'TEXT NULL',
+  'trickle_imin_ms': 'INTEGER NULL',
+  'trickle_imax_ms': 'INTEGER NULL',
+  'trickle_imax_doublings': 'INTEGER NULL',
+  'trickle_k': 'INTEGER NULL',
+  'sos_advertise_burst_ms': 'INTEGER NULL',
 };
 
 const String createExperimentTrialsTableSql = '''

@@ -44,7 +44,6 @@ object NativeBleInbox {
     private const val STATE_PROCESSED = "processed"
     private const val STATE_FAILED = "failed"
     private const val CLEANUP_AFTER_MS = 14L * 24L * 60L * 60L * 1000L
-    private const val PROCESSED_DUPLICATE_RETENTION_MS = CLEANUP_AFTER_MS
 
     @Synchronized
     fun store(
@@ -173,20 +172,16 @@ object NativeBleInbox {
             item.put("duplicate_count", duplicateCount)
 
             if (item.optString("state") == STATE_PROCESSED) {
-                val processedAt = item.optLong("processed_at", 0L)
-                if (processedAt > 0 &&
-                    receivedAt - processedAt <= PROCESSED_DUPLICATE_RETENTION_MS
-                ) {
-                    return NativeBleInboxStoreMutation(
-                        items.toString(),
-                        NativeBleInboxStoreResult(
-                            id = item.getString("id"),
-                            status = NativeBleInboxStoreStatus.KNOWN_PROCESSED_DUPLICATE,
-                            shouldScheduleWorker = false
-                        )
+                item.put("state", STATE_PENDING)
+                item.put("processed_at", JSONObject.NULL)
+                return NativeBleInboxStoreMutation(
+                    items.toString(),
+                    NativeBleInboxStoreResult(
+                        id = item.getString("id"),
+                        status = NativeBleInboxStoreStatus.KNOWN_PROCESSED_DUPLICATE,
+                        shouldScheduleWorker = true
                     )
-                }
-                continue
+                )
             }
 
             return NativeBleInboxStoreMutation(

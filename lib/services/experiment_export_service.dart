@@ -64,7 +64,7 @@ class ExperimentExportService {
     final file = File('${dir.path}/resqmesh_$suffix.csv');
     final buffer = StringBuffer()
       ..writeln(
-        'session_id,session_kind,session_name,trial_id,trial_number,trial_status,trial_result,failure_reason,device_id,device_manufacturer,device_model,android_version,android_sdk,app_version,app_version_code,build_id,node_role,forwarding_mode,target_hop,topology_label,scenario_label,event_timestamp_ms,event_timestamp_iso,elapsed_realtime_ms,protocol_timestamp_ms,event_type,message_id,sender_crc,packet_type,status,hop_in,hop_out,rssi,payload_hash,relay_count,duplicate_count,queue_size,sos_queue_size,ack_queue_size,detail',
+        'session_id,session_kind,session_name,trial_id,trial_number,trial_status,trial_result,failure_reason,device_id,device_manufacturer,device_model,android_version,android_sdk,app_version,app_version_code,build_id,node_role,forwarding_mode,trickle_imin_ms,trickle_imax_ms,trickle_imax_doublings,trickle_k,sos_advertise_burst_ms,target_hop,topology_label,scenario_label,event_timestamp_ms,event_timestamp_iso,elapsed_realtime_ms,protocol_timestamp_ms,event_type,message_id,sender_crc,packet_type,status,hop_in,hop_out,rssi,payload_hash,relay_count,duplicate_count,queue_size,sos_queue_size,ack_queue_size,detail',
       );
     for (final event in events) {
       final trial = trialsById[event.trialId];
@@ -88,6 +88,11 @@ class ExperimentExportService {
           session?.buildId,
           event.nodeRole ?? session?.nodeRole,
           event.forwardingMode ?? session?.forwardingMode,
+          session?.trickleIminMs,
+          session?.trickleImaxMs,
+          session?.trickleImaxDoublings,
+          session?.trickleK,
+          session?.sosAdvertiseBurstMs,
           session?.targetHop,
           session?.topologyLabel,
           session?.scenarioLabel,
@@ -152,6 +157,11 @@ class ExperimentExportService {
       'app_version': session.appVersion,
       'app_version_code': session.appVersionCode,
       'build_id': session.buildId,
+      'trickle_imin_ms': session.trickleIminMs,
+      'trickle_imax_ms': session.trickleImaxMs,
+      'trickle_imax_doublings': session.trickleImaxDoublings,
+      'trickle_k': session.trickleK,
+      'sos_advertise_burst_ms': session.sosAdvertiseBurstMs,
       'trial_timeout_seconds': session.trialTimeoutSeconds,
     };
   }

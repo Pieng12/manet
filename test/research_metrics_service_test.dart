@@ -1024,4 +1024,20 @@ void main() {
     expect(metrics.txSuccessCount, 1);
     expect(metrics.relaySlotCount, 1);
   });
+
+  test('trickle suppressed transmission is not counted as TX overhead', () {
+    final metrics = service.calculate(
+      events: [
+        event(ExperimentEventTypes.trickleTxSuppressed, 1000),
+        event(ExperimentEventTypes.bleAdvertiseRequested, 1005),
+        event(ExperimentEventTypes.bleAdvertiseStarted, 1010),
+        event(ExperimentEventTypes.bleRelayStarted, 1020),
+      ],
+      trials: const [],
+    );
+
+    expect(metrics.txAttemptCount, 1);
+    expect(metrics.txSuccessCount, 1);
+    expect(metrics.relaySlotCount, 1);
+  });
 }
