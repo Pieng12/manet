@@ -12,7 +12,9 @@ sudah tersedia:
 
 - Payload BLE connectionless sepanjang 17 byte.
 - Trickle Algorithm untuk kontrol retransmission/dissemination SOS.
-- Hop count tersaturasi di 63, Trickle interval, jitter, dan deduplikasi packet.
+- Hop count tersaturasi di 63, Trickle random `t` dalam `[I/2, I)`, dan
+  deduplikasi packet. Basic Flooding tetap memakai fixed interval plus jitter
+  sebagai baseline.
 - Persistent relay queue dengan prioritas ACK.
 - ACK gateway sebagai persistent anti-message.
 - Native Android BLE scan/advertising dengan manufacturer filter.
@@ -63,7 +65,9 @@ Native inbox memakai `observation_id` berbasis payload, discriminator observer,
 dan bucket waktu burst. Repetisi radio mentah dalam satu burst tetap idempotent,
 sementara burst berikutnya atau observer BLE berbeda menjadi observation baru
 untuk consistency count Trickle. Alamat BLE dipakai hanya sebagai metadata
-sementara dari Android scanner, bukan identitas node permanen.
+sementara dari Android scanner, bukan identitas node permanen. Better-hop tidak
+hilang di native dedupe karena perubahan hop mengubah raw payload 17 byte dan
+hash payload observasi.
 
 Scheduler BLE dimiliki oleh background Dart isolate. UI isolate hanya mengirim
 command dan membaca state. Saat queue belum eligible, `RelayQueueService`

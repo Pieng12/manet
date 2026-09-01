@@ -339,7 +339,7 @@ object NativeBleInbox {
         return if (normalized.isNotEmpty() && normalized != "unknown") {
             "ble:$normalized"
         } else {
-            "unknown:${receivedElapsedRealtimeMs.takeIf { it > 0L } ?: receivedAt}"
+            "unknown:${burstStartedAt(receivedElapsedRealtimeMs, receivedAt)}"
         }
     }
 

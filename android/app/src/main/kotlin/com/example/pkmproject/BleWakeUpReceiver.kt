@@ -64,13 +64,17 @@ class BleWakeUpReceiver : BroadcastReceiver() {
         }
     }
 
-    private fun dedupeCacheKey(payload: ByteArray, deviceAddress: String, hex: String): String {
-        val metadata = NativeBleInbox.protocolMetadata(payload)
-        return if (metadata == null) {
-            "raw|$deviceAddress|$hex"
+    internal fun dedupeCacheKey(payload: ByteArray, deviceAddress: String, hex: String): String {
+        val payloadHash = NativeBleInbox.exactPayloadHash(payload)
+        val observerKey = if (deviceAddress.isNotBlank() && deviceAddress != "unknown") {
+            "ble:$deviceAddress"
         } else {
-            "${metadata.senderCrc}|${metadata.timestampCompact}|${metadata.status}|" +
-                "${metadata.isAck}|$deviceAddress"
+            "unknown"
+        }
+        return if (NativeBleInbox.protocolMetadata(payload) == null) {
+            "raw|$observerKey|$hex"
+        } else {
+            "resqmesh|$observerKey|$payloadHash"
         }
     }
 

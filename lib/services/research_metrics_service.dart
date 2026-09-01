@@ -87,11 +87,13 @@ class ResearchMetricsService {
     }).length;
     final txAttempts = _count(events, {
       ExperimentEventTypes.bleAdvertiseRequested,
-    });
+    }, packetType: 'sos');
     final txSuccess = _count(events, {
       ExperimentEventTypes.bleAdvertiseStarted,
-    });
-    final relaySlots = _count(events, {ExperimentEventTypes.bleRelayStarted});
+    }, packetType: 'sos');
+    final relaySlots = _count(events, {
+      ExperimentEventTypes.bleRelayStarted,
+    }, packetType: 'sos');
     final rssiSamples = events
         .where(
           (event) =>
@@ -342,8 +344,18 @@ class ResearchMetricsService {
     return event.payloadHash ?? event.messageId;
   }
 
-  static int _count(Iterable<ExperimentEvent> events, Set<String> types) {
-    return events.where((event) => types.contains(event.eventType)).length;
+  static int _count(
+    Iterable<ExperimentEvent> events,
+    Set<String> types, {
+    String? packetType,
+  }) {
+    return events
+        .where(
+          (event) =>
+              types.contains(event.eventType) &&
+              (packetType == null || _isPacketType(event, packetType)),
+        )
+        .length;
   }
 
   static bool _isInvalidEvent(ExperimentEvent event) {

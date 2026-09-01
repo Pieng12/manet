@@ -8,6 +8,7 @@ import 'package:pkmproject/models/ack_apply_result.dart';
 import 'package:pkmproject/models/ble_processing_result.dart';
 import 'package:pkmproject/models/forwarding_decision.dart';
 import 'package:pkmproject/models/sos_message.dart';
+import 'package:pkmproject/models/trickle_state.dart';
 import 'package:pkmproject/services/background_service_manager.dart';
 import 'package:pkmproject/services/ble_advertiser_service.dart';
 import 'package:pkmproject/services/ble_protocol.dart';
@@ -519,7 +520,7 @@ class BleRelayService {
           packet: packet,
           deviceAddress: deviceAddress,
           observationId: observationId,
-          nowMs: now,
+          nowMs: rxAtMs,
           rssi: rssi,
           receivedAtMs: rxAtMs,
           receivedElapsedRealtimeMs: receivedElapsedRealtimeMs,
@@ -924,6 +925,12 @@ class BleRelayService {
   }
 
   Future<void> _recoverQueues() async {
+    final preRecoveryTrickleStateIds =
+        MeshConfig.forwardingMode == ForwardingMode.trickle
+        ? (await _relayQueue.allTrickleStates())
+              .map((state) => state.messageId)
+              .toSet()
+        : <String>{};
     final ackRecovered = await _relayQueue.recoverAckQueueFromTombstones();
     final sosRecovered = await _relayQueue.recoverSosQueueFromMessages();
     if (ackRecovered > 0) {
@@ -943,27 +950,63 @@ class BleRelayService {
     if (MeshConfig.forwardingMode == ForwardingMode.trickle) {
       final states = await _relayQueue.allTrickleStates();
       for (final state in states) {
-        await _experimentLogger.logEvent(
-          eventType: ExperimentEventTypes.trickleStateRecovered,
-          deviceId: SyncService().deviceId,
-          messageId: state.messageId,
-          detail: {
-            'message_id': state.messageId,
-            'I': state.intervalMs,
-            'Imin': MeshConfig.trickleImin.inMilliseconds,
-            'Imax': MeshConfig.trickleImax.inMilliseconds,
-            'k': MeshConfig.trickleRedundancyConstant,
-            'c': state.consistencyCount,
-            'transmit_at': state.transmitAt,
-            'interval_started_at': state.intervalStartedAt,
-            'interval_end_at': state.intervalEndAt,
-            'phase': state.phase,
-            'reset_reason': state.lastResetReason,
-            'recovery_reason': 'service_or_queue_recovery',
-          },
+        final persistedStateFound = preRecoveryTrickleStateIds.contains(
+          state.messageId,
         );
+        final detail = _trickleStateRecoveryDetail(
+          state,
+          recoveryReason: persistedStateFound
+              ? 'service_or_queue_recovery'
+              : 'recovery_state_missing',
+          persistedStateFound: persistedStateFound,
+        );
+        if (persistedStateFound) {
+          await _experimentLogger.logEvent(
+            eventType: ExperimentEventTypes.trickleStateRecovered,
+            deviceId: SyncService().deviceId,
+            messageId: state.messageId,
+            detail: detail,
+          );
+        } else {
+          await _experimentLogger.logEvent(
+            eventType: ExperimentEventTypes.trickleReset,
+            deviceId: SyncService().deviceId,
+            messageId: state.messageId,
+            packetType: 'sos',
+            detail: detail,
+          );
+          await _experimentLogger.logEvent(
+            eventType: ExperimentEventTypes.trickleIntervalStarted,
+            deviceId: SyncService().deviceId,
+            messageId: state.messageId,
+            packetType: 'sos',
+            detail: detail,
+          );
+        }
       }
     }
+  }
+
+  Map<String, Object?> _trickleStateRecoveryDetail(
+    TrickleState state, {
+    required String recoveryReason,
+    required bool persistedStateFound,
+  }) {
+    return {
+      'message_id': state.messageId,
+      'I': state.intervalMs,
+      'Imin': MeshConfig.trickleImin.inMilliseconds,
+      'Imax': MeshConfig.trickleImax.inMilliseconds,
+      'k': MeshConfig.trickleRedundancyConstant,
+      'c': state.consistencyCount,
+      'transmit_at': state.transmitAt,
+      'interval_started_at': state.intervalStartedAt,
+      'interval_end_at': state.intervalEndAt,
+      'phase': state.phase,
+      'reset_reason': state.lastResetReason,
+      'recovery_reason': recoveryReason,
+      'persisted_state_found': persistedStateFound,
+    };
   }
 
   Future<void> _logAckResult(

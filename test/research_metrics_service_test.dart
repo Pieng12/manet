@@ -1013,9 +1013,17 @@ void main() {
   test('advertise requested is not counted as successful TX', () {
     final metrics = service.calculate(
       events: [
-        event(ExperimentEventTypes.bleAdvertiseRequested, 1000),
-        event(ExperimentEventTypes.bleAdvertiseStarted, 1010),
-        event(ExperimentEventTypes.bleRelayStarted, 1020),
+        event(
+          ExperimentEventTypes.bleAdvertiseRequested,
+          1000,
+          packetType: 'sos',
+        ),
+        event(
+          ExperimentEventTypes.bleAdvertiseStarted,
+          1010,
+          packetType: 'sos',
+        ),
+        event(ExperimentEventTypes.bleRelayStarted, 1020, packetType: 'sos'),
       ],
       trials: const [],
     );
@@ -1028,10 +1036,22 @@ void main() {
   test('trickle suppressed transmission is not counted as TX overhead', () {
     final metrics = service.calculate(
       events: [
-        event(ExperimentEventTypes.trickleTxSuppressed, 1000),
-        event(ExperimentEventTypes.bleAdvertiseRequested, 1005),
-        event(ExperimentEventTypes.bleAdvertiseStarted, 1010),
-        event(ExperimentEventTypes.bleRelayStarted, 1020),
+        event(
+          ExperimentEventTypes.trickleTxSuppressed,
+          1000,
+          packetType: 'sos',
+        ),
+        event(
+          ExperimentEventTypes.bleAdvertiseRequested,
+          1005,
+          packetType: 'sos',
+        ),
+        event(
+          ExperimentEventTypes.bleAdvertiseStarted,
+          1010,
+          packetType: 'sos',
+        ),
+        event(ExperimentEventTypes.bleRelayStarted, 1020, packetType: 'sos'),
       ],
       trials: const [],
     );
@@ -1039,5 +1059,130 @@ void main() {
     expect(metrics.txAttemptCount, 1);
     expect(metrics.txSuccessCount, 1);
     expect(metrics.relaySlotCount, 1);
+  });
+
+  test('primary SOS tx success excludes ACK advertise started events', () {
+    final metrics = service.calculate(
+      events: [
+        for (var i = 0; i < 3; i++)
+          event(
+            ExperimentEventTypes.bleAdvertiseStarted,
+            1000 + i,
+            packetType: 'sos',
+          ),
+        for (var i = 0; i < 7; i++)
+          event(
+            ExperimentEventTypes.bleAdvertiseStarted,
+            2000 + i,
+            packetType: 'ack',
+          ),
+      ],
+      trials: const [],
+    );
+
+    expect(metrics.txSuccessCount, 3);
+  });
+
+  test('primary SOS tx attempts exclude ACK advertise requested events', () {
+    final metrics = service.calculate(
+      events: [
+        for (var i = 0; i < 5; i++)
+          event(
+            ExperimentEventTypes.bleAdvertiseRequested,
+            1000 + i,
+            packetType: 'sos',
+          ),
+        for (var i = 0; i < 4; i++)
+          event(
+            ExperimentEventTypes.bleAdvertiseRequested,
+            2000 + i,
+            packetType: 'ack',
+          ),
+      ],
+      trials: const [],
+    );
+
+    expect(metrics.txAttemptCount, 5);
+  });
+
+  test('primary SOS relay slots exclude ACK relay started events', () {
+    final metrics = service.calculate(
+      events: [
+        for (var i = 0; i < 2; i++)
+          event(
+            ExperimentEventTypes.bleRelayStarted,
+            1000 + i,
+            packetType: 'sos',
+          ),
+        for (var i = 0; i < 6; i++)
+          event(
+            ExperimentEventTypes.bleRelayStarted,
+            2000 + i,
+            packetType: 'ack',
+          ),
+      ],
+      trials: const [],
+    );
+
+    expect(metrics.relaySlotCount, 2);
+  });
+
+  test('suppressed Trickle event does not count as SOS radio TX', () {
+    final metrics = service.calculate(
+      events: [
+        event(
+          ExperimentEventTypes.trickleTxSuppressed,
+          1000,
+          packetType: 'sos',
+        ),
+      ],
+      trials: const [],
+    );
+
+    expect(metrics.txAttemptCount, 0);
+    expect(metrics.txSuccessCount, 0);
+    expect(metrics.relaySlotCount, 0);
+  });
+
+  test('requested SOS without started event is not successful TX', () {
+    final metrics = service.calculate(
+      events: [
+        event(
+          ExperimentEventTypes.bleAdvertiseRequested,
+          1000,
+          packetType: 'sos',
+        ),
+      ],
+      trials: const [],
+    );
+
+    expect(metrics.txAttemptCount, 1);
+    expect(metrics.txSuccessCount, 0);
+  });
+
+  test('local TX per successful trial only uses SOS successful TX', () {
+    final metrics = service.calculate(
+      events: [
+        for (var i = 0; i < 4; i++)
+          event(
+            ExperimentEventTypes.bleAdvertiseStarted,
+            1000 + i,
+            packetType: 'sos',
+          ),
+        for (var i = 0; i < 8; i++)
+          event(
+            ExperimentEventTypes.bleAdvertiseStarted,
+            2000 + i,
+            packetType: 'ack',
+          ),
+      ],
+      trials: [
+        trial(1, result: 'SUCCESS'),
+        trial(2, result: 'SUCCESS'),
+      ],
+    );
+
+    expect(metrics.txSuccessCount, 4);
+    expect(metrics.transmissionOverhead, 2);
   });
 }

@@ -215,8 +215,10 @@ dan bukan dari exact payload hash jangka panjang. Raw BLE repeats dalam satu
 advertising burst dari observer yang sama collapse menjadi satu observation.
 Burst independen berikutnya dari observer yang sama boleh menaikkan `c` lagi,
 dan payload sama dari observer BLE berbeda juga menjadi observation berbeda.
-Jika `device_address` tidak tersedia, native memakai fallback `unknown:<waktu>`
-sebagai discriminator berbasis burst.
+Jika `device_address` tidak tersedia, native memakai fallback
+`unknown:<burstStartedAt>` sebagai discriminator berbasis burst. Tanpa alamat
+BLE yang usable, dua transmitter fisik berbeda dengan payload sama dalam bucket
+burst yang sama tidak selalu bisa dibedakan reliabel.
 
 Event audit Trickle yang harus dipakai:
 
@@ -230,6 +232,9 @@ Event audit Trickle yang harus dipakai:
 
 `TRICKLE_TX_SUPPRESSED` bukan TX radio, tidak boleh menaikkan relay count, dan
 tidak boleh dipakai sebagai forwarding overhead.
+Observation lama pada tabel `trickle_observations` dapat dipangkas setelah
+interval baru aktif karena tabel itu hanya menjaga idempotency `c`; audit
+penelitian tetap memakai `experiment_events`.
 
 ## ACK Metrics
 

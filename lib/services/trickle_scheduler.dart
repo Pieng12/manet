@@ -120,6 +120,7 @@ class TrickleScheduler {
     }
 
     final state = await normalizeInterval(messageId: messageId, nowMs: nowMs);
+    if (nowMs < state.intervalStartedAt) return false;
     final inserted = await _db.insert('trickle_observations', {
       'message_id': messageId,
       'interval_started_at': state.intervalStartedAt,
@@ -270,6 +271,15 @@ WHERE message_id = ?
       state.toDbMap(),
       conflictAlgorithm: ConflictAlgorithm.replace,
     );
+    await _pruneOldObservations(state);
     return state;
+  }
+
+  Future<int> _pruneOldObservations(TrickleState state) {
+    return _db.delete(
+      'trickle_observations',
+      where: 'message_id = ? AND interval_started_at < ?',
+      whereArgs: [state.messageId, state.intervalStartedAt],
+    );
   }
 }

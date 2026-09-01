@@ -1183,14 +1183,20 @@ void main() {
       hopCount: 2,
     );
 
-    expect(
-      await trickleQueue.storeAndQueueSos(message: better, nextEligibleAt: now),
-      true,
+    final result = await trickleQueue.storeAndQueueSosWithResult(
+      message: better,
+      nextEligibleAt: now,
     );
+    expect(result.stored, true);
+    expect(result.trickleResetPerformed, true);
+    expect(result.trickleInconsistentHeard, false);
+    expect(result.trickleReason, 'better_hop_event');
     final stored = SOSMessage.fromDbMap(
       (await db.query('sos_messages')).single,
     );
     expect(stored.hopCount, 2);
+    final state = await trickleQueue.trickleStateFor(better.id);
+    expect(state?.lastResetReason, 'better_hop_event');
   });
 
   test('upsertMessageInDb preserves better-hop preferred state', () async {

@@ -256,6 +256,70 @@ void main() {
     },
   );
 
+  test(
+    'old interval observations are pruned after interval advances',
+    () async {
+      final state = await scheduler.reset(
+        messageId: 'sos-1',
+        nowMs: now,
+        reason: 'new_state',
+      );
+      await scheduler.recordConsistentObservation(
+        messageId: state.messageId,
+        observationId: 'old-obs',
+        observerKey: 'AA:BB',
+        nowMs: now + 100,
+      );
+
+      final lateNow = now + const Duration(seconds: 30).inMilliseconds;
+      await scheduler.recordConsistentObservation(
+        messageId: state.messageId,
+        observationId: 'new-obs',
+        observerKey: 'AA:BB',
+        nowMs: lateNow,
+      );
+
+      final rows = await db.query(
+        'trickle_observations',
+        orderBy: 'observation_id ASC',
+      );
+      expect(rows.map((row) => row['observation_id']), ['new-obs']);
+    },
+  );
+
+  test('delayed old observation does not increment current interval', () async {
+    final state = await scheduler.reset(
+      messageId: 'sos-1',
+      nowMs: now,
+      reason: 'new_state',
+    );
+    final lateNow = now + const Duration(seconds: 30).inMilliseconds;
+    await scheduler.recordConsistentObservation(
+      messageId: state.messageId,
+      observationId: 'current-obs',
+      observerKey: 'AA:BB',
+      nowMs: lateNow,
+    );
+    final advanced = await scheduler.stateFor(state.messageId);
+    expect(advanced!.intervalStartedAt, greaterThan(state.intervalStartedAt));
+
+    final recorded = await scheduler.recordConsistentObservation(
+      messageId: state.messageId,
+      observationId: 'old-delayed-obs',
+      observerKey: 'AA:BB',
+      nowMs: now + 100,
+    );
+
+    final stored = await scheduler.stateFor(state.messageId);
+    final rows = await db.query('trickle_observations');
+    expect(recorded, isFalse);
+    expect(stored!.consistencyCount, 1);
+    expect(
+      rows.map((row) => row['observation_id']),
+      isNot(contains('old-delayed-obs')),
+    );
+  });
+
   test('persisted trickle state survives scheduler reconstruction', () async {
     final state = await scheduler.reset(
       messageId: 'sos-1',

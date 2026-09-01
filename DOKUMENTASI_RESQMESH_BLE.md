@@ -98,8 +98,12 @@ dalam satu burst dari observer yang sama tetap menjadi satu observation, retry
 worker atas item yang sama tetap idempotent, tetapi burst independen berikutnya
 atau observer BLE berbeda membuat observation baru. `device_address` hanya
 metadata diskriminator sementara dari Android scanner, bukan identitas node
-permanen. Jika alamat tidak tersedia, fallback `unknown:<waktu>` tetap membuat
-observasi berbasis burst sehingga tidak collapse permanen.
+permanen. Better-hop tidak hilang di native dedupe karena perubahan hop
+mengubah raw payload 17 byte dan hash payload observasi. Jika alamat tidak
+tersedia, fallback `unknown:<burstStartedAt>` tetap membuat observasi berbasis
+burst sehingga tidak collapse permanen. Tanpa alamat BLE, dua transmitter fisik
+berbeda dengan payload sama dalam bucket burst yang sama tidak selalu bisa
+dibedakan reliabel.
 
 ## Format Payload BLE 17 Byte
 
@@ -202,6 +206,12 @@ timer. State scheduler yang dilaporkan adalah `stopped`, `selecting`,
 Bluetooth mati, dan advertiser unsupported adalah state blocked event-driven;
 scheduler tidak memasang wake timer zero-delay. Kegagalan transient memakai
 exponential retry mulai 15 detik dan dibatasi 5 menit.
+
+`trickle_observations` hanya dipakai untuk idempotency `c` pada interval aktif.
+Saat interval baru aktif, observation lama untuk message tersebut dipangkas dari
+tabel idempotency, sedangkan bukti penelitian tetap tersimpan di
+`experiment_events`. Delayed retry dari native inbox yang timestamp receive-nya
+lebih lama dari interval aktif tidak menaikkan `c` interval baru.
 
 Advertiser native memakai generation ID agar callback lama setelah timeout atau
 restart tidak merusak state advertiser baru. Dart melakukan reconciliation jika

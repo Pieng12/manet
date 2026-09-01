@@ -126,6 +126,30 @@ class NativeBleInboxProtocolTest {
     }
 
     @Test
+    fun sameLogicalPacketWithHopChangedIsNotRawDeduped() {
+        val hopThree = hex("52 4D 00 00 00 7B 00 00 2A 0E 45 FD 2A 83 1F 00 03")
+        val hopOne = hex("52 4D 00 00 00 7B 00 00 2A 0E 45 FD 2A 83 1F 00 01")
+        val first = NativeBleInbox.storeForTest("[]", hopThree, "AA:AA", -60, 1000L, 1000L)
+        val second = NativeBleInbox.storeForTest(first.itemsJson, hopOne, "AA:AA", -61, 1100L, 1100L)
+        val receiver = BleWakeUpReceiver()
+        val firstKey = receiver.dedupeCacheKey(
+            hopThree,
+            "AA:AA",
+            hopThree.joinToString("") { String.format("%02X", it) }
+        )
+        val secondKey = receiver.dedupeCacheKey(
+            hopOne,
+            "AA:AA",
+            hopOne.joinToString("") { String.format("%02X", it) }
+        )
+
+        assertEquals(NativeBleInboxStoreStatus.NEW_PENDING, second.result.status)
+        assertNotEquals(firstKey, secondKey)
+        assertNotEquals(first.result.observationId, second.result.observationId)
+        assertEquals(2, JSONArray(second.itemsJson).length())
+    }
+
+    @Test
     fun sameDeviceSamePayloadLaterBurstCreatesNewObservation() {
         val payload = hex("52 4D C6 A2 99 A9 E2 6F 7D 0E 45 FD 2A 83 1F 00 01")
         val first = NativeBleInbox.storeForTest("[]", payload, "AA:AA", -60, 1000L, 1000L)
@@ -137,6 +161,19 @@ class NativeBleInboxProtocolTest {
     }
 
     @Test
+    fun unknownDeviceSamePayloadInsideBurstUsesStableFallbackObservation() {
+        val payload = hex("52 4D C6 A2 99 A9 E2 6F 7D 0E 45 FD 2A 83 1F 00 01")
+        val first = NativeBleInbox.storeForTest("[]", payload, "unknown", -60, 1000L, 1000L)
+        val second = NativeBleInbox.storeForTest(first.itemsJson, payload, "unknown", -61, 2000L, 2000L)
+        val items = JSONArray(second.itemsJson)
+
+        assertEquals(NativeBleInboxStoreStatus.EXISTING_PENDING, second.result.status)
+        assertEquals(first.result.observationId, second.result.observationId)
+        assertEquals(1, items.length())
+        assertEquals("unknown:0", items.getJSONObject(0).getString("observer_key"))
+    }
+
+    @Test
     fun unknownDeviceLaterBurstDoesNotPermanentlyCollapse() {
         val payload = hex("52 4D C6 A2 99 A9 E2 6F 7D 0E 45 FD 2A 83 1F 00 01")
         val first = NativeBleInbox.storeForTest("[]", payload, "unknown", -60, 1000L, 1000L)
@@ -144,6 +181,19 @@ class NativeBleInboxProtocolTest {
 
         assertNotEquals(first.result.observationId, second.result.observationId)
         assertEquals(2, JSONArray(second.itemsJson).length())
+    }
+
+    @Test
+    fun unknownAddressRestartSimulationKeepsSameBurstObservationIdentity() {
+        val payload = hex("52 4D C6 A2 99 A9 E2 6F 7D 0E 45 FD 2A 83 1F 00 01")
+        val first = NativeBleInbox.storeForTest("[]", payload, null, -60, 1010L, 1010L)
+        val restartedProcess = NativeBleInbox.storeForTest("[]", payload, null, -61, 4040L, 4040L)
+
+        assertEquals(first.result.observationId, restartedProcess.result.observationId)
+        assertEquals(
+            NativeBleInbox.observerKey(null, 1010L, 1010L),
+            NativeBleInbox.observerKey(null, 4040L, 4040L)
+        )
     }
 
     @Test

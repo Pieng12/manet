@@ -82,4 +82,21 @@ void main() {
     expect(docs, contains('local-device transmission metric'));
     expect(docs, contains('Network-wide overhead requires merged peer logs'));
   });
+
+  test(
+    'Trickle recovery distinguishes persisted and initialized state logs',
+    () {
+      final relay = read('lib/services/ble_relay_service.dart');
+
+      expect(relay, contains('preRecoveryTrickleStateIds'));
+      expect(relay, contains('persisted_state_found'));
+      expect(relay, contains('recovery_state_missing'));
+      expect(relay, contains('ExperimentEventTypes.trickleStateRecovered'));
+      expect(relay, contains('ExperimentEventTypes.trickleReset'));
+      expect(
+        relay.indexOf('if (persistedStateFound)'),
+        lessThan(relay.indexOf('ExperimentEventTypes.trickleStateRecovered')),
+      );
+    },
+  );
 }
