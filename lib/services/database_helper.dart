@@ -11,7 +11,7 @@ import 'package:pkmproject/utils/sos_state_ordering.dart';
 import 'package:pkmproject/utils/sos_status_priority.dart';
 
 class DatabaseHelper {
-  static const int databaseVersion = 10;
+  static const int databaseVersion = 11;
 
   static final DatabaseHelper _instance = DatabaseHelper._internal();
   static Database? _database;
@@ -153,6 +153,11 @@ class DatabaseHelper {
       await ensureExperimentColumns(db);
       await ensureExperimentIndexes(db);
     }
+
+    if (oldVersion < 11) {
+      await ensureTrickleTables(db);
+      await ensureTrickleObservationSchema(db);
+    }
   }
 
   static Future<void> ensureTrickleTables(Database db) async {
@@ -167,7 +172,39 @@ class DatabaseHelper {
     if (!tableNames.contains('trickle_observations')) {
       await db.execute(createTrickleObservationsTableSql);
     }
+    await ensureTrickleObservationSchema(db);
     await db.execute(createTrickleObservationsIndexSql);
+  }
+
+  static Future<void> ensureTrickleObservationSchema(Database db) async {
+    final columns = await db.rawQuery(
+      'PRAGMA table_info(trickle_observations)',
+    );
+    if (columns.isEmpty) return;
+    final columnNames = columns.map((row) => row['name'] as String).toSet();
+    if (columnNames.contains('observation_id')) return;
+
+    await db.execute(
+      'ALTER TABLE trickle_observations RENAME TO trickle_observations_legacy',
+    );
+    await db.execute(createTrickleObservationsTableSql);
+    await db.execute('''
+INSERT OR IGNORE INTO trickle_observations (
+  message_id,
+  interval_started_at,
+  observation_id,
+  observer_key,
+  first_seen_at
+)
+SELECT
+  message_id,
+  interval_started_at,
+  message_id || ':' || interval_started_at || ':' || observer_key,
+  observer_key,
+  first_seen_at
+FROM trickle_observations_legacy
+''');
+    await db.execute('DROP TABLE trickle_observations_legacy');
   }
 
   static Future<void> ensureAckTombstonesTable(Database db) async {

@@ -3,6 +3,7 @@ import 'dart:math';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pkmproject/database_schema.dart';
 import 'package:pkmproject/models/trickle_state.dart';
+import 'package:pkmproject/services/database_helper.dart';
 import 'package:pkmproject/services/trickle_scheduler.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
@@ -56,6 +57,7 @@ void main() {
       expect(
         await scheduler.recordConsistentObservation(
           messageId: state.messageId,
+          observationId: 'obs-1',
           observerKey: 'AA:BB',
           nowMs: now + 100,
         ),
@@ -64,6 +66,7 @@ void main() {
       expect(
         await scheduler.recordConsistentObservation(
           messageId: state.messageId,
+          observationId: 'obs-1',
           observerKey: 'AA:BB',
           nowMs: now + 200,
         ),
@@ -74,6 +77,29 @@ void main() {
       expect(stored!.consistencyCount, 1);
     },
   );
+
+  test('different observation from same observer increments c again', () async {
+    final state = await scheduler.reset(
+      messageId: 'sos-1',
+      nowMs: now,
+      reason: 'new_state',
+    );
+
+    for (final observation in ['obs-1', 'obs-2']) {
+      expect(
+        await scheduler.recordConsistentObservation(
+          messageId: state.messageId,
+          observationId: observation,
+          observerKey: 'AA:BB',
+          nowMs: now + 100,
+        ),
+        isTrue,
+      );
+    }
+
+    final stored = await scheduler.stateFor(state.messageId);
+    expect(stored!.consistencyCount, 2);
+  });
 
   test('transmission is allowed when c is below k', () async {
     final state = await scheduler.reset(
@@ -100,6 +126,7 @@ void main() {
     for (final observer in ['n1', 'n2']) {
       await scheduler.recordConsistentObservation(
         messageId: state.messageId,
+        observationId: 'obs-$observer',
         observerKey: observer,
         nowMs: now + 100,
       );
@@ -159,4 +186,120 @@ void main() {
     expect(reset.intervalMs, 8000);
     expect(reset.lastResetReason, 'better_hop');
   });
+
+  test('incoming inconsistency at Imin does not restart interval', () async {
+    final state = await scheduler.reset(
+      messageId: 'sos-1',
+      nowMs: now,
+      reason: 'new_state',
+    );
+
+    final result = await scheduler.handleInconsistentInformation(
+      messageId: state.messageId,
+      nowMs: now + 1000,
+      reason: 'incoming_inconsistent_state',
+    );
+
+    expect(result.resetPerformed, isFalse);
+    expect(result.reason, 'already_at_imin');
+    expect(result.state.intervalStartedAt, state.intervalStartedAt);
+    expect(result.state.transmitAt, state.transmitAt);
+  });
+
+  test('incoming inconsistency above Imin resets to Imin', () async {
+    var state = await scheduler.reset(
+      messageId: 'sos-1',
+      nowMs: now,
+      reason: 'new_state',
+    );
+    state = await scheduler.advanceInterval(
+      messageId: state.messageId,
+      nowMs: state.intervalEndAt,
+    );
+
+    final result = await scheduler.handleInconsistentInformation(
+      messageId: state.messageId,
+      nowMs: state.intervalStartedAt + 1000,
+      reason: 'incoming_inconsistent_state',
+    );
+
+    expect(result.resetPerformed, isTrue);
+    expect(result.state.intervalMs, 8000);
+    expect(result.state.intervalStartedAt, state.intervalStartedAt + 1000);
+  });
+
+  test(
+    'late observation normalizes expired intervals before incrementing c',
+    () async {
+      final state = await scheduler.reset(
+        messageId: 'sos-1',
+        nowMs: now,
+        reason: 'new_state',
+      );
+      final lateNow = now + const Duration(seconds: 30).inMilliseconds;
+
+      expect(
+        await scheduler.recordConsistentObservation(
+          messageId: state.messageId,
+          observationId: 'late-obs',
+          observerKey: 'AA:BB',
+          nowMs: lateNow,
+        ),
+        isTrue,
+      );
+
+      final stored = await scheduler.stateFor(state.messageId);
+      expect(stored!.intervalStartedAt, greaterThan(state.intervalStartedAt));
+      expect(stored.intervalEndAt, greaterThan(lateNow));
+      expect(stored.intervalMs, lessThanOrEqualTo(64000));
+      expect(stored.consistencyCount, 1);
+    },
+  );
+
+  test('persisted trickle state survives scheduler reconstruction', () async {
+    final state = await scheduler.reset(
+      messageId: 'sos-1',
+      nowMs: now,
+      reason: 'new_state',
+    );
+    final restored = await TrickleScheduler(database: db).stateFor('sos-1');
+
+    expect(restored!.messageId, state.messageId);
+    expect(restored.transmitAt, state.transmitAt);
+  });
+
+  test(
+    'legacy observer-key observation schema migrates non-destructively',
+    () async {
+      await db.execute('DROP TABLE trickle_observations');
+      await db.execute('''
+CREATE TABLE trickle_observations (
+  message_id TEXT NOT NULL,
+  interval_started_at INTEGER NOT NULL,
+  observer_key TEXT NOT NULL,
+  first_seen_at INTEGER NOT NULL,
+  PRIMARY KEY(message_id, interval_started_at, observer_key)
+)
+''');
+      await db.insert('trickle_observations', {
+        'message_id': 'sos-legacy',
+        'interval_started_at': now,
+        'observer_key': 'ble:AA',
+        'first_seen_at': now + 1,
+      });
+
+      await DatabaseHelper.ensureTrickleObservationSchema(db);
+
+      final columns = await db.rawQuery(
+        'PRAGMA table_info(trickle_observations)',
+      );
+      final columnNames = columns.map((row) => row['name']).toSet();
+      expect(columnNames, contains('observation_id'));
+
+      final rows = await db.query('trickle_observations');
+      expect(rows, hasLength(1));
+      expect(rows.single['observer_key'], 'ble:AA');
+      expect(rows.single['observation_id'], 'sos-legacy:$now:ble:AA');
+    },
+  );
 }

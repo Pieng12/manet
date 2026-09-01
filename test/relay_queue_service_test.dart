@@ -256,6 +256,27 @@ void main() {
     expect(await queue.getItem(sos.id, 'sos'), isNull);
   });
 
+  test('ACK deletes matching Trickle state', () async {
+    final trickle = RelayQueueService(
+      database: db,
+      random: Random(1),
+      mode: ForwardingMode.trickle,
+    );
+    final sos = message('trickle-acked', senderCrc: 12345, updatedAt: now);
+    await trickle.storeAndQueueSos(message: sos, nextEligibleAt: now);
+    expect(await trickle.trickleStateFor(sos.id), isNotNull);
+
+    await trickle.acceptAndQueueAck(
+      senderCrc: sos.senderCrc!,
+      ackTimestampMs: now,
+      status: SOSMessageStatus.resolved,
+      nowMs: now,
+    );
+
+    expect(await trickle.getItem(sos.id, 'sos'), isNull);
+    expect(await trickle.trickleStateFor(sos.id), isNull);
+  });
+
   test('queue remains fair with multiple SOS and ACK items', () async {
     final sosA = message('fair-a');
     final sosB = message('fair-b');
@@ -445,6 +466,7 @@ void main() {
       expect(
         await trickle.recordConsistentSosObservation(
           messageId: sos.id,
+          observationId: 'obs-1',
           observerKey: 'AA:BB:CC:DD:EE:FF',
           nowMs: now + 1,
         ),
@@ -463,6 +485,56 @@ void main() {
       expect(item.nextEligibleAt, decision.state.intervalEndAt);
     },
   );
+
+  test('trickle observation id controls idempotent c increments', () async {
+    final trickle = RelayQueueService(
+      database: db,
+      random: Random(1),
+      mode: ForwardingMode.trickle,
+    );
+    final sos = message('trickle-observations', senderCrc: 4350);
+    await trickle.storeAndQueueSos(message: sos, nextEligibleAt: now);
+
+    expect(
+      await trickle.recordConsistentSosObservation(
+        messageId: sos.id,
+        observationId: 'obs-1',
+        observerKey: 'ble:AA',
+        nowMs: now + 1,
+      ),
+      isTrue,
+    );
+    expect(
+      await trickle.recordConsistentSosObservation(
+        messageId: sos.id,
+        observationId: 'obs-1',
+        observerKey: 'ble:AA',
+        nowMs: now + 2,
+      ),
+      isFalse,
+    );
+    expect(
+      await trickle.recordConsistentSosObservation(
+        messageId: sos.id,
+        observationId: 'obs-2',
+        observerKey: 'ble:AA',
+        nowMs: now + 3,
+      ),
+      isTrue,
+    );
+    expect(
+      await trickle.recordConsistentSosObservation(
+        messageId: sos.id,
+        observationId: 'obs-3',
+        observerKey: 'ble:BB',
+        nowMs: now + 4,
+      ),
+      isTrue,
+    );
+
+    final state = await trickle.trickleStateFor(sos.id);
+    expect(state!.consistencyCount, 3);
+  });
 
   test(
     'trickle interval end doubles I and schedules the next transmit',

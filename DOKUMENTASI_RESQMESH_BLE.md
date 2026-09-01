@@ -91,9 +91,15 @@ Native inbox hanya di-ack setelah Dart mengembalikan hasil eksplisit:
 `accepted`, `duplicate`, `stale`, `suppressedByAck`, atau `invalid`. Hasil
 `failedRetryable` tetap berada di inbox sebagai item gagal agar WorkManager bisa
 mencoba lagi.
-Exact payload yang sudah `processed` tetap dideduplikasi selama retention
-native inbox sehingga object SharedPreferences tidak tumbuh linear saat packet
-17-byte yang sama diulang lama.
+Native inbox tidak lagi memakai exact-payload suppression jangka panjang
+sebagai identitas observasi. Identitas utama adalah `observation_id`: hash dari
+payload 17 byte, observer key, dan bucket waktu burst. Repetisi radio mentah
+dalam satu burst dari observer yang sama tetap menjadi satu observation, retry
+worker atas item yang sama tetap idempotent, tetapi burst independen berikutnya
+atau observer BLE berbeda membuat observation baru. `device_address` hanya
+metadata diskriminator sementara dari Android scanner, bukan identitas node
+permanen. Jika alamat tidak tersedia, fallback `unknown:<waktu>` tetap membuat
+observasi berbasis burst sehingga tidak collapse permanen.
 
 ## Format Payload BLE 17 Byte
 
@@ -163,13 +169,29 @@ packet berikutnya dari persistent queue. Mode `trickle` default memakai:
 - fairness antar SOS;
 - interval Trickle `[Imin, Imax]`;
 - consistency counter dan suppression;
-- jitter;
+- waktu transmit acak `t` dalam `[I/2, I)`;
 - relay count sebagai metrik saja.
 
 Basic flooding disediakan sebagai pembanding eksperimen dan memakai interval
 tetap pendek plus jitter, tanpa Trickle suppression.
+Mode `trickle` tidak memakai legacy relay jitter untuk SOS; randomisasi SOS
+hanya berasal dari `t` Trickle dalam separuh akhir interval.
 ACK tetap prioritas tinggi, tetapi scheduler membatasi slot ACK beruntun agar
 SOS eligible mendapat giliran setelah batas fairness.
+
+Istilah Trickle yang dipakai ResQMesh:
+
+- Consistent: SOS dengan `sender_crc`, timestamp protokol, dan status yang sama,
+  tanpa better-hop. Ini menaikkan `c` sekali per `observation_id` unik.
+- Inconsistent: state baru atau perubahan state yang harus disebarkan. Jika
+  interval saat ini lebih besar dari `Imin`, scheduler reset ke `Imin`; jika
+  sudah di `Imin`, interval tidak diulang dan log mencatat
+  `reset_performed=false`.
+- Better-hop: integrasi ResQMesh untuk packet sender/timestamp/status yang sama
+  tetapi resulting hop tersimpan lebih rendah. Ini memperbarui state dan reset
+  Trickle dengan alasan `better_hop_event`.
+- Stale: packet yang lebih lama atau prioritas statusnya lebih rendah sehingga
+  tidak mengganti state, tidak menaikkan `c`, dan tidak mereset interval.
 
 Jika tidak ada item eligible tetapi queue belum kosong, scheduler tidak berhenti
 permanen. `RelayQueueService.earliestNextEligibleAt()` mengambil waktu minimum
@@ -285,16 +307,23 @@ Checklist pengujian ada di
 Relay Monitor menyediakan export session eksperimen ke JSON dan CSV. Event yang
 dicatat mencakup pembuatan SOS, request advertising, packet diterima, duplicate,
 relay queued/dropped, ACK, gateway upload, service lifecycle, dan recovery.
+Untuk mode Trickle, event utama mencakup `TRICKLE_RESET`,
+`TRICKLE_INTERVAL_STARTED`, `TRICKLE_CONSISTENT_HEARD`,
+`TRICKLE_INCONSISTENT_HEARD`, `TRICKLE_TX_ALLOWED`,
+`TRICKLE_TX_SUPPRESSED`, dan `TRICKLE_STATE_RECOVERED`.
 
 Metrik utama:
 
-- delivery success rate;
-- end-to-end latency;
+- delivery success rate: `SUCCESS / (SUCCESS + FAILED)` untuk trial valid;
+- end-to-end latency: tujuan menerima SOS valid pertama dikurangi source
+  berhasil memulai advertise SOS pertama, bukan dari `SOS_CREATED`;
 - relay latency;
 - gateway latency;
 - ACK latency;
-- duplicate rate;
-- forwarding overhead;
+- logical duplicate ratio: `duplicates / (accepted + duplicates)`;
+- forwarding overhead network-wide: total successful SOS TX starts
+  (`BLE_ADVERTISE_STARTED`/`BLE_RELAY_STARTED`) dari log gabungan dibagi SOS
+  logical yang delivered. Event suppressed tidak dihitung sebagai TX;
 - RSSI terhadap keberhasilan penerimaan.
 
 Panduan lengkap ada di

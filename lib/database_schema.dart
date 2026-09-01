@@ -94,9 +94,10 @@ const String createTrickleObservationsTableSql = '''
 CREATE TABLE trickle_observations (
   message_id TEXT NOT NULL,
   interval_started_at INTEGER NOT NULL,
-  observer_key TEXT NOT NULL,
+  observation_id TEXT NOT NULL,
+  observer_key TEXT NULL,
   first_seen_at INTEGER NOT NULL,
-  PRIMARY KEY(message_id, interval_started_at, observer_key)
+  PRIMARY KEY(message_id, interval_started_at, observation_id)
 );
 ''';
 

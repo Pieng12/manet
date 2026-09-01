@@ -25,6 +25,36 @@ enum RelaySchedulerState {
   failedUnsupported,
 }
 
+class SosQueueStoreResult {
+  const SosQueueStoreResult({
+    required this.stored,
+    this.trickleState,
+    this.trickleResetPerformed = false,
+    this.trickleInconsistentHeard = false,
+    this.trickleReason,
+  });
+
+  final bool stored;
+  final TrickleState? trickleState;
+  final bool trickleResetPerformed;
+  final bool trickleInconsistentHeard;
+  final String? trickleReason;
+}
+
+class _TrickleSosPreparation {
+  const _TrickleSosPreparation({
+    required this.state,
+    required this.resetPerformed,
+    required this.inconsistentHeard,
+    required this.reason,
+  });
+
+  final TrickleState state;
+  final bool resetPerformed;
+  final bool inconsistentHeard;
+  final String reason;
+}
+
 class RelayQueueService {
   RelayQueueService({
     Database? database,
@@ -204,6 +234,21 @@ class RelayQueueService {
     required int nextEligibleAt,
     bool failAfterStoreForTest = false,
   }) async {
+    final result = await storeAndQueueSosWithResult(
+      message: message,
+      priority: priority,
+      nextEligibleAt: nextEligibleAt,
+      failAfterStoreForTest: failAfterStoreForTest,
+    );
+    return result.stored;
+  }
+
+  Future<SosQueueStoreResult> storeAndQueueSosWithResult({
+    required SOSMessage message,
+    int priority = 0,
+    required int nextEligibleAt,
+    bool failAfterStoreForTest = false,
+  }) async {
     final db = await _db;
     return db.transaction((txn) async {
       final latestExisting = await _latestMessageForSenderInExecutor(
@@ -212,7 +257,7 @@ class RelayQueueService {
       );
       if (latestExisting != null &&
           _compareMessageState(message, latestExisting) <= 0) {
-        return false;
+        return const SosQueueStoreResult(stored: false);
       }
 
       if (latestExisting != null) {
@@ -248,13 +293,15 @@ class RelayQueueService {
       }
 
       var sosNextEligibleAt = nextEligibleAt;
+      _TrickleSosPreparation? tricklePreparation;
       if (_mode == ForwardingMode.trickle) {
-        final state = await trickleScheduler.reset(
-          messageId: message.id,
+        tricklePreparation = await _prepareTrickleForStoredSos(
+          trickleScheduler,
+          message: message,
+          latestExisting: latestExisting,
           nowMs: nextEligibleAt,
-          reason: latestExisting == null ? 'new_state' : 'state_improved',
         );
-        sosNextEligibleAt = state.transmitAt;
+        sosNextEligibleAt = tricklePreparation.state.transmitAt;
       }
 
       await _upsertInExecutor(
@@ -270,7 +317,14 @@ class RelayQueueService {
         ),
         resetMetrics: latestExisting != null,
       );
-      return true;
+      return SosQueueStoreResult(
+        stored: true,
+        trickleState: tricklePreparation?.state,
+        trickleResetPerformed: tricklePreparation?.resetPerformed ?? false,
+        trickleInconsistentHeard:
+            tricklePreparation?.inconsistentHeard ?? false,
+        trickleReason: tricklePreparation?.reason,
+      );
     });
   }
 
@@ -627,6 +681,7 @@ WHERE id = ?
 
   Future<bool> recordConsistentSosObservation({
     required String messageId,
+    required String observationId,
     required String observerKey,
     required int nowMs,
   }) async {
@@ -637,6 +692,7 @@ WHERE id = ?
       random: _random,
     ).recordConsistentObservation(
       messageId: messageId,
+      observationId: observationId,
       observerKey: observerKey,
       nowMs: nowMs,
     );
@@ -645,6 +701,12 @@ WHERE id = ?
   Future<TrickleState?> trickleStateFor(String messageId) async {
     final db = await _db;
     return TrickleScheduler(database: db).stateFor(messageId);
+  }
+
+  Future<List<TrickleState>> allTrickleStates() async {
+    final db = await _db;
+    final rows = await db.query('trickle_states', orderBy: 'message_id ASC');
+    return rows.map(TrickleState.fromDbMap).toList();
   }
 
   Future<TrickleTransmitDecision> handleTrickleQueueEvent({
@@ -912,6 +974,61 @@ WHERE id = ?
 
   int _compareMessageState(SOSMessage a, SOSMessage b) {
     return compareSosState(a, b);
+  }
+
+  Future<_TrickleSosPreparation> _prepareTrickleForStoredSos(
+    TrickleScheduler scheduler, {
+    required SOSMessage message,
+    required SOSMessage? latestExisting,
+    required int nowMs,
+  }) async {
+    if (latestExisting == null || message.id != latestExisting.id) {
+      final reason = latestExisting == null ? 'new_state' : 'new_logical_state';
+      final state = await scheduler.reset(
+        messageId: message.id,
+        nowMs: nowMs,
+        reason: reason,
+      );
+      return _TrickleSosPreparation(
+        state: state,
+        resetPerformed: true,
+        inconsistentHeard: latestExisting != null,
+        reason: reason,
+      );
+    }
+
+    if (_isBetterHopUpdate(message, latestExisting)) {
+      const reason = 'better_hop_event';
+      final state = await scheduler.reset(
+        messageId: message.id,
+        nowMs: nowMs,
+        reason: 'better_hop_event',
+      );
+      return _TrickleSosPreparation(
+        state: state,
+        resetPerformed: true,
+        inconsistentHeard: false,
+        reason: reason,
+      );
+    }
+
+    final result = await scheduler.handleInconsistentInformation(
+      messageId: message.id,
+      nowMs: nowMs,
+      reason: 'incoming_inconsistent_state',
+    );
+    return _TrickleSosPreparation(
+      state: result.state,
+      resetPerformed: result.resetPerformed,
+      inconsistentHeard: true,
+      reason: result.reason,
+    );
+  }
+
+  bool _isBetterHopUpdate(SOSMessage message, SOSMessage existing) {
+    return message.updatedAt == existing.updatedAt &&
+        message.status == existing.status &&
+        message.hopCount < existing.hopCount;
   }
 
   int _recoveredSosEligibleAt(SOSMessage message, int nowMs) {

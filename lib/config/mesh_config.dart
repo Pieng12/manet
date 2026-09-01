@@ -49,10 +49,10 @@ class MeshConfig {
   static const Duration relayCooldown = Duration(seconds: 10);
   static const Duration basicFloodingInterval = Duration(seconds: 2);
   static const Duration sosAdvertiseBurstDuration = Duration(seconds: 2);
-  static const Duration trickleImin = Duration(seconds: 8);
+  static const int trickleIminMs = 8000;
+  static const Duration trickleImin = Duration(milliseconds: trickleIminMs);
   static const int trickleImaxDoublings = 5;
   static const int trickleRedundancyConstant = 1;
-  static const int trickleIminMs = 8000;
   static const int trickleImaxMs = trickleIminMs * (1 << trickleImaxDoublings);
   static const Duration trickleImax = Duration(milliseconds: trickleImaxMs);
   static const Duration relayJitterMin = Duration(milliseconds: 300);

@@ -28,6 +28,7 @@ void main() {
             receivedAtMs,
             receivedElapsedRealtimeMs,
             deviceAddress,
+            observationId,
           }) async => results.removeAt(0),
       acknowledge: (id) async => acknowledged.add(id),
       fail: (id) async => failed.add(id),
@@ -53,6 +54,7 @@ void main() {
             receivedAtMs,
             receivedElapsedRealtimeMs,
             deviceAddress,
+            observationId,
           }) async => BleProcessingResult.failedRetryable,
       acknowledge: (id) async => acknowledged.add(id),
       fail: (id) async => failed.add(id),
@@ -78,6 +80,7 @@ void main() {
             receivedAtMs,
             receivedElapsedRealtimeMs,
             deviceAddress,
+            observationId,
           }) async {
             throw StateError('sqlite locked');
           },
@@ -93,6 +96,7 @@ void main() {
   test('passes native receive timestamps to processor', () async {
     int? receivedAt;
     int? elapsedAt;
+    String? seenObservationId;
 
     final completed = await service.drain(
       items: [
@@ -102,6 +106,7 @@ void main() {
           'rssi': -81,
           'received_at': 123456,
           'received_elapsed_realtime_ms': 654321,
+          'observation_id': 'obs-123',
         },
       ],
       process:
@@ -111,9 +116,11 @@ void main() {
             receivedAtMs,
             receivedElapsedRealtimeMs,
             deviceAddress,
+            observationId,
           }) async {
             receivedAt = receivedAtMs;
             elapsedAt = receivedElapsedRealtimeMs;
+            seenObservationId = observationId;
             return BleProcessingResult.accepted;
           },
       acknowledge: (_) async {},
@@ -123,5 +130,6 @@ void main() {
     expect(completed, true);
     expect(receivedAt, 123456);
     expect(elapsedAt, 654321);
+    expect(seenObservationId, 'obs-123');
   });
 }

@@ -7,7 +7,6 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.security.MessageDigest
 import java.util.Base64
-import java.util.UUID
 
 data class NativeBlePacketMetadata(
     val senderCrc: Long,
@@ -26,6 +25,7 @@ enum class NativeBleInboxStoreStatus {
 
 data class NativeBleInboxStoreResult(
     val id: String,
+    val observationId: String,
     val status: NativeBleInboxStoreStatus,
     val shouldScheduleWorker: Boolean
 )
@@ -56,13 +56,19 @@ object NativeBleInbox {
     ): NativeBleInboxStoreResult {
         cleanupProcessed(context, receivedAt)
         val payloadBase64 = Base64.getEncoder().encodeToString(payload)
-        val identity = exactPayloadHash(payload)
+        val payloadHash = exactPayloadHash(payload)
+        val observerKey = observerKey(deviceAddress, receivedAt, receivedElapsedRealtimeMs)
+        val burstStartedAt = burstStartedAt(receivedElapsedRealtimeMs, receivedAt)
+        val observationId = observationId(payloadHash, observerKey, burstStartedAt)
         val metadata = protocolMetadata(payload)
         val items = readItems(context)
         val mutation = storeIntoItems(
             items = items,
             payloadBase64 = payloadBase64,
-            identity = identity,
+            observationId = observationId,
+            payloadHash = payloadHash,
+            observerKey = observerKey,
+            burstStartedAt = burstStartedAt,
             metadata = metadata,
             deviceAddress = deviceAddress,
             rssi = rssi,
@@ -139,10 +145,16 @@ object NativeBleInbox {
         receivedElapsedRealtimeMs: Long = receivedAt
     ): NativeBleInboxStoreMutation {
         val payloadBase64 = Base64.getEncoder().encodeToString(payload)
+        val payloadHash = exactPayloadHash(payload)
+        val observerKey = observerKey(deviceAddress, receivedAt, receivedElapsedRealtimeMs)
+        val burstStartedAt = burstStartedAt(receivedElapsedRealtimeMs, receivedAt)
         return storeIntoItems(
             items = JSONArray(rawItemsJson),
             payloadBase64 = payloadBase64,
-            identity = exactPayloadHash(payload),
+            observationId = observationId(payloadHash, observerKey, burstStartedAt),
+            payloadHash = payloadHash,
+            observerKey = observerKey,
+            burstStartedAt = burstStartedAt,
             metadata = protocolMetadata(payload),
             deviceAddress = deviceAddress,
             rssi = rssi,
@@ -154,7 +166,10 @@ object NativeBleInbox {
     private fun storeIntoItems(
         items: JSONArray,
         payloadBase64: String,
-        identity: String,
+        observationId: String,
+        payloadHash: String,
+        observerKey: String,
+        burstStartedAt: Long,
         metadata: NativeBlePacketMetadata?,
         deviceAddress: String?,
         rssi: Int,
@@ -163,7 +178,7 @@ object NativeBleInbox {
     ): NativeBleInboxStoreMutation {
         for (i in 0 until items.length()) {
             val item = items.getJSONObject(i)
-            if (item.optString("identity") != identity) continue
+            if (item.optString("observation_id", item.optString("id")) != observationId) continue
 
             val duplicateCount = item.optInt("duplicate_count", 0) + 1
             item.put("last_seen_at", receivedAt)
@@ -172,14 +187,13 @@ object NativeBleInbox {
             item.put("duplicate_count", duplicateCount)
 
             if (item.optString("state") == STATE_PROCESSED) {
-                item.put("state", STATE_PENDING)
-                item.put("processed_at", JSONObject.NULL)
                 return NativeBleInboxStoreMutation(
                     items.toString(),
                     NativeBleInboxStoreResult(
                         id = item.getString("id"),
+                        observationId = observationId,
                         status = NativeBleInboxStoreStatus.KNOWN_PROCESSED_DUPLICATE,
-                        shouldScheduleWorker = true
+                        shouldScheduleWorker = false
                     )
                 )
             }
@@ -188,18 +202,23 @@ object NativeBleInbox {
                 items.toString(),
                 NativeBleInboxStoreResult(
                     id = item.getString("id"),
+                    observationId = observationId,
                     status = NativeBleInboxStoreStatus.EXISTING_PENDING,
                     shouldScheduleWorker = true
                 )
             )
         }
 
-        val id = UUID.randomUUID().toString()
+        val id = observationId
         items.put(
             JSONObject()
                 .put("id", id)
+                .put("observation_id", observationId)
                 .put("payload_base64", payloadBase64)
                 .put("device_address", deviceAddress ?: "")
+                .put("observer_key", observerKey)
+                .put("burst_started_elapsed_realtime_ms", burstStartedAt)
+                .put("exact_payload_hash", payloadHash)
                 .put("rssi", rssi)
                 .put("last_rssi", rssi)
                 .put("received_at", receivedAt)
@@ -210,7 +229,7 @@ object NativeBleInbox {
                 .put("attempt_count", 0)
                 .put("duplicate_count", 0)
                 .put("state", STATE_PENDING)
-                .put("identity", identity)
+                .put("identity", observationId)
                 .put("sender_crc", metadata?.senderCrc ?: JSONObject.NULL)
                 .put("timestamp_compact", metadata?.timestampCompact ?: JSONObject.NULL)
                 .put("status", metadata?.status ?: JSONObject.NULL)
@@ -222,6 +241,7 @@ object NativeBleInbox {
             items.toString(),
             NativeBleInboxStoreResult(
                 id = id,
+                observationId = observationId,
                 status = NativeBleInboxStoreStatus.NEW_PENDING,
                 shouldScheduleWorker = true
             )
@@ -301,6 +321,36 @@ object NativeBleInbox {
         return MessageDigest.getInstance("SHA-256")
             .digest(payload)
             .joinToString("") { "%02x".format(it) }
+    }
+
+    fun observationId(payloadHash: String, observerKey: String, burstStartedAt: Long): String {
+        val raw = "$payloadHash|$observerKey|$burstStartedAt"
+        return MessageDigest.getInstance("SHA-256")
+            .digest(raw.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
+    }
+
+    fun observerKey(
+        deviceAddress: String?,
+        receivedAt: Long,
+        receivedElapsedRealtimeMs: Long
+    ): String {
+        val normalized = deviceAddress?.trim().orEmpty()
+        return if (normalized.isNotEmpty() && normalized != "unknown") {
+            "ble:$normalized"
+        } else {
+            "unknown:${receivedElapsedRealtimeMs.takeIf { it > 0L } ?: receivedAt}"
+        }
+    }
+
+    fun burstStartedAt(receivedElapsedRealtimeMs: Long, receivedAt: Long = 0L): Long {
+        val base = if (receivedElapsedRealtimeMs > 0L) receivedElapsedRealtimeMs else receivedAt
+        return if (base > 0L) {
+            base / BleWakeUpReceiver.DEDUPLICATION_WINDOW_MS *
+                BleWakeUpReceiver.DEDUPLICATION_WINDOW_MS
+        } else {
+            0L
+        }
     }
 
     private fun u24(b0: Byte, b1: Byte, b2: Byte): Int {

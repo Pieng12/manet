@@ -14,7 +14,7 @@ class BleWakeUpReceiver : BroadcastReceiver() {
 
     companion object {
         private const val TAG = "BleWakeUpReceiver"
-        private const val DEDUPLICATION_WINDOW_MS = 5000L
+        const val DEDUPLICATION_WINDOW_MS = 5000L
 
         private val lastProcessedPayloads = mutableMapOf<String, Long>()
     }
@@ -134,7 +134,7 @@ class BleWakeUpReceiver : BroadcastReceiver() {
             receivedElapsedRealtimeMs
         )
         if (!storeResult.shouldScheduleWorker) {
-            Log.i(TAG, "Exact BLE payload already processed; worker recovery not scheduled")
+            Log.i(TAG, "BLE burst observation already processed; worker recovery not scheduled")
             return
         }
         val inboxId = storeResult.id
@@ -154,6 +154,7 @@ class BleWakeUpReceiver : BroadcastReceiver() {
             action = NativeBleManager.BLE_WAKE_UP_ACTION
             putExtra("payload", payloadBase64)
             putExtra("inbox_id", inboxId)
+            putExtra("observation_id", storeResult.observationId)
             putExtra("device_address", deviceAddress)
             putExtra("rssi", rssi)
             putExtra("received_at", receivedAt)

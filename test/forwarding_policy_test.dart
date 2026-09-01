@@ -9,6 +9,16 @@ void main() {
   const senderCrc = 12345;
   final now = DateTime.utc(2026, 8, 4, 12).millisecondsSinceEpoch;
 
+  test('trickle Imax is derived from a single Imin source of truth', () {
+    expect(MeshConfig.trickleImin.inMilliseconds, MeshConfig.trickleIminMs);
+    expect(
+      MeshConfig.trickleImaxMs,
+      MeshConfig.trickleImin.inMilliseconds *
+          (1 << MeshConfig.trickleImaxDoublings),
+    );
+    expect(MeshConfig.trickleImax.inMilliseconds, MeshConfig.trickleImaxMs);
+  });
+
   BlePacket sosPacket({
     int? timestampMs,
     int hopCount = 0,

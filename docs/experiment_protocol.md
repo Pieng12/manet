@@ -60,6 +60,8 @@ Event minimal yang sudah dicatat:
 
 - `SOS_CREATED`
 - `BLE_ADVERTISE_REQUESTED`
+- `BLE_ADVERTISE_STARTED`
+- `BLE_ADVERTISE_FAILED`
 - `BLE_PACKET_RECEIVED`
 - `BLE_PACKET_STORED`
 - `BLE_PACKET_DUPLICATE`
@@ -94,6 +96,13 @@ Event minimal yang sudah dicatat:
 - `SERVICE_STARTED`
 - `SERVICE_STOPPED`
 - `RELAY_STATE_RECOVERED`
+- `TRICKLE_RESET`
+- `TRICKLE_INTERVAL_STARTED`
+- `TRICKLE_CONSISTENT_HEARD`
+- `TRICKLE_INCONSISTENT_HEARD`
+- `TRICKLE_TX_ALLOWED`
+- `TRICKLE_TX_SUPPRESSED`
+- `TRICKLE_STATE_RECOVERED`
 
 ## Export
 
@@ -106,18 +115,19 @@ Buka Relay Monitor, lalu tekan `Export Experiment Data`. Aplikasi membuat file:
 
 Hitung metrik dari event export:
 
-- Delivery success rate: pesan unik yang diterima tujuan dibagi pesan unik yang
-  dibuat sumber.
-- End-to-end latency: `BLE_PACKET_RECEIVED.timestamp_ms` pada tujuan dikurangi
-  `SOS_CREATED.timestamp_ms` pada sumber.
+- Delivery success rate: `SUCCESS / (SUCCESS + FAILED)` untuk trial valid.
+- End-to-end latency: first valid SOS receive pada tujuan dikurangi first
+  successful SOS advertise pada source, bukan `SOS_CREATED`.
 - Relay latency: `BLE_RELAY_QUEUED.timestamp_ms` dikurangi
   `BLE_PACKET_STORED.timestamp_ms`.
 - Gateway latency: `GATEWAY_UPLOAD_SUCCEEDED.timestamp_ms` dikurangi
   `GATEWAY_UPLOAD_STARTED.timestamp_ms`.
-- Duplicate rate: jumlah `BLE_PACKET_DUPLICATE` dibagi jumlah
-  `BLE_PACKET_RECEIVED`.
-- Forwarding overhead: jumlah `BLE_ADVERTISE_REQUESTED` dibagi pesan unik yang
-  delivered.
+- Logical duplicate ratio: jumlah `BLE_PACKET_DUPLICATE` dibagi
+  `BLE_PACKET_ACCEPTED + BLE_PACKET_DUPLICATE`.
+- Forwarding overhead network-wide: jumlah successful SOS TX starts dari
+  `BLE_ADVERTISE_STARTED`/`BLE_RELAY_STARTED` di log gabungan semua node dibagi
+  pesan logical SOS yang delivered. `BLE_ADVERTISE_REQUESTED` dan
+  `TRICKLE_TX_SUPPRESSED` bukan TX sukses.
 
 Timestamp lintas perangkat bergantung pada sinkronisasi clock. Untuk durasi
 dalam satu perangkat, gunakan event dari session yang sama.
@@ -131,7 +141,11 @@ advertising sukses.
 Timestamp BLE memakai presisi satu detik. Gunakan timestamp canonical dari
 payload/identity saat menghitung duplicate, ACK tombstone, dan recovery queue.
 Mode `basic` memakai interval tetap pendek plus jitter, sedangkan `trickle`
-memakai interval `[Imin, Imax]`, consistency counter `k`, dan suppression.
+memakai interval `[Imin, Imax]`, consistency counter `k`, waktu transmit acak
+`t` dalam `[I/2, I)`, dan suppression. Consistent observation menaikkan `c`
+sekali per `observation_id`; raw BLE repeat dalam burst yang sama tidak
+menambah `c`, tetapi burst independen berikutnya dari observer yang sama dapat
+menjadi observation baru.
 
 ## Catatan P5 untuk Uji Perangkat Fisik
 

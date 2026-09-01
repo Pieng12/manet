@@ -130,6 +130,7 @@ class MeshBackgroundService : Service() {
                 NativeBleManager.BLE_WAKE_UP_ACTION -> {
                     val payloadBase64 = intent.getStringExtra("payload")
                     val inboxId = intent.getStringExtra("inbox_id")
+                    val observationId = intent.getStringExtra("observation_id")
                     val deviceAddress = intent.getStringExtra("device_address")
                     val rssi = intent.getIntExtra("rssi", 0)
                     val receivedAt = intent.getLongExtra("received_at", 0L)
@@ -140,6 +141,7 @@ class MeshBackgroundService : Service() {
                         deviceAddress,
                         rssi,
                         inboxId = inboxId,
+                        observationId = observationId,
                         receivedAt = receivedAt,
                         receivedElapsedRealtimeMs = receivedElapsedRealtimeMs
                     )
@@ -437,6 +439,7 @@ class MeshBackgroundService : Service() {
         rssi: Int,
         retryCount: Int = 0,
         inboxId: String? = null,
+        observationId: String? = null,
         receivedAt: Long = 0L,
         receivedElapsedRealtimeMs: Long = 0L
     ) {
@@ -447,6 +450,7 @@ class MeshBackgroundService : Service() {
             rssi,
             retryCount,
             inboxId,
+            observationId,
             receivedAt,
             receivedElapsedRealtimeMs
         )
@@ -459,6 +463,7 @@ class MeshBackgroundService : Service() {
         rssi: Int,
         retryCount: Int = 0,
         inboxId: String? = null,
+        observationId: String? = null,
         receivedAt: Long = 0L,
         receivedElapsedRealtimeMs: Long = 0L
     ) {
@@ -480,6 +485,7 @@ class MeshBackgroundService : Service() {
                         rssi,
                         retryCount + 1,
                         inboxId,
+                        observationId,
                         receivedAt,
                         receivedElapsedRealtimeMs
                     )
@@ -501,6 +507,7 @@ class MeshBackgroundService : Service() {
                 val arguments = mapOf(
                     "payload" to payloadBase64,
                     "inbox_id" to (inboxId ?: ""),
+                    "observation_id" to (observationId ?: inboxId ?: ""),
                     "device_address" to (deviceAddress ?: ""),
                     "rssi" to rssi,
                     "received_at" to receivedAt.takeIf { it > 0L },

@@ -16,6 +16,10 @@ ditafsirkan melebihi kemampuan implementasi saat ini.
   penerima.
 - Timestamp ACK dan SOS dicanonicalize ke presisi detik; analisis sub-detik
   harus memakai log lokal, bukan payload BLE.
+- Native `device_address` pada scan BLE hanya dipakai sebagai metadata
+  diskriminator observation sementara. Android dapat memakai alamat acak atau
+  tidak menyediakan alamat, sehingga identitas node permanen tetap berasal dari
+  payload/state ResQMesh.
 - Karena forwarding bersifat persistent sampai ACK, interval Trickle dan
   suppression wajib dipantau pada pengujian baterai multi-jam.
 - Fairness ACK/SOS diverifikasi unit test, tetapi dampaknya pada kepadatan radio

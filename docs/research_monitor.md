@@ -59,7 +59,10 @@ Never mix clock domains. Jangan pernah mengurangi wall-clock dengan
 CROSS DEVICE:
 
 ```text
-E2E latency = destination.event_timestamp_ms - source.event_timestamp_ms
+E2E latency =
+destination first valid SOS receive event_timestamp_ms
+-
+source first successful SOS advertise event_timestamp_ms
 ```
 
 Cross-device latency hanya memakai synchronized wall-clock research time.
@@ -157,6 +160,8 @@ destination_first_receive_timestamp
 source_first_advertise_timestamp
 ```
 
+`source_first_advertise_timestamp` berasal dari successful SOS TX start
+(`BLE_ADVERTISE_STARTED`/`BLE_RELAY_STARTED`), bukan dari `SOS_CREATED`.
 Jika bukti peer tidak ada, Research Monitor menampilkan `Requires peer log`.
 Jangan menghitung E2E dari clock device yang tidak disinkronkan.
 
@@ -175,9 +180,10 @@ untuk forwarding SOS.
 
 ## Better-Hop Behavior
 
-ResQMesh tetap memakai epidemic forwarding. Untuk equal sender/timestamp/status
-state, packet dengan resulting stored hop yang lebih kecil diperlakukan sebagai
-better-hop state update atau route-quality correction. Storage ordering final:
+ResQMesh memakai Trickle Algorithm untuk mengontrol retransmission SOS di atas
+persistent store-and-forward. Untuk equal sender/timestamp/status state, packet
+dengan resulting stored hop yang lebih kecil diperlakukan sebagai better-hop
+state update atau route-quality correction. Storage ordering final:
 
 ```text
 protocol timestamp
@@ -201,6 +207,29 @@ adalah `BLE_PACKET_ACCEPTED`, lalu `BLE_PACKET_STORED`, `BLE_RELAY_QUEUED`, dan
 first matching `BLE_RELAY_STARTED` hanya ditempel jika timestamp-nya sama atau
 lebih baru dari accepted RX. Jika belum ada relay setelah accepted RX, `Hop Out`
 dan `Advertised At` ditampilkan kosong.
+
+## Trickle Observation Semantics
+
+Trickle observation dihitung dari `observation_id`, bukan dari alamat BLE saja
+dan bukan dari exact payload hash jangka panjang. Raw BLE repeats dalam satu
+advertising burst dari observer yang sama collapse menjadi satu observation.
+Burst independen berikutnya dari observer yang sama boleh menaikkan `c` lagi,
+dan payload sama dari observer BLE berbeda juga menjadi observation berbeda.
+Jika `device_address` tidak tersedia, native memakai fallback `unknown:<waktu>`
+sebagai discriminator berbasis burst.
+
+Event audit Trickle yang harus dipakai:
+
+- `TRICKLE_RESET`
+- `TRICKLE_INTERVAL_STARTED`
+- `TRICKLE_CONSISTENT_HEARD`
+- `TRICKLE_INCONSISTENT_HEARD`
+- `TRICKLE_TX_ALLOWED`
+- `TRICKLE_TX_SUPPRESSED`
+- `TRICKLE_STATE_RECOVERED`
+
+`TRICKLE_TX_SUPPRESSED` bukan TX radio, tidak boleh menaikkan relay count, dan
+tidak boleh dipakai sebagai forwarding overhead.
 
 ## ACK Metrics
 

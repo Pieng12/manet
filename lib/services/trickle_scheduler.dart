@@ -62,45 +62,121 @@ class TrickleScheduler {
     return reset(messageId: messageId, nowMs: nowMs, reason: reason);
   }
 
+  Future<TrickleState> normalizeInterval({
+    required String messageId,
+    required int nowMs,
+  }) async {
+    final current = await ensureState(
+      messageId: messageId,
+      nowMs: nowMs,
+      reason: 'normalize_recovery',
+    );
+    if (nowMs < current.intervalEndAt) return current;
+
+    var intervalMs = current.intervalMs;
+    var intervalStartedAt = current.intervalStartedAt;
+    var intervalEndAt = current.intervalEndAt;
+    while (nowMs >= intervalEndAt) {
+      intervalStartedAt = intervalEndAt;
+      intervalMs = min(intervalMs * 2, _imaxMs);
+      intervalEndAt = intervalStartedAt + intervalMs;
+      if (intervalMs == _imaxMs && nowMs >= intervalEndAt) {
+        final skippedIntervals = ((nowMs - intervalEndAt) ~/ _imaxMs) + 1;
+        intervalStartedAt += skippedIntervals * _imaxMs;
+        intervalEndAt = intervalStartedAt + intervalMs;
+      }
+    }
+
+    final state = _newInterval(
+      messageId: messageId,
+      intervalMs: intervalMs,
+      nowMs: intervalStartedAt,
+      resetReason: current.lastResetReason,
+    );
+    return _upsert(state);
+  }
+
   Future<bool> recordConsistentObservation({
     required String messageId,
+    required String observationId,
     required String observerKey,
     required int nowMs,
   }) async {
-    final state = await ensureState(
-      messageId: messageId,
-      nowMs: nowMs,
-      reason: 'consistent_recovery',
-    );
+    if (_db is Database) {
+      return _db.transaction((txn) {
+        return TrickleScheduler(
+          database: txn,
+          random: _random,
+          imin: Duration(milliseconds: _iminMs),
+          imax: Duration(milliseconds: _imaxMs),
+          redundancyConstant: _redundancyConstant,
+        ).recordConsistentObservation(
+          messageId: messageId,
+          observationId: observationId,
+          observerKey: observerKey,
+          nowMs: nowMs,
+        );
+      });
+    }
+
+    final state = await normalizeInterval(messageId: messageId, nowMs: nowMs);
     final inserted = await _db.insert('trickle_observations', {
       'message_id': messageId,
       'interval_started_at': state.intervalStartedAt,
+      'observation_id': observationId,
       'observer_key': observerKey,
       'first_seen_at': nowMs,
     }, conflictAlgorithm: ConflictAlgorithm.ignore);
     if (inserted == 0) return false;
 
-    await _db.update(
-      'trickle_states',
-      {'consistency_count': state.consistencyCount + 1, 'updated_at': nowMs},
-      where: 'message_id = ? AND interval_started_at = ?',
-      whereArgs: [messageId, state.intervalStartedAt],
+    await _db.rawUpdate(
+      '''
+UPDATE trickle_states
+SET consistency_count = consistency_count + 1,
+    updated_at = ?
+WHERE message_id = ?
+  AND interval_started_at = ?
+''',
+      [nowMs, messageId, state.intervalStartedAt],
     );
     return true;
+  }
+
+  Future<TrickleInconsistencyResult> handleInconsistentInformation({
+    required String messageId,
+    required int nowMs,
+    required String reason,
+  }) async {
+    final state = await normalizeInterval(messageId: messageId, nowMs: nowMs);
+    if (state.intervalMs <= _iminMs) {
+      return TrickleInconsistencyResult(
+        state: state,
+        resetPerformed: false,
+        reason: 'already_at_imin',
+      );
+    }
+    final resetState = await reset(
+      messageId: messageId,
+      nowMs: nowMs,
+      reason: reason,
+    );
+    return TrickleInconsistencyResult(
+      state: resetState,
+      resetPerformed: true,
+      reason: reason,
+    );
   }
 
   Future<TrickleTransmitDecision> handleQueueEvent({
     required String messageId,
     required int nowMs,
   }) async {
-    var state = await ensureState(
-      messageId: messageId,
-      nowMs: nowMs,
-      reason: 'queue_recovered',
-    );
+    final previous = await stateFor(messageId);
+    final state = await normalizeInterval(messageId: messageId, nowMs: nowMs);
 
-    if (nowMs >= state.intervalEndAt) {
-      state = await advanceInterval(messageId: messageId, nowMs: nowMs);
+    if (previous != null &&
+        previous.intervalStartedAt != state.intervalStartedAt &&
+        nowMs < state.transmitAt) {
       return TrickleTransmitDecision(
         type: TrickleTransmitDecisionType.intervalAdvanced,
         state: state,

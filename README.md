@@ -11,7 +11,7 @@ Project berada pada tahap implementasi dan pengujian skripsi. Fitur inti yang
 sudah tersedia:
 
 - Payload BLE connectionless sepanjang 17 byte.
-- ACK-terminated persistent epidemic forwarding.
+- Trickle Algorithm untuk kontrol retransmission/dissemination SOS.
 - Hop count tersaturasi di 63, Trickle interval, jitter, dan deduplikasi packet.
 - Persistent relay queue dengan prioritas ACK.
 - ACK gateway sebagai persistent anti-message.
@@ -59,6 +59,12 @@ baru meng-ack item native jika hasilnya selesai non-retryable.
 Headless Worker relay support sudah diimplementasikan pada level source dan
 masih harus divalidasi di perangkat Android fisik.
 
+Native inbox memakai `observation_id` berbasis payload, discriminator observer,
+dan bucket waktu burst. Repetisi radio mentah dalam satu burst tetap idempotent,
+sementara burst berikutnya atau observer BLE berbeda menjadi observation baru
+untuk consistency count Trickle. Alamat BLE dipakai hanya sebagai metadata
+sementara dari Android scanner, bukan identitas node permanen.
+
 Scheduler BLE dimiliki oleh background Dart isolate. UI isolate hanya mengirim
 command dan membaca state. Saat queue belum eligible, `RelayQueueService`
 menyediakan `earliestNextEligibleAt()` dan `BleAdvertiserService` memasang wake
@@ -81,16 +87,17 @@ retry/backoff 15 detik sampai 5 menit.
 
 ## Alur Relay
 
-Relay memakai ACK-terminated persistent epidemic forwarding. Setiap node
-menyimpan SOS aktif di persistent relay queue dan terus mengiklankan ulang
-selama belum ada ACK server, belum digantikan state yang lebih baru, dan belum
-dihapus secara administratif. `hopCount` tetap dikirim sebagai metrik dan
+Relay memakai Trickle Algorithm untuk mengontrol retransmission SOS di atas
+persistent store-and-forward ResQMesh. Setiap node menyimpan SOS aktif di
+persistent relay queue sampai ada ACK server, digantikan state yang lebih baru,
+atau dihapus secara administratif. `hopCount` tetap dikirim sebagai metrik dan
 disaturasi pada 63 agar tidak overflow kembali ke 0.
 
 Mode forwarding:
 
-- `trickle` default: scheduler `RelayQueueService` memakai interval Trickle
-  (`Imin`, `Imax`, `k`), consistency counter, suppression, fairness, dan jitter.
+- `trickle` default: scheduler `RelayQueueService` memilih waktu transmit acak
+  di `[I/2, I)`, memakai consistency counter `c`, redundancy constant `k`,
+  interval doubling sampai `Imax`, suppression, dan fairness.
 - `basic`: scheduler memakai interval dan slot aktual 2 detik plus jitter
   sebagai pembanding eksperimen yang lebih agresif.
 

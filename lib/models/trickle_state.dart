@@ -101,3 +101,15 @@ class TrickleTransmitDecision {
   bool get shouldSuppress =>
       type == TrickleTransmitDecisionType.suppressTransmit;
 }
+
+class TrickleInconsistencyResult {
+  final TrickleState state;
+  final bool resetPerformed;
+  final String reason;
+
+  const TrickleInconsistencyResult({
+    required this.state,
+    required this.resetPerformed,
+    required this.reason,
+  });
+}

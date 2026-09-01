@@ -209,6 +209,7 @@ void backgroundServiceMain() {
         );
         final deviceAddress = args['device_address'] as String?;
         final inboxId = args['inbox_id'] as String?;
+        final observationId = args['observation_id'] as String? ?? inboxId;
         if (payloadBase64 == null || payloadBase64.isEmpty) return;
 
         try {
@@ -218,6 +219,7 @@ void backgroundServiceMain() {
             receivedAtMs: receivedAtMs,
             receivedElapsedRealtimeMs: receivedElapsedRealtimeMs,
             deviceAddress: deviceAddress,
+            observationId: observationId,
           );
           if (inboxId != null && inboxId.isNotEmpty) {
             if (result.shouldAcknowledgeInbox) {

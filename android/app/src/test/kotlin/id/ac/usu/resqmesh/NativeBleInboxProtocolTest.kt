@@ -53,43 +53,97 @@ class NativeBleInboxProtocolTest {
     }
 
     @Test
-    fun exactPendingDuplicateReturnsSameInboxRecord() {
+    fun hopChangeKeepsLogicalTrickleConsistencyFields() {
+        val hopOne = NativeBleInbox.protocolMetadata(
+            hex("52 4D C6 A2 99 A9 E2 6F 7D 0E 45 FD 2A 83 1F 00 01")
+        )!!
+        val hopTwo = NativeBleInbox.protocolMetadata(
+            hex("52 4D C6 A2 99 A9 E2 6F 7D 0E 45 FD 2A 83 1F 00 02")
+        )!!
+
+        assertEquals(hopOne.senderCrc, hopTwo.senderCrc)
+        assertEquals(hopOne.timestampCompact, hopTwo.timestampCompact)
+        assertEquals(hopOne.status, hopTwo.status)
+        assertNotEquals(hopOne.hop, hopTwo.hop)
+    }
+
+    @Test
+    fun sameDeviceSamePayloadRawRepeatsInsideBurstUseOneObservation() {
         val payload = hex("52 4D C6 A2 99 A9 E2 6F 7D 0E 45 FD 2A 83 1F 00 01")
-        val first = NativeBleInbox.storeForTest("[]", payload, "dev", -60, 1000L)
-        val second = NativeBleInbox.storeForTest(first.itemsJson, payload, "dev", -61, 2000L)
+        val first = NativeBleInbox.storeForTest("[]", payload, "AA:AA", -60, 1000L, 1000L)
+        val second = NativeBleInbox.storeForTest(first.itemsJson, payload, "AA:AA", -61, 2000L, 2000L)
         val items = JSONArray(second.itemsJson)
 
         assertEquals(NativeBleInboxStoreStatus.NEW_PENDING, first.result.status)
         assertEquals(NativeBleInboxStoreStatus.EXISTING_PENDING, second.result.status)
         assertEquals(first.result.id, second.result.id)
+        assertEquals(first.result.observationId, second.result.observationId)
         assertTrue(second.result.shouldScheduleWorker)
         assertEquals(1, items.length())
         assertEquals(1, items.getJSONObject(0).getInt("duplicate_count"))
         assertEquals(2000L, items.getJSONObject(0).getLong("last_seen_at"))
         assertEquals(-61, items.getJSONObject(0).getInt("last_rssi"))
+        assertEquals(first.result.observationId, items.getJSONObject(0).getString("observation_id"))
     }
 
     @Test
-    fun exactProcessedDuplicateReopensRecordForTrickleObservation() {
+    fun processedObservationRetryKeepsSameObservationAndDoesNotReschedule() {
         val payload = hex("52 4D C6 A2 99 A9 E2 6F 7D 0E 45 FD 2A 83 1F 00 01")
-        val first = NativeBleInbox.storeForTest("[]", payload, "dev", -60, 1000L)
+        val first = NativeBleInbox.storeForTest("[]", payload, "AA:AA", -60, 1000L, 1000L)
         val items = JSONArray(first.itemsJson)
         items.getJSONObject(0)
             .put("state", "processed")
             .put("processed_at", 1500L)
 
-        val duplicate = NativeBleInbox.storeForTest(items.toString(), payload, "dev", -62, 2000L)
+        val duplicate = NativeBleInbox.storeForTest(items.toString(), payload, "AA:AA", -62, 2000L, 2000L)
         val after = JSONArray(duplicate.itemsJson)
 
         assertEquals(
             NativeBleInboxStoreStatus.KNOWN_PROCESSED_DUPLICATE,
             duplicate.result.status
         )
-        assertTrue(duplicate.result.shouldScheduleWorker)
+        assertFalse(duplicate.result.shouldScheduleWorker)
         assertEquals(first.result.id, duplicate.result.id)
+        assertEquals(first.result.observationId, duplicate.result.observationId)
         assertEquals(1, after.length())
-        assertEquals("pending", after.getJSONObject(0).getString("state"))
+        assertEquals("processed", after.getJSONObject(0).getString("state"))
         assertEquals(1, after.getJSONObject(0).getInt("duplicate_count"))
+    }
+
+    @Test
+    fun differentDeviceSameExactPayloadCreatesDifferentObservations() {
+        val payload = hex("52 4D C6 A2 99 A9 E2 6F 7D 0E 45 FD 2A 83 1F 00 01")
+        val first = NativeBleInbox.storeForTest("[]", payload, "AA:AA", -60, 1000L, 1000L)
+        val second = NativeBleInbox.storeForTest(first.itemsJson, payload, "BB:BB", -61, 1100L, 1100L)
+        val items = JSONArray(second.itemsJson)
+
+        assertEquals(NativeBleInboxStoreStatus.NEW_PENDING, second.result.status)
+        assertNotEquals(first.result.id, second.result.id)
+        assertNotEquals(first.result.observationId, second.result.observationId)
+        assertEquals(2, items.length())
+        assertEquals("ble:AA:AA", items.getJSONObject(0).getString("observer_key"))
+        assertEquals("ble:BB:BB", items.getJSONObject(1).getString("observer_key"))
+    }
+
+    @Test
+    fun sameDeviceSamePayloadLaterBurstCreatesNewObservation() {
+        val payload = hex("52 4D C6 A2 99 A9 E2 6F 7D 0E 45 FD 2A 83 1F 00 01")
+        val first = NativeBleInbox.storeForTest("[]", payload, "AA:AA", -60, 1000L, 1000L)
+        val second = NativeBleInbox.storeForTest(first.itemsJson, payload, "AA:AA", -61, 8000L, 8000L)
+
+        assertEquals(NativeBleInboxStoreStatus.NEW_PENDING, second.result.status)
+        assertNotEquals(first.result.observationId, second.result.observationId)
+        assertEquals(2, JSONArray(second.itemsJson).length())
+    }
+
+    @Test
+    fun unknownDeviceLaterBurstDoesNotPermanentlyCollapse() {
+        val payload = hex("52 4D C6 A2 99 A9 E2 6F 7D 0E 45 FD 2A 83 1F 00 01")
+        val first = NativeBleInbox.storeForTest("[]", payload, "unknown", -60, 1000L, 1000L)
+        val second = NativeBleInbox.storeForTest(first.itemsJson, payload, "unknown", -61, 8000L, 8000L)
+
+        assertNotEquals(first.result.observationId, second.result.observationId)
+        assertEquals(2, JSONArray(second.itemsJson).length())
     }
 
     @Test
