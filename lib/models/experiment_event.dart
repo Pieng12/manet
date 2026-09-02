@@ -18,6 +18,7 @@ class ExperimentEvent {
   final int? hopCount;
   final int? rssi;
   final String? payloadHash;
+  final String? eventKey;
   final String? detailJson;
 
   const ExperimentEvent({
@@ -40,6 +41,7 @@ class ExperimentEvent {
     this.hopCount,
     this.rssi,
     this.payloadHash,
+    this.eventKey,
     this.detailJson,
   });
 
@@ -64,6 +66,7 @@ class ExperimentEvent {
       'hop_count': hopCount,
       'rssi': rssi,
       'payload_hash': payloadHash,
+      'event_key': eventKey,
       'detail_json': detailJson,
     };
   }
@@ -89,6 +92,7 @@ class ExperimentEvent {
       hopCount: map['hop_count'] as int?,
       rssi: map['rssi'] as int?,
       payloadHash: map['payload_hash'] as String?,
+      eventKey: map['event_key'] as String?,
       detailJson: map['detail_json'] as String?,
     );
   }

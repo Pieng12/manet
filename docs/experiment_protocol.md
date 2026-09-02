@@ -168,9 +168,11 @@ kedua. Logical duplicate berarti `observation_id` berbeda tetapi state SOS
 logis sama; ini adalah consistent transmission yang valid untuk duplicate ratio
 dan Trickle suppression.
 
-`BLE_PACKET_RECEIVED` dihitung sebagai observasi fisik pertama untuk
-`observation_id` non-kosong. Retry protocol dari `failed_retryable` atau lease
-expired tetap dapat memperbaiki state durable, tetapi tidak menambah event RX
+`BLE_PACKET_RECEIVED` dihitung sebagai observasi fisik idempotent untuk
+`observation_id` non-kosong dengan `event_key`
+`BLE_PACKET_RECEIVED|observation_id`. Retry protocol dari `failed_retryable`
+atau lease expired tetap dapat memperbaiki state durable dan mengisi event RX
+yang hilang akibat crash sebelum log commit, tetapi tidak menambah event RX
 normal, RSSI sample, hop-in sample, atau `ACK_RECEIVED` kedua untuk ACK yang
 sama. Packet dengan `observation_id` berbeda tetap menjadi observasi fisik baru.
 

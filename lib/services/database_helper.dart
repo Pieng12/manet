@@ -17,6 +17,7 @@ class ProcessedBleObservationClaim {
     required this.state,
     required this.isFirstClaim,
     required this.isRetryClaim,
+    required this.firstReceivedAt,
   });
 
   final String observationId;
@@ -24,6 +25,7 @@ class ProcessedBleObservationClaim {
   final String state;
   final bool isFirstClaim;
   final bool isRetryClaim;
+  final int firstReceivedAt;
 
   bool get isCompleted => state == 'completed';
   bool get isInProgress => state == 'processing' && !shouldProcess;
@@ -31,7 +33,7 @@ class ProcessedBleObservationClaim {
 }
 
 class DatabaseHelper {
-  static const int databaseVersion = 12;
+  static const int databaseVersion = 13;
   static const Duration processedBleObservationRetention = Duration(hours: 24);
   static const Duration processedBleObservationLease = Duration(minutes: 10);
 
@@ -193,6 +195,12 @@ class DatabaseHelper {
     if (oldVersion < 12) {
       await ensureProcessedBleObservationsTable(db);
     }
+
+    if (oldVersion < 13) {
+      await ensureExperimentTables(db);
+      await ensureExperimentColumns(db);
+      await ensureExperimentIndexes(db);
+    }
   }
 
   static Future<void> ensureProcessedBleObservationsTable(Database db) async {
@@ -318,11 +326,13 @@ FROM trickle_observations_legacy
           state: 'processing',
           isFirstClaim: true,
           isRetryClaim: false,
+          firstReceivedAt: receivedAtMs,
         );
       }
 
       final row = rows.first;
       final state = row['state']?.toString() ?? 'completed';
+      final firstReceivedAt = row['first_received_at'] as int? ?? receivedAtMs;
       final updatedAt = row['updated_at'] as int? ?? 0;
       final staleProcessing =
           state == 'processing' &&
@@ -347,6 +357,7 @@ FROM trickle_observations_legacy
           state: 'processing',
           isFirstClaim: false,
           isRetryClaim: true,
+          firstReceivedAt: firstReceivedAt,
         );
       }
 
@@ -356,6 +367,7 @@ FROM trickle_observations_legacy
         state: state,
         isFirstClaim: false,
         isRetryClaim: false,
+        firstReceivedAt: firstReceivedAt,
       );
     });
   }

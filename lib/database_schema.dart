@@ -213,6 +213,7 @@ CREATE TABLE experiment_events (
   hop_count INTEGER NULL,
   rssi INTEGER NULL,
   payload_hash TEXT NULL,
+  event_key TEXT NULL,
   detail_json TEXT NULL
 );
 ''';
@@ -228,6 +229,7 @@ const Map<String, String> experimentEventColumnDefinitions = {
   'status': 'TEXT NULL',
   'hop_in': 'INTEGER NULL',
   'hop_out': 'INTEGER NULL',
+  'event_key': 'TEXT NULL',
 };
 
 const List<String> experimentIndexSql = [
@@ -237,4 +239,6 @@ const List<String> experimentIndexSql = [
       'ON experiment_trials(session_id, status)',
   'CREATE INDEX IF NOT EXISTS idx_experiment_events_session_trial_time '
       'ON experiment_events(session_id, trial_id, event_timestamp_ms)',
+  'CREATE UNIQUE INDEX IF NOT EXISTS idx_experiment_events_event_key '
+      'ON experiment_events(event_key)',
 ];

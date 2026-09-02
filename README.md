@@ -190,11 +190,13 @@ Native `received_at` diterima untuk timing RX jika tidak kosong dan tidak lebih
 dari 2 detik di masa depan terhadap waktu processing Dart.
 
 `BLE_PACKET_RECEIVED` mewakili satu observasi fisik/native, bukan jumlah
-percobaan protocol. Untuk `observation_id` non-kosong, event ini hanya dicatat
-pada first claim. Reclaim dari `failed_retryable` atau lease `processing` yang
-expired tetap boleh menjalankan protocol sampai sukses, tetapi tidak menambah
-sample RSSI/hop fisik baru. `observation_id` berbeda tetap dianggap observasi
-radio baru dan tetap dicatat normal.
+percobaan protocol. Untuk `observation_id` non-kosong, event ini memakai
+`event_key` deterministik `BLE_PACKET_RECEIVED|observation_id`, sehingga retry
+protocol dapat mengisi event yang hilang akibat crash setelah claim tetapi
+tidak dapat membuat duplikat. Reclaim dari `failed_retryable` atau lease
+`processing` yang expired tetap boleh menjalankan protocol sampai sukses,
+tetapi tidak menambah sample RSSI/hop fisik baru. `observation_id` berbeda tetap
+dianggap observasi radio baru dan tetap dicatat normal.
 
 Durable protocol commit boundary dipisahkan dari side-effect. Setelah transaksi
 SOS, duplicate logical, atau ACK berhasil menulis state SQLite wajib

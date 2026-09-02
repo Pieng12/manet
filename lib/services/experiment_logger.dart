@@ -203,6 +203,7 @@ class ExperimentLogger {
     String? packetType,
     String? status,
     Map<String, dynamic>? detail,
+    String? eventKey,
   }) async {
     final session = await ensureSession(deviceId: deviceId);
     final trial = await ResearchSessionService(
@@ -228,10 +229,15 @@ class ExperimentLogger {
       hopOut: hopOut,
       rssi: rssi,
       payloadHash: payloadHash,
+      eventKey: eventKey,
       detailJson: detail == null ? null : jsonEncode(detail),
     );
     final db = await _db;
-    await db.insert('experiment_events', event.toDbMap());
+    await db.insert(
+      'experiment_events',
+      event.toDbMap(),
+      conflictAlgorithm: eventKey == null ? null : ConflictAlgorithm.ignore,
+    );
   }
 
   Future<int> eventCount({String? sessionId, String? trialId}) async {

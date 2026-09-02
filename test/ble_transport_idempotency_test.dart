@@ -307,7 +307,10 @@ void main() {
     expect(recovered.failed, isEmpty);
     expect(rows.single['state'], 'completed');
     expect(await db.query('sos_messages'), hasLength(1));
-    expect(await eventsOf(ExperimentEventTypes.blePacketReceived), isEmpty);
+    expect(
+      await eventsOf(ExperimentEventTypes.blePacketReceived),
+      hasLength(1),
+    );
     expect(await eventsOf(ExperimentEventTypes.blePacketDuplicate), isEmpty);
   });
 
@@ -689,6 +692,57 @@ void main() {
   );
 
   test(
+    'failed_retryable claim with missing RX event inserts it on retry',
+    () async {
+      final service = BleRelayService();
+      final db = await DatabaseHelper().database;
+      final payload = await sosPayloadBase64(
+        senderCrc: 1210,
+        timestampMs: DateTime.now().millisecondsSinceEpoch,
+        hopCount: 1,
+      );
+      final firstReceivedAt = DateTime.now().millisecondsSinceEpoch - 2000;
+      await DatabaseHelper.claimBleObservationInDb(
+        db,
+        observationId: 'obs-missing-rx-event',
+        packetType: 'sos',
+        receivedAtMs: firstReceivedAt,
+        processedAtMs: firstReceivedAt + 100,
+        sourcePath: 'direct_service',
+      );
+      await DatabaseHelper.markBleObservationRetryableInDb(
+        db,
+        'obs-missing-rx-event',
+        firstReceivedAt + 200,
+      );
+
+      final recovered = await service.processIncomingBase64(
+        payload,
+        rssi: -62,
+        receivedAtMs: DateTime.now().millisecondsSinceEpoch - 500,
+        observationId: 'obs-missing-rx-event',
+        observerKey: 'ble:AA',
+        sourcePath: 'native_inbox_drain',
+      );
+      final rxEvents = await eventsOf(ExperimentEventTypes.blePacketReceived);
+
+      expect(recovered, BleProcessingResult.accepted);
+      expect(await processedState('obs-missing-rx-event'), 'completed');
+      expect(rxEvents, hasLength(1));
+      expect(rxEvents.single['event_timestamp_ms'], firstReceivedAt);
+      expect(
+        rxEvents.single['event_key'],
+        'BLE_PACKET_RECEIVED|obs-missing-rx-event',
+      );
+      await expectPhysicalSosSamples(
+        receivedCount: 1,
+        rssiCount: 1,
+        hopInCount: 1,
+      );
+    },
+  );
+
+  test(
     'expired processing lease retry does not log another physical RX',
     () async {
       final service = BleRelayService();
@@ -716,6 +770,7 @@ void main() {
         payloadHash: 'manual-first-rx',
         packetType: 'sos',
         status: SOSMessageStatus.active.name,
+        eventKey: 'BLE_PACKET_RECEIVED|obs-lease-rx-once',
         detail: {'observation_id': 'obs-lease-rx-once'},
       );
 

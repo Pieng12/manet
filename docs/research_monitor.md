@@ -173,9 +173,10 @@ Jangan menghitung E2E dari clock device yang tidak disinkronkan.
 SOS RSSI ditampilkan sebagai statistik observasional: count, min, mean, median,
 dan max. RSSI utama hanya diambil dari `BLE_PACKET_RECEIVED` dengan
 `packet_type = sos` dan tidak dikonversi langsung menjadi meter. ACK RSSI tidak
-masuk statistik propagasi SOS utama. Karena `BLE_PACKET_RECEIVED` hanya dicatat
-pada first claim `observation_id`, retry protocol dari `failed_retryable` atau
-lease expired tidak menambah RSSI sample baru.
+masuk statistik propagasi SOS utama. Karena `BLE_PACKET_RECEIVED` memakai
+`event_key` unik per `observation_id`, retry protocol dari `failed_retryable`
+atau lease expired dapat mengisi RX event yang hilang tetapi tidak menambah RSSI
+sample kedua.
 
 Hop dipisah menjadi `hop_in` dan `hop_out`. SOS Hop In sample deskriptif hanya
 berasal dari `BLE_PACKET_RECEIVED` dengan `packet_type = sos`. SOS Hop Out
@@ -243,8 +244,9 @@ duplicate adalah `observation_id` baru untuk state SOS logis yang sama; event
 `BLE_PACKET_DUPLICATE` ini tetap masuk duplicate ratio dan dapat menaikkan
 consistency counter. Lease `processing` 10 menit menjaga retry native tetap
 recoverable jika processor pertama crash. Reclaim `failed_retryable` atau lease
-expired menjalankan protocol lagi tanpa membuat `BLE_PACKET_RECEIVED` atau
-`ACK_RECEIVED` kedua untuk `observation_id` yang sama.
+expired menjalankan protocol lagi sambil memastikan event fisik idempotent:
+`BLE_PACKET_RECEIVED|observation_id` dan `ACK_RECEIVED|observation_id` hanya
+tersimpan sekali untuk `observation_id` yang sama.
 
 Research metric mengandalkan durable commit boundary: setelah SOS, ACK, atau
 logical duplicate sudah commit ke SQLite, observation ditandai `completed`

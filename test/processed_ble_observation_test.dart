@@ -41,10 +41,12 @@ void main() {
     expect(first.shouldProcess, true);
     expect(first.isFirstClaim, true);
     expect(first.isRetryClaim, false);
+    expect(first.firstReceivedAt, 1000);
     expect(second.shouldProcess, false);
     expect(second.state, 'completed');
     expect(second.isFirstClaim, false);
     expect(second.isRetryClaim, false);
+    expect(second.firstReceivedAt, 1000);
     expect(second.isTransportDuplicate, true);
     expect(BleProcessingResult.transportDuplicate.shouldAcknowledgeInbox, true);
   });
@@ -68,10 +70,12 @@ void main() {
     expect(first.shouldProcess, true);
     expect(first.isFirstClaim, true);
     expect(first.isRetryClaim, false);
+    expect(first.firstReceivedAt, 1000);
     expect(second.shouldProcess, false);
     expect(second.state, 'processing');
     expect(second.isFirstClaim, false);
     expect(second.isRetryClaim, false);
+    expect(second.firstReceivedAt, 1000);
     expect(second.isInProgress, true);
     expect(second.isTransportDuplicate, false);
     expect(
@@ -102,6 +106,7 @@ void main() {
     expect(retry.shouldProcess, true);
     expect(retry.isFirstClaim, false);
     expect(retry.isRetryClaim, true);
+    expect(retry.firstReceivedAt, 1000);
     final rows = await db.query('processed_ble_observations');
     expect(rows.single['state'], 'processing');
   });
@@ -160,9 +165,11 @@ void main() {
     expect(beforeLease.state, 'processing');
     expect(beforeLease.isFirstClaim, false);
     expect(beforeLease.isRetryClaim, false);
+    expect(beforeLease.firstReceivedAt, 1000);
     expect(retry.shouldProcess, true);
     expect(retry.isFirstClaim, false);
     expect(retry.isRetryClaim, true);
+    expect(retry.firstReceivedAt, 1000);
   });
 
   test('cleanup keeps retention bounded without deleting fresh rows', () async {

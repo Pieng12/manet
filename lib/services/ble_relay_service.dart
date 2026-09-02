@@ -291,38 +291,42 @@ class BleRelayService {
     if (claimResult.blockedResult != null) {
       return claimResult.blockedResult!;
     }
-    final isPhysicalFirstClaim =
-        claimResult.claim == null || claimResult.claim!.isFirstClaim;
+    final physicalReceiveEventTimestamp =
+        claimResult.claim?.firstReceivedAt ?? rxAtMs;
+    final trimmedObservationId = observationId?.trim();
+    final physicalRxEventKey =
+        trimmedObservationId == null || trimmedObservationId.isEmpty
+        ? null
+        : '${ExperimentEventTypes.blePacketReceived}|$trimmedObservationId';
 
-    if (isPhysicalFirstClaim) {
-      await _runPostCommitEffect(
-        'ble_packet_received_log',
-        () => _experimentLogger.logEvent(
-          eventType: ExperimentEventTypes.blePacketReceived,
-          deviceId: SyncService().deviceId,
-          senderCrc: packet.senderCrc,
-          hopCount: packet.hopCount,
-          hopIn: packet.hopCount,
-          rssi: rssi,
-          payloadHash: packet.identity,
-          eventTimestampMs: rxAtMs,
-          elapsedRealtimeMs: receivedElapsedRealtimeMs,
-          protocolTimestampMs: packet.timestampMs,
-          packetType: packet.kind.name,
-          status: packet.status.name,
-          detail: {
-            'kind': packet.kind.name,
-            'status': packet.status.name,
-            'from_server': packet.fromServer,
-            if (observationId?.trim().isNotEmpty == true)
-              'observation_id': observationId!.trim(),
-            'observer_key': effectiveObserverKey,
-            if (receivedAtMs != null && receivedAtMs != rxAtMs)
-              'receive_time_fallback_reason': 'invalid_or_future_received_at',
-          },
-        ),
-      );
-    }
+    await _runPostCommitEffect(
+      'ble_packet_received_log',
+      () => _experimentLogger.logEvent(
+        eventType: ExperimentEventTypes.blePacketReceived,
+        deviceId: SyncService().deviceId,
+        senderCrc: packet.senderCrc,
+        hopCount: packet.hopCount,
+        hopIn: packet.hopCount,
+        rssi: rssi,
+        payloadHash: packet.identity,
+        eventTimestampMs: physicalReceiveEventTimestamp,
+        elapsedRealtimeMs: receivedElapsedRealtimeMs,
+        protocolTimestampMs: packet.timestampMs,
+        packetType: packet.kind.name,
+        status: packet.status.name,
+        eventKey: physicalRxEventKey,
+        detail: {
+          'kind': packet.kind.name,
+          'status': packet.status.name,
+          'from_server': packet.fromServer,
+          if (trimmedObservationId != null && trimmedObservationId.isNotEmpty)
+            'observation_id': trimmedObservationId,
+          'observer_key': effectiveObserverKey,
+          if (receivedAtMs != null && receivedAtMs != rxAtMs)
+            'receive_time_fallback_reason': 'invalid_or_future_received_at',
+        },
+      ),
+    );
 
     try {
       final result = packet.isAck
@@ -332,7 +336,6 @@ class BleRelayService {
               receivedAtMs: rxAtMs,
               receivedElapsedRealtimeMs: receivedElapsedRealtimeMs,
               observationId: observationId,
-              logPhysicalReceive: isPhysicalFirstClaim,
             )
           : await _processSos(
               packet,
@@ -513,7 +516,6 @@ class BleRelayService {
     int? receivedAtMs,
     int? receivedElapsedRealtimeMs,
     String? observationId,
-    required bool logPhysicalReceive,
   }) async {
     if (packet.status == SOSMessageStatus.active) {
       await _dbHelper.completeBleObservation(
@@ -542,25 +544,29 @@ class BleRelayService {
       return BleProcessingResult.invalid;
     }
 
-    if (logPhysicalReceive) {
-      await _runPostCommitEffect(
-        'ack_received_log',
-        () => _experimentLogger.logEvent(
-          eventType: ExperimentEventTypes.ackReceived,
-          deviceId: SyncService().deviceId,
-          senderCrc: packet.senderCrc,
-          hopCount: packet.hopCount,
-          hopIn: packet.hopCount,
-          rssi: rssi,
-          payloadHash: packet.identity,
-          eventTimestampMs: receivedAtMs,
-          elapsedRealtimeMs: receivedElapsedRealtimeMs,
-          protocolTimestampMs: packet.timestampMs,
-          packetType: 'ack',
-          status: packet.status.name,
-        ),
-      );
-    }
+    final trimmedObservationId = observationId?.trim();
+    final ackReceivedEventKey =
+        trimmedObservationId == null || trimmedObservationId.isEmpty
+        ? null
+        : '${ExperimentEventTypes.ackReceived}|$trimmedObservationId';
+    await _runPostCommitEffect(
+      'ack_received_log',
+      () => _experimentLogger.logEvent(
+        eventType: ExperimentEventTypes.ackReceived,
+        deviceId: SyncService().deviceId,
+        senderCrc: packet.senderCrc,
+        hopCount: packet.hopCount,
+        hopIn: packet.hopCount,
+        rssi: rssi,
+        payloadHash: packet.identity,
+        eventTimestampMs: receivedAtMs,
+        elapsedRealtimeMs: receivedElapsedRealtimeMs,
+        protocolTimestampMs: packet.timestampMs,
+        packetType: 'ack',
+        status: packet.status.name,
+        eventKey: ackReceivedEventKey,
+      ),
+    );
     final AckApplyResult result;
     try {
       result = await _relayQueue.acceptAndQueueAck(

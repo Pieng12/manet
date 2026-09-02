@@ -129,11 +129,14 @@ tersebut, sehingga retry native tidak di-ACK dan dicatat sebagai
 memungkinkan recovery jika processor pertama crash.
 
 Event `BLE_PACKET_RECEIVED` adalah sample observasi fisik per `observation_id`.
-Event ini hanya dibuat pada first claim. Retry protocol dari state
-`failed_retryable` atau reclaim lease expired tidak membuat `BLE_PACKET_RECEIVED`
-atau `ACK_RECEIVED` kedua, sehingga RSSI dan hop-in tidak terhitung ganda.
-Jika `observation_id` berbeda, packet tetap diperlakukan sebagai observasi radio
-baru dan dapat menjadi logical duplicate sesuai aturan Trickle/dedup.
+Event ini memakai `event_key` unik `BLE_PACKET_RECEIVED|observation_id`. Retry
+protocol dari state `failed_retryable` atau reclaim lease expired boleh mencoba
+menulis event RX jika crash sebelumnya terjadi setelah claim tetapi sebelum log
+persisten; jika event sudah ada, insert diabaikan. Prinsip yang sama dipakai
+untuk `ACK_RECEIVED|observation_id`, sehingga RSSI, hop-in, dan ACK receive
+tidak terhitung ganda. Jika `observation_id` berbeda, packet tetap diperlakukan
+sebagai observasi radio baru dan dapat menjadi logical duplicate sesuai aturan
+Trickle/dedup.
 
 Boundary durable protocol berada pada commit SQLite untuk SOS, duplicate
 logical, dan ACK. Setelah state wajib seperti `sos_messages`, `relay_queue`,
