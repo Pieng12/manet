@@ -125,7 +125,7 @@ Hitung metrik dari event export:
 - Logical duplicate ratio: jumlah `BLE_PACKET_DUPLICATE` dibagi
   `BLE_PACKET_ACCEPTED + BLE_PACKET_DUPLICATE`. Retry transport Android dengan
   `observation_id` yang sama hanya dicatat sebagai `BLE_TRANSPORT_DUPLICATE`
-  dan tidak masuk pembilang atau penyebut.
+  atau `BLE_TRANSPORT_IN_PROGRESS` dan tidak masuk pembilang atau penyebut.
 - Forwarding overhead network-wide: jumlah successful SOS radio TX starts dari
   event canonical `BLE_ADVERTISE_STARTED` dengan `packet_type=sos` di log
   gabungan semua node dibagi pesan logical SOS yang delivered.
@@ -157,11 +157,16 @@ Jangan membandingkan `received_elapsed_realtime_ms` dengan interval SQLite
 karena clock domain-nya berbeda.
 
 Transport duplicate berarti `observation_id` sama terkirim ulang lewat direct
-service, WorkManager, service retry, atau native inbox drain. Ini tidak
-mewakili transmisi BLE baru dan tidak boleh membuat `BLE_PACKET_RECEIVED`,
-`BLE_PACKET_DUPLICATE`, atau Trickle `c` kedua. Logical duplicate berarti
-`observation_id` berbeda tetapi state SOS logis sama; ini adalah consistent
-transmission yang valid untuk duplicate ratio dan Trickle suppression.
+service, WorkManager, service retry, atau native inbox drain. Jika row
+`processed_ble_observations` masih `processing`, retry dicatat sebagai
+`BLE_TRANSPORT_IN_PROGRESS` dan item native tetap pending. Jika sudah
+`completed`, retry dicatat sebagai `BLE_TRANSPORT_DUPLICATE` dan aman di-ACK.
+State `failed_retryable` atau lease `processing` yang melewati 10 menit dapat
+diklaim ulang. Event transport ini tidak mewakili transmisi BLE baru dan tidak
+boleh membuat `BLE_PACKET_RECEIVED`, `BLE_PACKET_DUPLICATE`, atau Trickle `c`
+kedua. Logical duplicate berarti `observation_id` berbeda tetapi state SOS
+logis sama; ini adalah consistent transmission yang valid untuk duplicate ratio
+dan Trickle suppression.
 
 ## Catatan P5 untuk Uji Perangkat Fisik
 

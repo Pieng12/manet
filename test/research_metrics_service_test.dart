@@ -120,6 +120,13 @@ void main() {
           rssi: -55,
           hopIn: 1,
         ),
+        event(
+          ExperimentEventTypes.bleTransportInProgress,
+          1002,
+          packetType: 'sos',
+          rssi: -54,
+          hopIn: 2,
+        ),
       ],
       trials: const [],
     );

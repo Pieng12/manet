@@ -121,6 +121,12 @@ radio baru, sehingga tidak menambah duplicate ratio, RSSI/hop sample,
 `duplicate_count`, atau Trickle `c`. Logical duplicate adalah observation baru
 dengan state SOS logis yang sama; ini tetap dicatat sebagai
 `BLE_PACKET_DUPLICATE` dan dapat menaikkan Trickle `c`.
+State klaim `processing` berarti processor lain masih mengerjakan observation
+tersebut, sehingga retry native tidak di-ACK dan dicatat sebagai
+`BLE_TRANSPORT_IN_PROGRESS`. State `completed` baru aman dianggap
+`BLE_TRANSPORT_DUPLICATE`; state `failed_retryable` dapat diklaim ulang. Lease
+`processing` 10 menit mencegah kehilangan packet saat ada race, tetapi tetap
+memungkinkan recovery jika processor pertama crash.
 
 ## Format Payload BLE 17 Byte
 
@@ -347,7 +353,9 @@ Metrik utama:
 - relay latency;
 - gateway latency;
 - ACK latency;
-- logical duplicate ratio: `duplicates / (accepted + duplicates)`;
+- logical duplicate ratio: `duplicates / (accepted + duplicates)`, hanya dari
+  `BLE_PACKET_DUPLICATE` SOS. `BLE_TRANSPORT_DUPLICATE` dan
+  `BLE_TRANSPORT_IN_PROGRESS` adalah diagnostik retry internal dan dikeluarkan;
 - forwarding overhead network-wide: total successful SOS radio TX starts dari
   event canonical `BLE_ADVERTISE_STARTED` dengan `packet_type=sos` pada log
   gabungan dibagi SOS logical yang delivered. `BLE_RELAY_STARTED` dipakai untuk

@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:pkmproject/models/ble_processing_result.dart';
 import 'package:pkmproject/database_schema.dart';
 import 'package:pkmproject/services/database_helper.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
@@ -40,6 +41,36 @@ void main() {
     expect(first.shouldProcess, true);
     expect(second.shouldProcess, false);
     expect(second.state, 'completed');
+    expect(second.isTransportDuplicate, true);
+    expect(BleProcessingResult.transportDuplicate.shouldAcknowledgeInbox, true);
+  });
+
+  test('active processing claim is not safe to acknowledge', () async {
+    final first = await DatabaseHelper.claimBleObservationInDb(
+      db,
+      observationId: 'obs-processing',
+      packetType: 'sos',
+      receivedAtMs: 1000,
+      processedAtMs: 1000,
+    );
+    final second = await DatabaseHelper.claimBleObservationInDb(
+      db,
+      observationId: 'obs-processing',
+      packetType: 'sos',
+      receivedAtMs: 1500,
+      processedAtMs: 2000,
+    );
+
+    expect(first.shouldProcess, true);
+    expect(second.shouldProcess, false);
+    expect(second.state, 'processing');
+    expect(second.isInProgress, true);
+    expect(second.isTransportDuplicate, false);
+    expect(
+      BleProcessingResult.transportInProgress.shouldAcknowledgeInbox,
+      false,
+    );
+    expect(BleProcessingResult.transportInProgress.shouldRetryInbox, true);
   });
 
   test('retryable failure can be claimed again', () async {
@@ -74,6 +105,14 @@ void main() {
       processedAtMs: 1100,
     );
 
+    final beforeLease = await DatabaseHelper.claimBleObservationInDb(
+      db,
+      observationId: 'obs-stale-processing',
+      packetType: 'sos',
+      receivedAtMs: 1000,
+      processedAtMs:
+          1100 + DatabaseHelper.processedBleObservationLease.inMilliseconds - 1,
+    );
     final retry = await DatabaseHelper.claimBleObservationInDb(
       db,
       observationId: 'obs-stale-processing',
@@ -83,6 +122,8 @@ void main() {
           1100 + DatabaseHelper.processedBleObservationLease.inMilliseconds + 1,
     );
 
+    expect(beforeLease.shouldProcess, false);
+    expect(beforeLease.state, 'processing');
     expect(retry.shouldProcess, true);
   });
 

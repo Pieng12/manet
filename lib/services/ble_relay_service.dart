@@ -196,7 +196,7 @@ class BleRelayService {
         receivedAtMs: receivedAtMs,
         processingNowMs: processingNowMs,
       );
-      final claimed = await _claimProtocolObservation(
+      final claimResult = await _claimProtocolObservation(
         observationId: observationId,
         packetType: 'invalid',
         rxAtMs: rxAtMs,
@@ -204,7 +204,7 @@ class BleRelayService {
         receivedElapsedRealtimeMs: receivedElapsedRealtimeMs,
         sourcePath: sourcePath,
       );
-      if (!claimed) return BleProcessingResult.transportDuplicate;
+      if (claimResult != null) return claimResult;
       await _dbHelper.completeBleObservation(observationId, processingNowMs);
       _log('Invalid BLE payload: $e');
       return BleProcessingResult.invalid;
@@ -228,7 +228,7 @@ class BleRelayService {
     );
     final packet = BlePacket.unpack(payload);
     if (packet == null) {
-      final claimed = await _claimProtocolObservation(
+      final claimResult = await _claimProtocolObservation(
         observationId: observationId,
         packetType: 'invalid',
         rxAtMs: rxAtMs,
@@ -236,7 +236,7 @@ class BleRelayService {
         receivedElapsedRealtimeMs: receivedElapsedRealtimeMs,
         sourcePath: sourcePath,
       );
-      if (!claimed) return BleProcessingResult.transportDuplicate;
+      if (claimResult != null) return claimResult;
       await _dbHelper.completeBleObservation(observationId, processingNowMs);
       _log('Ignored non-ResQMesh BLE packet: ${_hex(payload)}');
       return BleProcessingResult.invalid;
@@ -248,7 +248,7 @@ class BleRelayService {
       deviceAddress,
       observerKey: observerKey,
     );
-    final claimed = await _claimProtocolObservation(
+    final claimResult = await _claimProtocolObservation(
       observationId: observationId,
       packetType: packet.kind.name,
       rxAtMs: rxAtMs,
@@ -259,7 +259,7 @@ class BleRelayService {
       rssi: rssi,
       sourcePath: sourcePath,
     );
-    if (!claimed) return BleProcessingResult.transportDuplicate;
+    if (claimResult != null) return claimResult;
 
     await _experimentLogger.logEvent(
       eventType: ExperimentEventTypes.blePacketReceived,
@@ -325,7 +325,7 @@ class BleRelayService {
     }
   }
 
-  Future<bool> _claimProtocolObservation({
+  Future<BleProcessingResult?> _claimProtocolObservation({
     required String? observationId,
     required String packetType,
     required int rxAtMs,
@@ -343,10 +343,13 @@ class BleRelayService {
       processedAtMs: processingNowMs,
       sourcePath: sourcePath,
     );
-    if (claim == null || claim.shouldProcess) return true;
+    if (claim == null || claim.shouldProcess) return null;
 
+    final completed = claim.isCompleted;
     await _experimentLogger.logEvent(
-      eventType: ExperimentEventTypes.bleTransportDuplicate,
+      eventType: completed
+          ? ExperimentEventTypes.bleTransportDuplicate
+          : ExperimentEventTypes.bleTransportInProgress,
       deviceId: SyncService().deviceId,
       senderCrc: packet?.senderCrc,
       hopCount: packet?.hopCount,
@@ -359,7 +362,9 @@ class BleRelayService {
       packetType: packetType,
       status: packet?.status.name,
       detail: {
-        'reason': 'OBSERVATION_ALREADY_PROCESSED',
+        'reason': completed
+            ? 'OBSERVATION_ALREADY_PROCESSED'
+            : 'OBSERVATION_PROCESSING_IN_PROGRESS',
         'observation_id': claim.observationId,
         'observer_key': observerKey,
         'received_at': rxAtMs,
@@ -369,7 +374,9 @@ class BleRelayService {
         'existing_state': claim.state,
       },
     );
-    return false;
+    return completed
+        ? BleProcessingResult.transportDuplicate
+        : BleProcessingResult.transportInProgress;
   }
 
   Future<bool> applyAck({

@@ -233,11 +233,13 @@ yang sama.
 
 Monitor membedakan transport duplicate dan logical duplicate. Transport
 duplicate adalah retry internal Android dengan `observation_id` sama; event
-diagnostiknya `BLE_TRANSPORT_DUPLICATE` dan tidak dipakai untuk RSSI/hop
-sample, duplicate ratio, atau Trickle `c`. Logical duplicate adalah
-`observation_id` baru untuk state SOS logis yang sama; event
+diagnostiknya `BLE_TRANSPORT_DUPLICATE` jika processing sudah `completed`, atau
+`BLE_TRANSPORT_IN_PROGRESS` jika processor lain masih memegang lease. Keduanya
+tidak dipakai untuk RSSI/hop sample, duplicate ratio, atau Trickle `c`. Logical
+duplicate adalah `observation_id` baru untuk state SOS logis yang sama; event
 `BLE_PACKET_DUPLICATE` ini tetap masuk duplicate ratio dan dapat menaikkan
-consistency counter.
+consistency counter. Lease `processing` 10 menit menjaga retry native tetap
+recoverable jika processor pertama crash.
 
 Event audit Trickle yang harus dipakai:
 

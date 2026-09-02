@@ -181,6 +181,11 @@ membawa state SOS logis yang sama; ini mewakili transmisi radio lain, sehingga
 boleh menambah `BLE_PACKET_DUPLICATE`, `duplicate_count`, dan Trickle `c`.
 Klaim `observation_id` disimpan di `processed_ble_observations` selama 24 jam
 untuk melindungi retry WorkManager/service tanpa membuat tabel tumbuh permanen.
+State `processing` berarti observasi masih dimiliki processor lain dan retry
+NativeInbox harus tetap pending dengan `BLE_TRANSPORT_IN_PROGRESS`. State
+`completed` aman diperlakukan sebagai `BLE_TRANSPORT_DUPLICATE`, sedangkan
+`failed_retryable` bisa diklaim ulang. Lease `processing` 10 menit dipakai
+untuk recovery jika processor pertama crash sebelum menyelesaikan transaksi.
 Native `received_at` diterima untuk timing RX jika tidak kosong dan tidak lebih
 dari 2 detik di masa depan terhadap waktu processing Dart.
 

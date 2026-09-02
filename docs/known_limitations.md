@@ -29,6 +29,10 @@ ditafsirkan melebihi kemampuan implementasi saat ini.
   Android dari transmisi radio baru selama retention 24 jam. Retry yang muncul
   setelah retention teoritisnya dapat diproses sebagai observation baru, namun
   periode ini dipilih agar lebih panjang dari retry WorkManager/service normal.
+- State klaim `processing` memakai lease 10 menit. Sebelum lease lewat, retry
+  native tetap pending agar race direct/inbox tidak menghapus observation yang
+  belum selesai; setelah lease lewat, observation dapat diklaim ulang untuk
+  recovery crash.
 - Karena forwarding bersifat persistent sampai ACK, interval Trickle dan
   suppression wajib dipantau pada pengujian baterai multi-jam.
 - Fairness ACK/SOS diverifikasi unit test, tetapi dampaknya pada kepadatan radio

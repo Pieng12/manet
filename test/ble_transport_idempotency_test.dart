@@ -86,6 +86,34 @@ void main() {
     return rows.single;
   }
 
+  Future<({bool completed, List<String> acknowledged, List<String> failed})>
+  drainOnce({
+    required BleRelayService service,
+    required String inboxId,
+    required String payload,
+    required String observationId,
+    String observerKey = 'ble:AA',
+  }) async {
+    final acknowledged = <String>[];
+    final failed = <String>[];
+    final completed = await const NativeBleInboxDrainService().drain(
+      items: [
+        {
+          'id': inboxId,
+          'payload_base64': payload,
+          'rssi': -57,
+          'received_at': DateTime.now().millisecondsSinceEpoch - 500,
+          'observation_id': observationId,
+          'observer_key': observerKey,
+        },
+      ],
+      process: service.processIncomingBase64,
+      acknowledge: (id) async => acknowledged.add(id),
+      fail: (id) async => failed.add(id),
+    );
+    return (completed: completed, acknowledged: acknowledged, failed: failed);
+  }
+
   test(
     'direct delivery then inbox retry is transport duplicate only',
     () async {
@@ -141,6 +169,109 @@ void main() {
       );
     },
   );
+
+  test(
+    'active processing retry stays pending and later completed duplicate ACKs',
+    () async {
+      final service = BleRelayService();
+      final db = await DatabaseHelper().database;
+      final payload = await sosPayloadBase64(
+        senderCrc: 1101,
+        timestampMs: DateTime.now().millisecondsSinceEpoch,
+      );
+      await DatabaseHelper.claimBleObservationInDb(
+        db,
+        observationId: 'obs-race',
+        packetType: 'sos',
+        receivedAtMs: 1000,
+        processedAtMs: DateTime.now().millisecondsSinceEpoch,
+        sourcePath: 'direct_service',
+      );
+
+      final inProgress = await drainOnce(
+        service: service,
+        inboxId: 'inbox-race',
+        payload: payload,
+        observationId: 'obs-race',
+      );
+      expect(inProgress.completed, false);
+      expect(inProgress.acknowledged, isEmpty);
+      expect(inProgress.failed, ['inbox-race']);
+      expect(
+        BleProcessingResult.transportInProgress.shouldAcknowledgeInbox,
+        false,
+      );
+      expect(BleProcessingResult.transportInProgress.shouldRetryInbox, true);
+      expect(
+        await eventsOf(ExperimentEventTypes.bleTransportInProgress),
+        hasLength(1),
+      );
+      expect(await eventsOf(ExperimentEventTypes.blePacketReceived), isEmpty);
+      expect(await eventsOf(ExperimentEventTypes.blePacketDuplicate), isEmpty);
+      expect(await db.query('sos_messages'), isEmpty);
+      expect(await db.query('trickle_states'), isEmpty);
+
+      await DatabaseHelper.completeBleObservationInDb(
+        db,
+        'obs-race',
+        DateTime.now().millisecondsSinceEpoch,
+      );
+      final completedDuplicate = await drainOnce(
+        service: service,
+        inboxId: 'inbox-race-retry',
+        payload: payload,
+        observationId: 'obs-race',
+      );
+      expect(completedDuplicate.completed, true);
+      expect(completedDuplicate.acknowledged, ['inbox-race-retry']);
+      expect(completedDuplicate.failed, isEmpty);
+      expect(
+        await eventsOf(ExperimentEventTypes.bleTransportDuplicate),
+        hasLength(1),
+      );
+      expect(await eventsOf(ExperimentEventTypes.blePacketReceived), isEmpty);
+      expect(await eventsOf(ExperimentEventTypes.blePacketDuplicate), isEmpty);
+    },
+  );
+
+  test('stale processing lease lets inbox recover direct crash', () async {
+    final service = BleRelayService();
+    final db = await DatabaseHelper().database;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final payload = await sosPayloadBase64(senderCrc: 1102, timestampMs: now);
+    await DatabaseHelper.claimBleObservationInDb(
+      db,
+      observationId: 'obs-crash',
+      packetType: 'sos',
+      receivedAtMs: now - 1000,
+      processedAtMs:
+          now - DatabaseHelper.processedBleObservationLease.inMilliseconds - 1,
+      sourcePath: 'direct_service',
+    );
+
+    final recovered = await drainOnce(
+      service: service,
+      inboxId: 'inbox-crash',
+      payload: payload,
+      observationId: 'obs-crash',
+    );
+
+    final rows = await db.query(
+      'processed_ble_observations',
+      where: 'observation_id = ?',
+      whereArgs: ['obs-crash'],
+    );
+    expect(recovered.completed, true);
+    expect(recovered.acknowledged, ['inbox-crash']);
+    expect(recovered.failed, isEmpty);
+    expect(rows.single['state'], 'completed');
+    expect(await db.query('sos_messages'), hasLength(1));
+    expect(
+      await eventsOf(ExperimentEventTypes.blePacketReceived),
+      hasLength(1),
+    );
+    expect(await eventsOf(ExperimentEventTypes.blePacketDuplicate), isEmpty);
+  });
 
   test(
     'inbox delivery then direct retry is transport duplicate only',
@@ -275,6 +406,62 @@ void main() {
     expect(
       await (await DatabaseHelper().database).query('trickle_states'),
       isEmpty,
+    );
+  });
+
+  test('active ACK processing retry stays pending until completed', () async {
+    final service = BleRelayService();
+    final db = await DatabaseHelper().database;
+    final payload = base64Encode(
+      BlePacket.packAck(
+        senderCrc: 2101,
+        ackTimestampMs: DateTime.now().millisecondsSinceEpoch,
+      ),
+    );
+    await DatabaseHelper.claimBleObservationInDb(
+      db,
+      observationId: 'ack-race',
+      packetType: 'ack',
+      receivedAtMs: 1000,
+      processedAtMs: DateTime.now().millisecondsSinceEpoch,
+      sourcePath: 'direct_service',
+    );
+
+    final inProgress = await service.processIncomingBase64(
+      payload,
+      rssi: -71,
+      receivedAtMs: DateTime.now().millisecondsSinceEpoch - 500,
+      observationId: 'ack-race',
+      observerKey: 'ble:AA',
+      sourcePath: 'native_inbox_drain',
+    );
+
+    expect(inProgress, BleProcessingResult.transportInProgress);
+    expect(await eventsOf(ExperimentEventTypes.ackReceived), isEmpty);
+    expect(
+      await eventsOf(ExperimentEventTypes.bleTransportInProgress),
+      hasLength(1),
+    );
+
+    await DatabaseHelper.completeBleObservationInDb(
+      db,
+      'ack-race',
+      DateTime.now().millisecondsSinceEpoch,
+    );
+    final duplicate = await service.processIncomingBase64(
+      payload,
+      rssi: -71,
+      receivedAtMs: DateTime.now().millisecondsSinceEpoch - 400,
+      observationId: 'ack-race',
+      observerKey: 'ble:AA',
+      sourcePath: 'native_inbox_drain',
+    );
+
+    expect(duplicate, BleProcessingResult.transportDuplicate);
+    expect(await eventsOf(ExperimentEventTypes.ackReceived), isEmpty);
+    expect(
+      await eventsOf(ExperimentEventTypes.bleTransportDuplicate),
+      hasLength(1),
     );
   });
 

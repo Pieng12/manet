@@ -21,7 +21,9 @@ class ProcessedBleObservationClaim {
   final bool shouldProcess;
   final String state;
 
-  bool get isTransportDuplicate => !shouldProcess;
+  bool get isCompleted => state == 'completed';
+  bool get isInProgress => state == 'processing' && !shouldProcess;
+  bool get isTransportDuplicate => !shouldProcess && isCompleted;
 }
 
 class DatabaseHelper {

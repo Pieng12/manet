@@ -2,6 +2,7 @@ enum BleProcessingResult {
   accepted,
   duplicate,
   transportDuplicate,
+  transportInProgress,
   stale,
   suppressedByAck,
   invalid,
@@ -15,5 +16,7 @@ enum BleProcessingResult {
       this == BleProcessingResult.suppressedByAck ||
       this == BleProcessingResult.invalid;
 
-  bool get shouldRetryInbox => this == BleProcessingResult.failedRetryable;
+  bool get shouldRetryInbox =>
+      this == BleProcessingResult.transportInProgress ||
+      this == BleProcessingResult.failedRetryable;
 }
