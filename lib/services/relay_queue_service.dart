@@ -41,6 +41,12 @@ class SosQueueStoreResult {
   final String? trickleReason;
 }
 
+class LogicalDuplicateRecordResult {
+  const LogicalDuplicateRecordResult({required this.trickleRecorded});
+
+  final bool trickleRecorded;
+}
+
 class _TrickleSosPreparation {
   const _TrickleSosPreparation({
     required this.state,
@@ -125,6 +131,7 @@ class RelayQueueService {
     required SOSMessageStatus status,
     int hopCount = 0,
     int? nowMs,
+    String? processedObservationId,
     bool failAfterTombstoneForTest = false,
   }) async {
     final db = await _db;
@@ -151,7 +158,14 @@ class RelayQueueService {
         timestampMs: canonicalAckTimestamp,
         status: status,
       );
-      if (result.rejected) return result;
+      if (result.rejected) {
+        await _completeProcessedObservationInExecutor(
+          txn,
+          processedObservationId,
+          now,
+        );
+        return result;
+      }
 
       final payloadBase64 = base64Encode(
         BlePacket.packAck(
@@ -209,6 +223,11 @@ class RelayQueueService {
         limit: 1,
       );
       if (result == AckApplyResult.duplicate && existingQueue.isNotEmpty) {
+        await _completeProcessedObservationInExecutor(
+          txn,
+          processedObservationId,
+          now,
+        );
         return result;
       }
 
@@ -223,6 +242,11 @@ class RelayQueueService {
           payloadBase64: payloadBase64,
         ),
         resetMetrics: result.shouldRelay,
+      );
+      await _completeProcessedObservationInExecutor(
+        txn,
+        processedObservationId,
+        now,
       );
       return result;
     });
@@ -247,6 +271,7 @@ class RelayQueueService {
     required SOSMessage message,
     int priority = 0,
     required int nextEligibleAt,
+    String? processedObservationId,
     bool failAfterStoreForTest = false,
   }) async {
     final db = await _db;
@@ -316,6 +341,11 @@ class RelayQueueService {
           queueState: stateQueued,
         ),
         resetMetrics: latestExisting != null,
+      );
+      await _completeProcessedObservationInExecutor(
+        txn,
+        processedObservationId,
+        nextEligibleAt,
       );
       return SosQueueStoreResult(
         stored: true,
@@ -696,6 +726,59 @@ WHERE id = ?
       observerKey: observerKey,
       nowMs: nowMs,
     );
+  }
+
+  Future<LogicalDuplicateRecordResult> recordLogicalDuplicateObservation({
+    required String messageId,
+    required String? observationId,
+    required String observerKey,
+    required int nowMs,
+    int? completedAtMs,
+  }) async {
+    final db = await _db;
+    return db.transaction((txn) async {
+      await txn.rawUpdate(
+        'UPDATE sos_messages '
+        'SET duplicate_count = duplicate_count + 1 '
+        'WHERE id = ?',
+        [messageId],
+      );
+
+      var trickleRecorded = false;
+      if (_mode == ForwardingMode.trickle) {
+        final effectiveObservationId = observationId?.trim().isNotEmpty == true
+            ? observationId!.trim()
+            : '$messageId|$observerKey|$nowMs';
+        trickleRecorded = await TrickleScheduler(database: txn, random: _random)
+            .recordConsistentObservation(
+              messageId: messageId,
+              observationId: effectiveObservationId,
+              observerKey: observerKey,
+              nowMs: nowMs,
+            );
+      }
+
+      final completedObservationId = observationId?.trim();
+      if (completedObservationId != null && completedObservationId.isNotEmpty) {
+        await DatabaseHelper.completeBleObservationInDb(
+          txn,
+          completedObservationId,
+          completedAtMs ?? nowMs,
+        );
+      }
+
+      return LogicalDuplicateRecordResult(trickleRecorded: trickleRecorded);
+    });
+  }
+
+  static Future<void> _completeProcessedObservationInExecutor(
+    DatabaseExecutor db,
+    String? observationId,
+    int nowMs,
+  ) async {
+    final id = observationId?.trim();
+    if (id == null || id.isEmpty) return;
+    await DatabaseHelper.completeBleObservationInDb(db, id, nowMs);
   }
 
   Future<TrickleState?> trickleStateFor(String messageId) async {

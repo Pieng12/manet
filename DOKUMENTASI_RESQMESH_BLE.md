@@ -128,6 +128,14 @@ tersebut, sehingga retry native tidak di-ACK dan dicatat sebagai
 `processing` 10 menit mencegah kehilangan packet saat ada race, tetapi tetap
 memungkinkan recovery jika processor pertama crash.
 
+Boundary durable protocol berada pada commit SQLite untuk SOS, duplicate
+logical, dan ACK. Setelah state wajib seperti `sos_messages`, `relay_queue`,
+`ack_tombstones`, dan Trickle state berhasil durable, observation harus menjadi
+`completed`. Kegagalan side-effect setelah itu, termasuk log eksperimen,
+trigger advertiser, WorkManager, atau gateway scheduling, tidak boleh mengubah
+observation menjadi `failed_retryable`; retry TX/gateway dipulihkan dari queue
+persisten. `failed_retryable` hanya berarti protocol transaction belum durable.
+
 ## Format Payload BLE 17 Byte
 
 Semua packet memakai panjang tetap 17 byte.

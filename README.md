@@ -189,6 +189,16 @@ untuk recovery jika processor pertama crash sebelum menyelesaikan transaksi.
 Native `received_at` diterima untuk timing RX jika tidak kosong dan tidak lebih
 dari 2 detik di masa depan terhadap waktu processing Dart.
 
+Durable protocol commit boundary dipisahkan dari side-effect. Setelah transaksi
+SOS, duplicate logical, atau ACK berhasil menulis state SQLite wajib
+(`sos_messages`, `relay_queue`, `ack_tombstones`, dan state Trickle bila
+relevan), observation ditandai `completed`. Kegagalan setelah boundary seperti
+log eksperimen, trigger advertiser, scheduling WorkManager, atau gateway
+scheduling tidak boleh mengubahnya kembali ke `failed_retryable`; recovery TX
+radio/gateway ditangani oleh persistent queue dan WorkManager. `failed_retryable`
+hanya berarti protocol state belum durable, misalnya transaksi SQLite gagal
+sebelum commit.
+
 ## Format Payload 17 Byte
 
 Manufacturer data memakai `MeshConfig.manufacturerId = 0xFFFF` untuk penelitian

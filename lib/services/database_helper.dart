@@ -365,8 +365,8 @@ FROM trickle_observations_legacy
     await db.update(
       'processed_ble_observations',
       {'state': 'completed', 'processed_at': nowMs, 'updated_at': nowMs},
-      where: 'observation_id = ?',
-      whereArgs: [observationId],
+      where: 'observation_id = ? AND state IN (?, ?)',
+      whereArgs: [observationId, 'processing', 'completed'],
     );
   }
 
@@ -388,8 +388,8 @@ FROM trickle_observations_legacy
     await db.update(
       'processed_ble_observations',
       {'state': 'failed_retryable', 'processed_at': nowMs, 'updated_at': nowMs},
-      where: 'observation_id = ?',
-      whereArgs: [observationId],
+      where: 'observation_id = ? AND state = ?',
+      whereArgs: [observationId, 'processing'],
     );
   }
 

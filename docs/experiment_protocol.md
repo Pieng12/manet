@@ -168,6 +168,14 @@ kedua. Logical duplicate berarti `observation_id` berbeda tetapi state SOS
 logis sama; ini adalah consistent transmission yang valid untuk duplicate ratio
 dan Trickle suppression.
 
+Untuk menjaga exactly-once boundary, satu `observation_id` hanya boleh mengubah
+state protocol/research durable satu kali. Commit SOS, duplicate logical, dan
+ACK menandai observation sebagai `completed` sebelum side-effect non-kritis
+dijalankan. Jika advertiser, WorkManager, gateway scheduling, atau logging gagal
+setelah commit, packet BLE tidak diputar ulang; persistent relay queue dan
+WorkManager menangani retry masing-masing. `failed_retryable` hanya dipakai jika
+transaksi protocol belum commit.
+
 ## Catatan P5 untuk Uji Perangkat Fisik
 
 Build resmi penelitian menargetkan minimum Android 8/API 26 karena scan

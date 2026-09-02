@@ -39,6 +39,22 @@ class BleRelayService {
 
   Stream<String> get logStream => _logController.stream;
 
+  static bool failSosTransactionForTest = false;
+  static bool failAfterSosDurableCommitForTest = false;
+  static bool failAfterLogicalDuplicateCommitForTest = false;
+  static bool failAfterAckDurableCommitForTest = false;
+  static bool failWorkManagerPostCommitForTest = false;
+  static bool failGatewayPostCommitForTest = false;
+
+  static void resetFailureHooksForTesting() {
+    failSosTransactionForTest = false;
+    failAfterSosDurableCommitForTest = false;
+    failAfterLogicalDuplicateCommitForTest = false;
+    failAfterAckDurableCommitForTest = false;
+    failWorkManagerPostCommitForTest = false;
+    failGatewayPostCommitForTest = false;
+  }
+
   static int sosExpiresAt(BlePacket packet) {
     return 0x7FFFFFFFFFFFFFFF;
   }
@@ -261,29 +277,32 @@ class BleRelayService {
     );
     if (claimResult != null) return claimResult;
 
-    await _experimentLogger.logEvent(
-      eventType: ExperimentEventTypes.blePacketReceived,
-      deviceId: SyncService().deviceId,
-      senderCrc: packet.senderCrc,
-      hopCount: packet.hopCount,
-      hopIn: packet.hopCount,
-      rssi: rssi,
-      payloadHash: packet.identity,
-      eventTimestampMs: rxAtMs,
-      elapsedRealtimeMs: receivedElapsedRealtimeMs,
-      protocolTimestampMs: packet.timestampMs,
-      packetType: packet.kind.name,
-      status: packet.status.name,
-      detail: {
-        'kind': packet.kind.name,
-        'status': packet.status.name,
-        'from_server': packet.fromServer,
-        if (observationId?.trim().isNotEmpty == true)
-          'observation_id': observationId!.trim(),
-        'observer_key': effectiveObserverKey,
-        if (receivedAtMs != null && receivedAtMs != rxAtMs)
-          'receive_time_fallback_reason': 'invalid_or_future_received_at',
-      },
+    await _runPostCommitEffect(
+      'ble_packet_received_log',
+      () => _experimentLogger.logEvent(
+        eventType: ExperimentEventTypes.blePacketReceived,
+        deviceId: SyncService().deviceId,
+        senderCrc: packet.senderCrc,
+        hopCount: packet.hopCount,
+        hopIn: packet.hopCount,
+        rssi: rssi,
+        payloadHash: packet.identity,
+        eventTimestampMs: rxAtMs,
+        elapsedRealtimeMs: receivedElapsedRealtimeMs,
+        protocolTimestampMs: packet.timestampMs,
+        packetType: packet.kind.name,
+        status: packet.status.name,
+        detail: {
+          'kind': packet.kind.name,
+          'status': packet.status.name,
+          'from_server': packet.fromServer,
+          if (observationId?.trim().isNotEmpty == true)
+            'observation_id': observationId!.trim(),
+          'observer_key': effectiveObserverKey,
+          if (receivedAtMs != null && receivedAtMs != rxAtMs)
+            'receive_time_fallback_reason': 'invalid_or_future_received_at',
+        },
+      ),
     );
 
     try {
@@ -293,6 +312,7 @@ class BleRelayService {
               rssi: rssi,
               receivedAtMs: rxAtMs,
               receivedElapsedRealtimeMs: receivedElapsedRealtimeMs,
+              observationId: observationId,
             )
           : await _processSos(
               packet,
@@ -346,33 +366,36 @@ class BleRelayService {
     if (claim == null || claim.shouldProcess) return null;
 
     final completed = claim.isCompleted;
-    await _experimentLogger.logEvent(
-      eventType: completed
-          ? ExperimentEventTypes.bleTransportDuplicate
-          : ExperimentEventTypes.bleTransportInProgress,
-      deviceId: SyncService().deviceId,
-      senderCrc: packet?.senderCrc,
-      hopCount: packet?.hopCount,
-      hopIn: packet?.hopCount,
-      rssi: rssi,
-      payloadHash: packet?.identity,
-      eventTimestampMs: rxAtMs,
-      elapsedRealtimeMs: receivedElapsedRealtimeMs,
-      protocolTimestampMs: packet?.timestampMs,
-      packetType: packetType,
-      status: packet?.status.name,
-      detail: {
-        'reason': completed
-            ? 'OBSERVATION_ALREADY_PROCESSED'
-            : 'OBSERVATION_PROCESSING_IN_PROGRESS',
-        'observation_id': claim.observationId,
-        'observer_key': observerKey,
-        'received_at': rxAtMs,
-        'processed_at': processingNowMs,
-        'processing_delay_ms': processingNowMs - rxAtMs,
-        'source_path': sourcePath,
-        'existing_state': claim.state,
-      },
+    await _runPostCommitEffect(
+      completed ? 'transport_duplicate_log' : 'transport_in_progress_log',
+      () => _experimentLogger.logEvent(
+        eventType: completed
+            ? ExperimentEventTypes.bleTransportDuplicate
+            : ExperimentEventTypes.bleTransportInProgress,
+        deviceId: SyncService().deviceId,
+        senderCrc: packet?.senderCrc,
+        hopCount: packet?.hopCount,
+        hopIn: packet?.hopCount,
+        rssi: rssi,
+        payloadHash: packet?.identity,
+        eventTimestampMs: rxAtMs,
+        elapsedRealtimeMs: receivedElapsedRealtimeMs,
+        protocolTimestampMs: packet?.timestampMs,
+        packetType: packetType,
+        status: packet?.status.name,
+        detail: {
+          'reason': completed
+              ? 'OBSERVATION_ALREADY_PROCESSED'
+              : 'OBSERVATION_PROCESSING_IN_PROGRESS',
+          'observation_id': claim.observationId,
+          'observer_key': observerKey,
+          'received_at': rxAtMs,
+          'processed_at': processingNowMs,
+          'processing_delay_ms': processingNowMs - rxAtMs,
+          'source_path': sourcePath,
+          'existing_state': claim.state,
+        },
+      ),
     );
     return completed
         ? BleProcessingResult.transportDuplicate
@@ -464,87 +487,17 @@ class BleRelayService {
     int? rssi,
     int? receivedAtMs,
     int? receivedElapsedRealtimeMs,
+    String? observationId,
   }) async {
     if (packet.status == SOSMessageStatus.active) {
-      await _experimentLogger.logEvent(
-        eventType: ExperimentEventTypes.bleRelayDropped,
-        deviceId: SyncService().deviceId,
-        senderCrc: packet.senderCrc,
-        hopCount: packet.hopCount,
-        hopIn: packet.hopCount,
-        rssi: rssi,
-        payloadHash: packet.identity,
-        eventTimestampMs: receivedAtMs,
-        elapsedRealtimeMs: receivedElapsedRealtimeMs,
-        protocolTimestampMs: packet.timestampMs,
-        packetType: 'ack',
-        status: packet.status.name,
-        detail: {'reason': 'ACK_ACTIVE_REJECTED'},
+      await _dbHelper.completeBleObservation(
+        observationId,
+        DateTime.now().millisecondsSinceEpoch,
       );
-      _log('ACK_ACTIVE_REJECTED ${packet.identity}');
-      return BleProcessingResult.invalid;
-    }
-
-    await _experimentLogger.logEvent(
-      eventType: ExperimentEventTypes.ackReceived,
-      deviceId: SyncService().deviceId,
-      senderCrc: packet.senderCrc,
-      hopCount: packet.hopCount,
-      hopIn: packet.hopCount,
-      rssi: rssi,
-      payloadHash: packet.identity,
-      eventTimestampMs: receivedAtMs,
-      elapsedRealtimeMs: receivedElapsedRealtimeMs,
-      protocolTimestampMs: packet.timestampMs,
-      packetType: 'ack',
-      status: packet.status.name,
-    );
-    final AckApplyResult result;
-    try {
-      result = await _relayQueue.acceptAndQueueAck(
-        senderCrc: packet.senderCrc,
-        ackTimestampMs: packet.timestampMs,
-        status: packet.status,
-        hopCount: packet.hopCount >= MeshConfig.maxProtocolHop
-            ? MeshConfig.maxProtocolHop
-            : packet.hopCount + 1,
-        nowMs: DateTime.now().millisecondsSinceEpoch,
-      );
-    } catch (e) {
-      await _experimentLogger.logEvent(
-        eventType: ExperimentEventTypes.ackTransactionRolledBack,
-        deviceId: SyncService().deviceId,
-        senderCrc: packet.senderCrc,
-        hopIn: packet.hopCount,
-        rssi: rssi,
-        payloadHash: packet.identity,
-        eventTimestampMs: receivedAtMs,
-        elapsedRealtimeMs: receivedElapsedRealtimeMs,
-        protocolTimestampMs: packet.timestampMs,
-        packetType: 'ack',
-        status: packet.status.name,
-        detail: {'error': e.toString()},
-      );
-      rethrow;
-    }
-    await _logAckResult(
-      result,
-      senderCrc: packet.senderCrc,
-      ackTimestampMs: packet.timestampMs,
-      status: packet.status,
-      rssi: rssi,
-      payloadHash: packet.identity,
-      hopIn: packet.hopCount,
-      hopOut: packet.hopCount >= MeshConfig.maxProtocolHop
-          ? MeshConfig.maxProtocolHop
-          : packet.hopCount + 1,
-    );
-
-    final genericAckEventType = genericAckPacketEventTypeForResult(result);
-    if (!result.shouldRelay) {
-      if (genericAckEventType != null) {
-        await _experimentLogger.logEvent(
-          eventType: genericAckEventType,
+      await _runPostCommitEffect(
+        'ack_active_rejected_log',
+        () => _experimentLogger.logEvent(
+          eventType: ExperimentEventTypes.bleRelayDropped,
           deviceId: SyncService().deviceId,
           senderCrc: packet.senderCrc,
           hopCount: packet.hopCount,
@@ -556,35 +509,142 @@ class BleRelayService {
           protocolTimestampMs: packet.timestampMs,
           packetType: 'ack',
           status: packet.status.name,
-          detail: {
-            'kind': 'ack',
-            if (genericAckEventType == ExperimentEventTypes.bleRelayDropped)
-              'reason': result.name,
-          },
+          detail: {'reason': 'ACK_ACTIVE_REJECTED'},
+        ),
+      );
+      _log('ACK_ACTIVE_REJECTED ${packet.identity}');
+      return BleProcessingResult.invalid;
+    }
+
+    await _runPostCommitEffect(
+      'ack_received_log',
+      () => _experimentLogger.logEvent(
+        eventType: ExperimentEventTypes.ackReceived,
+        deviceId: SyncService().deviceId,
+        senderCrc: packet.senderCrc,
+        hopCount: packet.hopCount,
+        hopIn: packet.hopCount,
+        rssi: rssi,
+        payloadHash: packet.identity,
+        eventTimestampMs: receivedAtMs,
+        elapsedRealtimeMs: receivedElapsedRealtimeMs,
+        protocolTimestampMs: packet.timestampMs,
+        packetType: 'ack',
+        status: packet.status.name,
+      ),
+    );
+    final AckApplyResult result;
+    try {
+      result = await _relayQueue.acceptAndQueueAck(
+        senderCrc: packet.senderCrc,
+        ackTimestampMs: packet.timestampMs,
+        status: packet.status,
+        hopCount: packet.hopCount >= MeshConfig.maxProtocolHop
+            ? MeshConfig.maxProtocolHop
+            : packet.hopCount + 1,
+        nowMs: DateTime.now().millisecondsSinceEpoch,
+        processedObservationId: observationId,
+      );
+    } catch (e) {
+      await _runPostCommitEffect(
+        'ack_transaction_rolled_back_log',
+        () => _experimentLogger.logEvent(
+          eventType: ExperimentEventTypes.ackTransactionRolledBack,
+          deviceId: SyncService().deviceId,
+          senderCrc: packet.senderCrc,
+          hopIn: packet.hopCount,
+          rssi: rssi,
+          payloadHash: packet.identity,
+          eventTimestampMs: receivedAtMs,
+          elapsedRealtimeMs: receivedElapsedRealtimeMs,
+          protocolTimestampMs: packet.timestampMs,
+          packetType: 'ack',
+          status: packet.status.name,
+          detail: {'error': e.toString()},
+        ),
+      );
+      rethrow;
+    }
+    await _dbHelper.completeBleObservation(
+      observationId,
+      DateTime.now().millisecondsSinceEpoch,
+    );
+    await _runPostCommitEffect('simulated_ack_post_commit_failure', () async {
+      if (failAfterAckDurableCommitForTest) {
+        throw StateError('Simulated ACK post-commit failure');
+      }
+    });
+    await _runPostCommitEffect(
+      'ack_result_log',
+      () => _logAckResult(
+        result,
+        senderCrc: packet.senderCrc,
+        ackTimestampMs: packet.timestampMs,
+        status: packet.status,
+        rssi: rssi,
+        payloadHash: packet.identity,
+        hopIn: packet.hopCount,
+        hopOut: packet.hopCount >= MeshConfig.maxProtocolHop
+            ? MeshConfig.maxProtocolHop
+            : packet.hopCount + 1,
+      ),
+    );
+
+    final genericAckEventType = genericAckPacketEventTypeForResult(result);
+    if (!result.shouldRelay) {
+      if (genericAckEventType != null) {
+        await _runPostCommitEffect(
+          'ack_generic_result_log',
+          () => _experimentLogger.logEvent(
+            eventType: genericAckEventType,
+            deviceId: SyncService().deviceId,
+            senderCrc: packet.senderCrc,
+            hopCount: packet.hopCount,
+            hopIn: packet.hopCount,
+            rssi: rssi,
+            payloadHash: packet.identity,
+            eventTimestampMs: receivedAtMs,
+            elapsedRealtimeMs: receivedElapsedRealtimeMs,
+            protocolTimestampMs: packet.timestampMs,
+            packetType: 'ack',
+            status: packet.status.name,
+            detail: {
+              'kind': 'ack',
+              if (genericAckEventType == ExperimentEventTypes.bleRelayDropped)
+                'reason': result.name,
+            },
+          ),
         );
       }
       _log('${result.name.toUpperCase()} ${packet.identity}');
       return processingResultForAckApplyResult(result);
     }
 
-    await _logSosRelayTerminatedByAck(packet);
-    await _advertiser.advertiseLatestOrStop(preemptCurrent: true);
+    await _runPostCommitEffect('sos_relay_terminated_by_ack_log', () async {
+      await _logSosRelayTerminatedByAck(packet);
+    });
+    await _runPostCommitEffect('ack_advertise_latest_or_stop', () async {
+      await _advertiser.advertiseLatestOrStop(preemptCurrent: true);
+    });
     final nextAckHop = packet.hopCount >= MeshConfig.maxProtocolHop
         ? MeshConfig.maxProtocolHop
         : packet.hopCount + 1;
-    await _experimentLogger.logEvent(
-      eventType: ExperimentEventTypes.bleRelayQueued,
-      deviceId: SyncService().deviceId,
-      senderCrc: packet.senderCrc,
-      hopCount: nextAckHop,
-      hopIn: packet.hopCount,
-      hopOut: nextAckHop,
-      rssi: rssi,
-      payloadHash: packet.identity,
-      protocolTimestampMs: packet.timestampMs,
-      packetType: 'ack',
-      status: packet.status.name,
-      detail: {'kind': 'ack'},
+    await _runPostCommitEffect(
+      'ack_relay_queued_log',
+      () => _experimentLogger.logEvent(
+        eventType: ExperimentEventTypes.bleRelayQueued,
+        deviceId: SyncService().deviceId,
+        senderCrc: packet.senderCrc,
+        hopCount: nextAckHop,
+        hopIn: packet.hopCount,
+        hopOut: nextAckHop,
+        rssi: rssi,
+        payloadHash: packet.identity,
+        protocolTimestampMs: packet.timestampMs,
+        packetType: 'ack',
+        status: packet.status.name,
+        detail: {'kind': 'ack'},
+      ),
     );
     _log('ACK_RELAY_QUEUED ${packet.identity} hop=$nextAckHop');
     return BleProcessingResult.accepted;
@@ -609,20 +669,24 @@ class BleRelayService {
       sosTimestampMs: packet.timestampMs,
     );
     if (suppressedByAck) {
-      await _experimentLogger.logEvent(
-        eventType: ExperimentEventTypes.bleRelayDropped,
-        deviceId: SyncService().deviceId,
-        senderCrc: packet.senderCrc,
-        hopCount: packet.hopCount,
-        hopIn: packet.hopCount,
-        rssi: rssi,
-        payloadHash: packet.identity,
-        eventTimestampMs: rxAtMs,
-        elapsedRealtimeMs: receivedElapsedRealtimeMs,
-        protocolTimestampMs: packet.timestampMs,
-        packetType: 'sos',
-        status: packet.status.name,
-        detail: {'reason': 'ACK_TOMBSTONE_SUPPRESSED'},
+      await _dbHelper.completeBleObservation(observationId, now);
+      await _runPostCommitEffect(
+        'ack_tombstone_suppressed_log',
+        () => _experimentLogger.logEvent(
+          eventType: ExperimentEventTypes.bleRelayDropped,
+          deviceId: SyncService().deviceId,
+          senderCrc: packet.senderCrc,
+          hopCount: packet.hopCount,
+          hopIn: packet.hopCount,
+          rssi: rssi,
+          payloadHash: packet.identity,
+          eventTimestampMs: rxAtMs,
+          elapsedRealtimeMs: receivedElapsedRealtimeMs,
+          protocolTimestampMs: packet.timestampMs,
+          packetType: 'sos',
+          status: packet.status.name,
+          detail: {'reason': 'ACK_TOMBSTONE_SUPPRESSED'},
+        ),
       );
       _log('ACK_TOMBSTONE_SUPPRESSED ${packet.identity}');
       return BleProcessingResult.suppressedByAck;
@@ -643,45 +707,82 @@ class BleRelayService {
     if (!decision.shouldStore) {
       if (decision.reason == ForwardingDecisionReason.dropDuplicate &&
           existing != null) {
-        await _dbHelper.incrementDuplicateCount(existing.id);
-        final observed = await _recordTrickleConsistentHeard(
-          existing: existing,
-          packet: packet,
-          deviceAddress: deviceAddress,
-          observationId: observationId,
-          observerKey: observerKey,
-          nowMs: rxAtMs,
-          processedAtMs: now,
-          rssi: rssi,
-          receivedAtMs: rxAtMs,
-          receivedElapsedRealtimeMs: receivedElapsedRealtimeMs,
-        );
-        await _experimentLogger.logEvent(
-          eventType: ExperimentEventTypes.blePacketDuplicate,
-          deviceId: SyncService().deviceId,
-          messageId: existing.id,
-          senderCrc: packet.senderCrc,
-          hopCount: packet.hopCount,
-          hopIn: packet.hopCount,
-          rssi: rssi,
-          payloadHash: packet.identity,
-          eventTimestampMs: rxAtMs,
-          elapsedRealtimeMs: receivedElapsedRealtimeMs,
-          protocolTimestampMs: packet.timestampMs,
-          packetType: 'sos',
-          status: packet.status.name,
-          detail: {
-            if (MeshConfig.forwardingMode == ForwardingMode.trickle)
-              'trickle_observation_recorded': observed,
-            if (MeshConfig.forwardingMode == ForwardingMode.trickle &&
-                !observed)
-              'trickle_observation_ignored_reason':
-                  'duplicate_or_delayed_old_interval_observation',
+        final duplicateRecord = await _relayQueue
+            .recordLogicalDuplicateObservation(
+              messageId: existing.id,
+              observationId: observationId,
+              observerKey: _trickleObserverKey(
+                packet,
+                deviceAddress,
+                observerKey: observerKey,
+              ),
+              nowMs: rxAtMs,
+              completedAtMs: now,
+            );
+        await _runPostCommitEffect(
+          'simulated_logical_duplicate_post_commit_failure',
+          () async {
+            if (failAfterLogicalDuplicateCommitForTest) {
+              throw StateError(
+                'Simulated logical duplicate post-commit failure',
+              );
+            }
           },
         );
+        await _runPostCommitEffect(
+          'ble_packet_duplicate_log',
+          () => _experimentLogger.logEvent(
+            eventType: ExperimentEventTypes.blePacketDuplicate,
+            deviceId: SyncService().deviceId,
+            messageId: existing.id,
+            senderCrc: packet.senderCrc,
+            hopCount: packet.hopCount,
+            hopIn: packet.hopCount,
+            rssi: rssi,
+            payloadHash: packet.identity,
+            eventTimestampMs: rxAtMs,
+            elapsedRealtimeMs: receivedElapsedRealtimeMs,
+            protocolTimestampMs: packet.timestampMs,
+            packetType: 'sos',
+            status: packet.status.name,
+            detail: {
+              if (MeshConfig.forwardingMode == ForwardingMode.trickle)
+                'trickle_observation_recorded': duplicateRecord.trickleRecorded,
+              if (MeshConfig.forwardingMode == ForwardingMode.trickle &&
+                  !duplicateRecord.trickleRecorded)
+                'trickle_observation_ignored_reason':
+                    'duplicate_or_delayed_old_interval_observation',
+            },
+          ),
+        );
       } else if (decision.reason == ForwardingDecisionReason.dropStale) {
-        await _experimentLogger.logEvent(
-          eventType: ExperimentEventTypes.blePacketStale,
+        await _dbHelper.completeBleObservation(observationId, now);
+        await _runPostCommitEffect(
+          'ble_packet_stale_log',
+          () => _experimentLogger.logEvent(
+            eventType: ExperimentEventTypes.blePacketStale,
+            deviceId: SyncService().deviceId,
+            messageId: existing?.id,
+            senderCrc: packet.senderCrc,
+            hopCount: packet.hopCount,
+            hopIn: packet.hopCount,
+            rssi: rssi,
+            payloadHash: packet.identity,
+            eventTimestampMs: rxAtMs,
+            elapsedRealtimeMs: receivedElapsedRealtimeMs,
+            protocolTimestampMs: packet.timestampMs,
+            packetType: 'sos',
+            status: packet.status.name,
+            detail: {'latest_state': existing?.status.name},
+          ),
+        );
+      } else {
+        await _dbHelper.completeBleObservation(observationId, now);
+      }
+      await _runPostCommitEffect(
+        'ble_relay_dropped_log',
+        () => _experimentLogger.logEvent(
+          eventType: ExperimentEventTypes.bleRelayDropped,
           deviceId: SyncService().deviceId,
           messageId: existing?.id,
           senderCrc: packet.senderCrc,
@@ -694,24 +795,8 @@ class BleRelayService {
           protocolTimestampMs: packet.timestampMs,
           packetType: 'sos',
           status: packet.status.name,
-          detail: {'latest_state': existing?.status.name},
-        );
-      }
-      await _experimentLogger.logEvent(
-        eventType: ExperimentEventTypes.bleRelayDropped,
-        deviceId: SyncService().deviceId,
-        messageId: existing?.id,
-        senderCrc: packet.senderCrc,
-        hopCount: packet.hopCount,
-        hopIn: packet.hopCount,
-        rssi: rssi,
-        payloadHash: packet.identity,
-        eventTimestampMs: rxAtMs,
-        elapsedRealtimeMs: receivedElapsedRealtimeMs,
-        protocolTimestampMs: packet.timestampMs,
-        packetType: 'sos',
-        status: packet.status.name,
-        detail: {'reason': decision.reason.code},
+          detail: {'reason': decision.reason.code},
+        ),
       );
       _log('${decision.reason.code} ${packet.identity}');
       return switch (decision.reason) {
@@ -761,101 +846,185 @@ class BleRelayService {
         message: message,
         priority: RelayQueueService.priorityForSosStatus(message.status),
         nextEligibleAt: nextEligibleAt,
+        processedObservationId: observationId,
+        failAfterStoreForTest: failSosTransactionForTest,
       );
     } catch (e) {
-      await _experimentLogger.logEvent(
-        eventType: ExperimentEventTypes.sosTransactionRolledBack,
+      await _runPostCommitEffect(
+        'sos_transaction_rolled_back_log',
+        () => _experimentLogger.logEvent(
+          eventType: ExperimentEventTypes.sosTransactionRolledBack,
+          deviceId: SyncService().deviceId,
+          messageId: message.id,
+          senderCrc: message.senderCrc,
+          hopIn: packet.hopCount,
+          rssi: rssi,
+          payloadHash: packet.identity,
+          eventTimestampMs: rxAtMs,
+          elapsedRealtimeMs: receivedElapsedRealtimeMs,
+          protocolTimestampMs: packet.timestampMs,
+          packetType: 'sos',
+          status: packet.status.name,
+          detail: {'error': e.toString()},
+        ),
+      );
+      rethrow;
+    }
+    if (!storeResult.stored) {
+      await _dbHelper.completeBleObservation(observationId, now);
+      _log('SOS_TRANSACTION_SKIPPED ${packet.identity}');
+      return BleProcessingResult.stale;
+    }
+    await _dbHelper.completeBleObservation(observationId, now);
+    await _runPostCommitEffect('simulated_sos_post_commit_failure', () async {
+      if (failAfterSosDurableCommitForTest) {
+        throw StateError('Simulated SOS post-commit failure');
+      }
+    });
+    if (MeshConfig.forwardingMode == ForwardingMode.trickle) {
+      await _runPostCommitEffect(
+        'trickle_reset_log',
+        () => _logTrickleReset(
+          message: message,
+          reason:
+              storeResult.trickleReason ??
+              (isNewerState ? 'incoming_inconsistent_state' : 'new_state'),
+          nowMs: nextEligibleAt,
+          packet: packet,
+          rssi: rssi,
+          receivedAtMs: rxAtMs,
+          receivedElapsedRealtimeMs: receivedElapsedRealtimeMs,
+          deviceAddress: deviceAddress,
+          observationId: observationId,
+          observerKey: observerKey,
+          logInconsistentHeard: storeResult.trickleInconsistentHeard,
+          resetPerformed: storeResult.trickleResetPerformed,
+        ),
+      );
+    }
+    await _runPostCommitEffect(
+      'sos_transaction_committed_log',
+      () => _experimentLogger.logEvent(
+        eventType: ExperimentEventTypes.sosTransactionCommitted,
         deviceId: SyncService().deviceId,
         messageId: message.id,
         senderCrc: message.senderCrc,
+        hopCount: message.hopCount,
         hopIn: packet.hopCount,
+        hopOut: message.hopCount,
+        rssi: rssi,
+        payloadHash: packet.identity,
+        protocolTimestampMs: packet.timestampMs,
+        packetType: 'sos',
+        status: message.status.name,
+        detail: {
+          'status': message.status.name,
+          'next_eligible_at': nextEligibleAt,
+          'relay_count': message.relayCount,
+        },
+      ),
+    );
+    await _runPostCommitEffect(
+      'ble_packet_accepted_log',
+      () => _experimentLogger.logEvent(
+        eventType: ExperimentEventTypes.blePacketAccepted,
+        deviceId: SyncService().deviceId,
+        messageId: message.id,
+        senderCrc: message.senderCrc,
+        hopCount: message.hopCount,
+        hopIn: packet.hopCount,
+        hopOut: message.hopCount,
         rssi: rssi,
         payloadHash: packet.identity,
         eventTimestampMs: rxAtMs,
         elapsedRealtimeMs: receivedElapsedRealtimeMs,
         protocolTimestampMs: packet.timestampMs,
         packetType: 'sos',
-        status: packet.status.name,
-        detail: {'error': e.toString()},
-      );
-      rethrow;
-    }
-    if (!storeResult.stored) {
-      _log('SOS_TRANSACTION_SKIPPED ${packet.identity}');
-      return BleProcessingResult.stale;
-    }
-    if (MeshConfig.forwardingMode == ForwardingMode.trickle) {
-      await _logTrickleReset(
-        message: message,
-        reason:
-            storeResult.trickleReason ??
-            (isNewerState ? 'incoming_inconsistent_state' : 'new_state'),
-        nowMs: nextEligibleAt,
-        packet: packet,
+        status: message.status.name,
+      ),
+    );
+    await _runPostCommitEffect(
+      'ble_packet_stored_log',
+      () => _experimentLogger.logEvent(
+        eventType: ExperimentEventTypes.blePacketStored,
+        deviceId: SyncService().deviceId,
+        messageId: message.id,
+        senderCrc: message.senderCrc,
+        hopCount: message.hopCount,
+        hopIn: packet.hopCount,
+        hopOut: message.hopCount,
         rssi: rssi,
-        receivedAtMs: rxAtMs,
-        receivedElapsedRealtimeMs: receivedElapsedRealtimeMs,
-        deviceAddress: deviceAddress,
-        observationId: observationId,
-        observerKey: observerKey,
-        logInconsistentHeard: storeResult.trickleInconsistentHeard,
-        resetPerformed: storeResult.trickleResetPerformed,
-      );
-    }
-    await _experimentLogger.logEvent(
-      eventType: ExperimentEventTypes.sosTransactionCommitted,
-      deviceId: SyncService().deviceId,
-      messageId: message.id,
-      senderCrc: message.senderCrc,
-      hopCount: message.hopCount,
-      hopIn: packet.hopCount,
-      hopOut: message.hopCount,
-      rssi: rssi,
-      payloadHash: packet.identity,
-      protocolTimestampMs: packet.timestampMs,
-      packetType: 'sos',
-      status: message.status.name,
-      detail: {
-        'status': message.status.name,
-        'next_eligible_at': nextEligibleAt,
-        'relay_count': message.relayCount,
-      },
+        payloadHash: packet.identity,
+        protocolTimestampMs: packet.timestampMs,
+        packetType: 'sos',
+        status: message.status.name,
+        detail: {'local_state': message.localState},
+      ),
     );
-    await _experimentLogger.logEvent(
-      eventType: ExperimentEventTypes.blePacketAccepted,
-      deviceId: SyncService().deviceId,
-      messageId: message.id,
-      senderCrc: message.senderCrc,
-      hopCount: message.hopCount,
-      hopIn: packet.hopCount,
-      hopOut: message.hopCount,
-      rssi: rssi,
-      payloadHash: packet.identity,
-      eventTimestampMs: rxAtMs,
-      elapsedRealtimeMs: receivedElapsedRealtimeMs,
-      protocolTimestampMs: packet.timestampMs,
-      packetType: 'sos',
-      status: message.status.name,
-    );
-    await _experimentLogger.logEvent(
-      eventType: ExperimentEventTypes.blePacketStored,
-      deviceId: SyncService().deviceId,
-      messageId: message.id,
-      senderCrc: message.senderCrc,
-      hopCount: message.hopCount,
-      hopIn: packet.hopCount,
-      hopOut: message.hopCount,
-      rssi: rssi,
-      payloadHash: packet.identity,
-      protocolTimestampMs: packet.timestampMs,
-      packetType: 'sos',
-      status: message.status.name,
-      detail: {'local_state': message.localState},
-    );
-    await WorkManagerService.registerSyncTask();
+    await _runPostCommitEffect('workmanager_register_sync_task', () async {
+      if (failWorkManagerPostCommitForTest) {
+        throw StateError('Simulated WorkManager post-commit failure');
+      }
+      await WorkManagerService.registerSyncTask();
+    });
 
     if (isDeferredByCooldown) {
-      await _experimentLogger.logEvent(
+      await _runPostCommitEffect(
+        'deferred_ble_relay_queued_log',
+        () => _experimentLogger.logEvent(
+          eventType: ExperimentEventTypes.bleRelayQueued,
+          deviceId: SyncService().deviceId,
+          messageId: message.id,
+          senderCrc: message.senderCrc,
+          hopCount: message.hopCount,
+          hopIn: packet.hopCount,
+          hopOut: message.hopCount,
+          rssi: rssi,
+          payloadHash: packet.identity,
+          protocolTimestampMs: packet.timestampMs,
+          packetType: 'sos',
+          status: message.status.name,
+          detail: {
+            'deferred': true,
+            'next_eligible_at': decision.nextEligibleAt,
+          },
+        ),
+      );
+      await _runPostCommitEffect(
+        'deferred_advertise_latest_or_stop',
+        _advertiser.advertiseLatestOrStop,
+      );
+      _log('${decision.reason.code} ${packet.identity}');
+      await _runPostCommitEffect('gateway_sync_schedule', _tryGatewaySync);
+      return BleProcessingResult.accepted;
+    }
+
+    if (!shouldRelayNow) {
+      await _runPostCommitEffect(
+        'sos_not_relayed_log',
+        () => _experimentLogger.logEvent(
+          eventType: ExperimentEventTypes.bleRelayDropped,
+          deviceId: SyncService().deviceId,
+          messageId: message.id,
+          senderCrc: packet.senderCrc,
+          hopCount: packet.hopCount,
+          hopIn: packet.hopCount,
+          rssi: rssi,
+          payloadHash: packet.identity,
+          protocolTimestampMs: packet.timestampMs,
+          packetType: 'sos',
+          status: packet.status.name,
+          detail: {'reason': decision.reason.code},
+        ),
+      );
+      _log('${decision.reason.code} ${packet.identity}');
+      await _runPostCommitEffect('gateway_sync_schedule', _tryGatewaySync);
+      return BleProcessingResult.accepted;
+    }
+
+    await _runPostCommitEffect(
+      'ble_relay_queued_log',
+      () => _experimentLogger.logEvent(
         eventType: ExperimentEventTypes.bleRelayQueued,
         deviceId: SyncService().deviceId,
         messageId: message.id,
@@ -868,120 +1037,26 @@ class BleRelayService {
         protocolTimestampMs: packet.timestampMs,
         packetType: 'sos',
         status: message.status.name,
-        detail: {'deferred': true, 'next_eligible_at': decision.nextEligibleAt},
-      );
-      await _advertiser.advertiseLatestOrStop();
-      _log('${decision.reason.code} ${packet.identity}');
-      await _tryGatewaySync();
-      return BleProcessingResult.accepted;
-    }
-
-    if (!shouldRelayNow) {
-      await _experimentLogger.logEvent(
-        eventType: ExperimentEventTypes.bleRelayDropped,
-        deviceId: SyncService().deviceId,
-        messageId: message.id,
-        senderCrc: packet.senderCrc,
-        hopCount: packet.hopCount,
-        hopIn: packet.hopCount,
-        rssi: rssi,
-        payloadHash: packet.identity,
-        protocolTimestampMs: packet.timestampMs,
-        packetType: 'sos',
-        status: packet.status.name,
-        detail: {'reason': decision.reason.code},
-      );
-      _log('${decision.reason.code} ${packet.identity}');
-      await _tryGatewaySync();
-      return BleProcessingResult.accepted;
-    }
-
-    await _experimentLogger.logEvent(
-      eventType: ExperimentEventTypes.bleRelayQueued,
-      deviceId: SyncService().deviceId,
-      messageId: message.id,
-      senderCrc: message.senderCrc,
-      hopCount: message.hopCount,
-      hopIn: packet.hopCount,
-      hopOut: message.hopCount,
-      rssi: rssi,
-      payloadHash: packet.identity,
-      protocolTimestampMs: packet.timestampMs,
-      packetType: 'sos',
-      status: message.status.name,
+      ),
     );
-    await _advertiser.advertiseLatestOrStop();
+    await _runPostCommitEffect(
+      'advertise_latest_or_stop',
+      _advertiser.advertiseLatestOrStop,
+    );
     _log('${decision.reason.code} ${packet.identity} hop=${message.hopCount}');
-    await _tryGatewaySync();
+    await _runPostCommitEffect('gateway_sync_schedule', _tryGatewaySync);
     return BleProcessingResult.accepted;
   }
 
-  Future<bool> _recordTrickleConsistentHeard({
-    required SOSMessage existing,
-    required BlePacket packet,
-    required int nowMs,
-    String? deviceAddress,
-    String? observationId,
-    String? observerKey,
-    int? rssi,
-    int? receivedAtMs,
-    int? receivedElapsedRealtimeMs,
-    int? processedAtMs,
-  }) async {
-    if (MeshConfig.forwardingMode != ForwardingMode.trickle) return false;
-    final effectiveObserverKey = _trickleObserverKey(
-      packet,
-      deviceAddress,
-      observerKey: observerKey,
-    );
-    final effectiveObservationId = observationId?.trim().isNotEmpty == true
-        ? observationId!.trim()
-        : '${packet.identity}|$effectiveObserverKey|${receivedAtMs ?? nowMs}';
-    final recorded = await _relayQueue.recordConsistentSosObservation(
-      messageId: existing.id,
-      observationId: effectiveObservationId,
-      observerKey: effectiveObserverKey,
-      nowMs: nowMs,
-    );
-    if (recorded) {
-      final state = await _relayQueue.trickleStateFor(existing.id);
-      await _experimentLogger.logEvent(
-        eventType: ExperimentEventTypes.trickleConsistentHeard,
-        deviceId: SyncService().deviceId,
-        messageId: existing.id,
-        senderCrc: packet.senderCrc,
-        hopCount: packet.hopCount,
-        hopIn: packet.hopCount,
-        rssi: rssi,
-        payloadHash: packet.identity,
-        eventTimestampMs: receivedAtMs,
-        elapsedRealtimeMs: receivedElapsedRealtimeMs,
-        protocolTimestampMs: packet.timestampMs,
-        packetType: 'sos',
-        status: packet.status.name,
-        detail: {
-          'observation_id': effectiveObservationId,
-          'observer_key': effectiveObserverKey,
-          'received_at': receivedAtMs,
-          'processed_at': processedAtMs,
-          'processing_delay_ms': processedAtMs != null && receivedAtMs != null
-              ? processedAtMs - receivedAtMs
-              : null,
-          'Imin': MeshConfig.trickleImin.inMilliseconds,
-          'Imax': MeshConfig.trickleImax.inMilliseconds,
-          'k': MeshConfig.trickleRedundancyConstant,
-          if (state != null) 'I': state.intervalMs,
-          if (state != null) 'c': state.consistencyCount,
-          if (state != null) 'transmit_at': state.transmitAt,
-          if (state != null) 'interval_started_at': state.intervalStartedAt,
-          if (state != null) 'interval_end_at': state.intervalEndAt,
-          if (state != null) 'phase': state.phase,
-          'logical_identity':
-              '${packet.senderCrc}|${packet.timestampMs}|${packet.status.name}',
-        },
-      );
+  Future<void> _runPostCommitEffect(
+    String operation,
+    Future<void> Function() effect,
+  ) async {
+    try {
+      await effect();
+    } catch (e) {
+      _log('Post-commit BLE side effect failed ($operation): $e');
     }
-    return recorded;
   }
 
   Future<void> _logTrickleReset({
@@ -1096,6 +1171,9 @@ class BleRelayService {
   }
 
   Future<void> _tryGatewaySync() async {
+    if (failGatewayPostCommitForTest) {
+      throw StateError('Simulated gateway post-commit failure');
+    }
     if (SyncService.offlineOnly) {
       _log('Offline-only mode active. Gateway sync skipped.');
       return;

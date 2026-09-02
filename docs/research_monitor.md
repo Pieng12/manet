@@ -241,6 +241,13 @@ duplicate adalah `observation_id` baru untuk state SOS logis yang sama; event
 consistency counter. Lease `processing` 10 menit menjaga retry native tetap
 recoverable jika processor pertama crash.
 
+Research metric mengandalkan durable commit boundary: setelah SOS, ACK, atau
+logical duplicate sudah commit ke SQLite, observation ditandai `completed`
+sebelum side-effect non-kritis. Kegagalan log, advertiser, WorkManager, atau
+gateway scheduling setelah boundary tidak boleh menyebabkan replay RX, sehingga
+metric tidak mendapat `BLE_PACKET_DUPLICATE`, `duplicate_count`, atau Trickle
+`c` tambahan dari observation id yang sama.
+
 Event audit Trickle yang harus dipakai:
 
 - `TRICKLE_RESET`

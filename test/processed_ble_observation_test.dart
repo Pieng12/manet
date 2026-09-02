@@ -96,6 +96,30 @@ void main() {
     expect(rows.single['state'], 'processing');
   });
 
+  test('completed observation cannot become retryable again', () async {
+    await DatabaseHelper.claimBleObservationInDb(
+      db,
+      observationId: 'obs-monotonic',
+      packetType: 'sos',
+      receivedAtMs: 1000,
+      processedAtMs: 1100,
+    );
+    await DatabaseHelper.completeBleObservationInDb(db, 'obs-monotonic', 1200);
+    await DatabaseHelper.markBleObservationRetryableInDb(
+      db,
+      'obs-monotonic',
+      1300,
+    );
+
+    final rows = await db.query(
+      'processed_ble_observations',
+      where: 'observation_id = ?',
+      whereArgs: ['obs-monotonic'],
+    );
+    expect(rows.single['state'], 'completed');
+    expect(rows.single['processed_at'], 1200);
+  });
+
   test('stale processing lease can be retried after timeout', () async {
     await DatabaseHelper.claimBleObservationInDb(
       db,

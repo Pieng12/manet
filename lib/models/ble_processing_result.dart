@@ -6,6 +6,7 @@ enum BleProcessingResult {
   stale,
   suppressedByAck,
   invalid,
+  // Protocol state was not durably committed; retrying the BLE RX is valid.
   failedRetryable;
 
   bool get shouldAcknowledgeInbox =>

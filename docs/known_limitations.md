@@ -33,6 +33,15 @@ ditafsirkan melebihi kemampuan implementasi saat ini.
   native tetap pending agar race direct/inbox tidak menghapus observation yang
   belum selesai; setelah lease lewat, observation dapat diklaim ulang untuk
   recovery crash.
+- Durable protocol commit boundary sudah memisahkan replay RX dari side-effect:
+  setelah SOS/ACK/duplicate logical commit dan observation menjadi `completed`,
+  kegagalan advertiser, WorkManager, gateway scheduling, atau log eksperimen
+  tidak membuka ulang observation sebagai `failed_retryable`.
+- Schema belum menambahkan fencing token per klaim. Jika processor lama stall
+  lebih dari lease lalu hidup lagi setelah processor baru mereclaim observation,
+  guard `completed -> failed_retryable` mencegah downgrade state, tetapi audit
+  race lintas generation masih mengandalkan lease 10 menit dan operasi protocol
+  yang singkat.
 - Karena forwarding bersifat persistent sampai ACK, interval Trickle dan
   suppression wajib dipantau pada pengujian baterai multi-jam.
 - Fairness ACK/SOS diverifikasi unit test, tetapi dampaknya pada kepadatan radio
