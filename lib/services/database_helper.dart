@@ -15,11 +15,15 @@ class ProcessedBleObservationClaim {
     required this.observationId,
     required this.shouldProcess,
     required this.state,
+    required this.isFirstClaim,
+    required this.isRetryClaim,
   });
 
   final String observationId;
   final bool shouldProcess;
   final String state;
+  final bool isFirstClaim;
+  final bool isRetryClaim;
 
   bool get isCompleted => state == 'completed';
   bool get isInProgress => state == 'processing' && !shouldProcess;
@@ -312,6 +316,8 @@ FROM trickle_observations_legacy
           observationId: observationId,
           shouldProcess: true,
           state: 'processing',
+          isFirstClaim: true,
+          isRetryClaim: false,
         );
       }
 
@@ -339,6 +345,8 @@ FROM trickle_observations_legacy
           observationId: observationId,
           shouldProcess: true,
           state: 'processing',
+          isFirstClaim: false,
+          isRetryClaim: true,
         );
       }
 
@@ -346,6 +354,8 @@ FROM trickle_observations_legacy
         observationId: observationId,
         shouldProcess: false,
         state: state,
+        isFirstClaim: false,
+        isRetryClaim: false,
       );
     });
   }

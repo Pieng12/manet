@@ -29,6 +29,10 @@ ditafsirkan melebihi kemampuan implementasi saat ini.
   Android dari transmisi radio baru selama retention 24 jam. Retry yang muncul
   setelah retention teoritisnya dapat diproses sebagai observation baru, namun
   periode ini dipilih agar lebih panjang dari retry WorkManager/service normal.
+- `BLE_PACKET_RECEIVED` dan `ACK_RECEIVED` dicatat hanya pada first claim
+  `observation_id`. Retry protocol dari `failed_retryable` atau lease expired
+  tidak menambah sample fisik, tetapi observasi tanpa `observation_id` tetap
+  mengikuti perilaku legacy dan dicatat sebagai receive normal.
 - State klaim `processing` memakai lease 10 menit. Sebelum lease lewat, retry
   native tetap pending agar race direct/inbox tidak menghapus observation yang
   belum selesai; setelah lease lewat, observation dapat diklaim ulang untuk

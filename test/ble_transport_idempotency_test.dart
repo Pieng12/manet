@@ -10,6 +10,7 @@ import 'package:pkmproject/services/ble_relay_service.dart';
 import 'package:pkmproject/services/database_helper.dart';
 import 'package:pkmproject/services/experiment_logger.dart';
 import 'package:pkmproject/services/native_ble_inbox_drain_service.dart';
+import 'package:pkmproject/services/research_metrics_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sqflite/sqflite.dart' as sqflite;
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
@@ -56,6 +57,7 @@ void main() {
   Future<String> sosPayloadBase64({
     required int senderCrc,
     required int timestampMs,
+    int hopCount = 0,
   }) async {
     final message = SOSMessage(
       id: 'source-$senderCrc-$timestampMs',
@@ -68,7 +70,7 @@ void main() {
       createdAt: timestampMs,
       updatedAt: timestampMs,
     );
-    return base64Encode(BlePacket.packSos(message, hopCount: 0));
+    return base64Encode(BlePacket.packSos(message, hopCount: hopCount));
   }
 
   Future<List<Map<String, Object?>>> eventsOf(String type) async {
@@ -105,6 +107,24 @@ void main() {
     final rows = await db.query('trickle_states');
     if (rows.isEmpty) return 0;
     return rows.single['consistency_count'] as int;
+  }
+
+  Future<void> expectPhysicalSosSamples({
+    required int receivedCount,
+    required int rssiCount,
+    required int hopInCount,
+  }) async {
+    final events = await ExperimentLogger().events();
+    final metrics = ResearchMetricsService().calculate(
+      events: events,
+      trials: const [],
+    );
+    expect(
+      await eventsOf(ExperimentEventTypes.blePacketReceived),
+      hasLength(receivedCount),
+    );
+    expect(metrics.rssiStats.count, rssiCount);
+    expect(metrics.hopInStats.count, hopInCount);
   }
 
   Future<({bool completed, List<String> acknowledged, List<String> failed})>
@@ -287,10 +307,7 @@ void main() {
     expect(recovered.failed, isEmpty);
     expect(rows.single['state'], 'completed');
     expect(await db.query('sos_messages'), hasLength(1));
-    expect(
-      await eventsOf(ExperimentEventTypes.blePacketReceived),
-      hasLength(1),
-    );
+    expect(await eventsOf(ExperimentEventTypes.blePacketReceived), isEmpty);
     expect(await eventsOf(ExperimentEventTypes.blePacketDuplicate), isEmpty);
   });
 
@@ -384,6 +401,10 @@ void main() {
       expect(trickleRows.single['consistency_count'], 1);
       expect(duplicateEvents, hasLength(1));
       expect(duplicateEvents.single['event_timestamp_ms'], secondReceiveTime);
+      expect(
+        await eventsOf(ExperimentEventTypes.blePacketReceived),
+        hasLength(2),
+      );
       expect(
         await eventsOf(ExperimentEventTypes.bleTransportDuplicate),
         isEmpty,
@@ -520,6 +541,10 @@ void main() {
     expect(await processedState('obs-sos-precommit'), 'failed_retryable');
     expect(await db.query('sos_messages'), isEmpty);
     expect(await db.query('relay_queue'), isEmpty);
+    expect(
+      await eventsOf(ExperimentEventTypes.blePacketReceived),
+      hasLength(1),
+    );
 
     BleRelayService.failSosTransactionForTest = false;
     final retried = await service.processIncomingBase64(
@@ -534,7 +559,184 @@ void main() {
     expect(retried, BleProcessingResult.accepted);
     expect(await processedState('obs-sos-precommit'), 'completed');
     expect(await db.query('sos_messages'), hasLength(1));
+    expect(
+      await eventsOf(ExperimentEventTypes.blePacketReceived),
+      hasLength(1),
+    );
   });
+
+  test(
+    'failed_retryable SOS retries keep one physical RX RSSI and hop sample',
+    () async {
+      final service = BleRelayService();
+      final payload = await sosPayloadBase64(
+        senderCrc: 1206,
+        timestampMs: DateTime.now().millisecondsSinceEpoch,
+        hopCount: 2,
+      );
+      BleRelayService.failSosTransactionForTest = true;
+
+      final first = await service.processIncomingBase64(
+        payload,
+        rssi: -61,
+        receivedAtMs: DateTime.now().millisecondsSinceEpoch - 1000,
+        observationId: 'obs-rx-once',
+        observerKey: 'ble:AA',
+        sourcePath: 'direct_service',
+      );
+      final second = await service.processIncomingBase64(
+        payload,
+        rssi: -61,
+        receivedAtMs: DateTime.now().millisecondsSinceEpoch - 900,
+        observationId: 'obs-rx-once',
+        observerKey: 'ble:AA',
+        sourcePath: 'native_inbox_drain',
+      );
+      BleRelayService.failSosTransactionForTest = false;
+      final third = await service.processIncomingBase64(
+        payload,
+        rssi: -61,
+        receivedAtMs: DateTime.now().millisecondsSinceEpoch - 800,
+        observationId: 'obs-rx-once',
+        observerKey: 'ble:AA',
+        sourcePath: 'native_inbox_drain',
+      );
+
+      expect(first, BleProcessingResult.failedRetryable);
+      expect(second, BleProcessingResult.failedRetryable);
+      expect(third, BleProcessingResult.accepted);
+      expect(await processedState('obs-rx-once'), 'completed');
+      await expectPhysicalSosSamples(
+        receivedCount: 1,
+        rssiCount: 1,
+        hopInCount: 1,
+      );
+    },
+  );
+
+  test(
+    'direct pre-commit failure then inbox retry logs one physical RX',
+    () async {
+      final service = BleRelayService();
+      final payload = await sosPayloadBase64(
+        senderCrc: 1207,
+        timestampMs: DateTime.now().millisecondsSinceEpoch,
+      );
+      BleRelayService.failSosTransactionForTest = true;
+
+      final failed = await service.processIncomingBase64(
+        payload,
+        rssi: -64,
+        receivedAtMs: DateTime.now().millisecondsSinceEpoch - 1000,
+        observationId: 'obs-direct-inbox-retry',
+        observerKey: 'ble:AA',
+        sourcePath: 'direct_service',
+      );
+      BleRelayService.failSosTransactionForTest = false;
+      final recovered = await drainOnce(
+        service: service,
+        inboxId: 'inbox-direct-inbox-retry',
+        payload: payload,
+        observationId: 'obs-direct-inbox-retry',
+      );
+
+      expect(failed, BleProcessingResult.failedRetryable);
+      expect(recovered.completed, true);
+      expect(recovered.acknowledged, ['inbox-direct-inbox-retry']);
+      expect(await processedState('obs-direct-inbox-retry'), 'completed');
+      expect(
+        await eventsOf(ExperimentEventTypes.blePacketReceived),
+        hasLength(1),
+      );
+    },
+  );
+
+  test(
+    'inbox pre-commit failure then direct retry logs one physical RX',
+    () async {
+      final service = BleRelayService();
+      final payload = await sosPayloadBase64(
+        senderCrc: 1208,
+        timestampMs: DateTime.now().millisecondsSinceEpoch,
+      );
+      BleRelayService.failSosTransactionForTest = true;
+
+      final failed = await drainOnce(
+        service: service,
+        inboxId: 'inbox-direct-retry',
+        payload: payload,
+        observationId: 'obs-inbox-direct-retry',
+      );
+      BleRelayService.failSosTransactionForTest = false;
+      final recovered = await service.processIncomingBase64(
+        payload,
+        rssi: -64,
+        receivedAtMs: DateTime.now().millisecondsSinceEpoch - 900,
+        observationId: 'obs-inbox-direct-retry',
+        observerKey: 'ble:AA',
+        sourcePath: 'direct_service',
+      );
+
+      expect(failed.completed, false);
+      expect(failed.failed, ['inbox-direct-retry']);
+      expect(recovered, BleProcessingResult.accepted);
+      expect(await processedState('obs-inbox-direct-retry'), 'completed');
+      expect(
+        await eventsOf(ExperimentEventTypes.blePacketReceived),
+        hasLength(1),
+      );
+    },
+  );
+
+  test(
+    'expired processing lease retry does not log another physical RX',
+    () async {
+      final service = BleRelayService();
+      final db = await DatabaseHelper().database;
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final payload = await sosPayloadBase64(senderCrc: 1209, timestampMs: now);
+      await DatabaseHelper.claimBleObservationInDb(
+        db,
+        observationId: 'obs-lease-rx-once',
+        packetType: 'sos',
+        receivedAtMs: now - 1000,
+        processedAtMs:
+            now -
+            DatabaseHelper.processedBleObservationLease.inMilliseconds -
+            1,
+        sourcePath: 'direct_service',
+      );
+      await ExperimentLogger().logEvent(
+        eventType: ExperimentEventTypes.blePacketReceived,
+        deviceId: 'test-device',
+        senderCrc: 1209,
+        hopCount: 0,
+        hopIn: 0,
+        rssi: -60,
+        payloadHash: 'manual-first-rx',
+        packetType: 'sos',
+        status: SOSMessageStatus.active.name,
+        detail: {'observation_id': 'obs-lease-rx-once'},
+      );
+
+      final recovered = await service.processIncomingBase64(
+        payload,
+        rssi: -60,
+        receivedAtMs: now,
+        observationId: 'obs-lease-rx-once',
+        observerKey: 'ble:AA',
+        sourcePath: 'native_inbox_drain',
+      );
+
+      expect(recovered, BleProcessingResult.accepted);
+      expect(await processedState('obs-lease-rx-once'), 'completed');
+      await expectPhysicalSosSamples(
+        receivedCount: 1,
+        rssiCount: 1,
+        hopInCount: 1,
+      );
+    },
+  );
 
   test(
     'logical duplicate post-commit failure is exactly once per observation id',
@@ -624,6 +826,10 @@ void main() {
 
     expect(first, BleProcessingResult.accepted);
     expect(second, BleProcessingResult.transportDuplicate);
+    expect(
+      await eventsOf(ExperimentEventTypes.blePacketReceived),
+      hasLength(1),
+    );
     expect(await eventsOf(ExperimentEventTypes.ackReceived), hasLength(1));
     expect(
       await eventsOf(ExperimentEventTypes.bleTransportDuplicate),
@@ -633,6 +839,55 @@ void main() {
       await (await DatabaseHelper().database).query('trickle_states'),
       isEmpty,
     );
+  });
+
+  test('failed_retryable ACK retry logs BLE and ACK receive once', () async {
+    final service = BleRelayService();
+    final payload = base64Encode(
+      BlePacket.packAck(
+        senderCrc: 2002,
+        ackTimestampMs: DateTime.now().millisecondsSinceEpoch,
+      ),
+    );
+    BleRelayService.failAckTransactionForTest = true;
+
+    final first = await service.processIncomingBase64(
+      payload,
+      rssi: -70,
+      receivedAtMs: DateTime.now().millisecondsSinceEpoch - 1000,
+      observationId: 'ack-obs-precommit',
+      observerKey: 'ble:AA',
+      sourcePath: 'direct_service',
+    );
+    final second = await service.processIncomingBase64(
+      payload,
+      rssi: -70,
+      receivedAtMs: DateTime.now().millisecondsSinceEpoch - 900,
+      observationId: 'ack-obs-precommit',
+      observerKey: 'ble:AA',
+      sourcePath: 'native_inbox_drain',
+    );
+    BleRelayService.failAckTransactionForTest = false;
+    final third = await service.processIncomingBase64(
+      payload,
+      rssi: -70,
+      receivedAtMs: DateTime.now().millisecondsSinceEpoch - 800,
+      observationId: 'ack-obs-precommit',
+      observerKey: 'ble:AA',
+      sourcePath: 'native_inbox_drain',
+    );
+    final db = await DatabaseHelper().database;
+
+    expect(first, BleProcessingResult.failedRetryable);
+    expect(second, BleProcessingResult.failedRetryable);
+    expect(third, BleProcessingResult.accepted);
+    expect(await processedState('ack-obs-precommit'), 'completed');
+    expect(await db.query('ack_tombstones'), hasLength(1));
+    expect(
+      await eventsOf(ExperimentEventTypes.blePacketReceived),
+      hasLength(1),
+    );
+    expect(await eventsOf(ExperimentEventTypes.ackReceived), hasLength(1));
   });
 
   test('active ACK processing retry stays pending until completed', () async {

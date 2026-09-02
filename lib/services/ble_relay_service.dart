@@ -23,6 +23,13 @@ import 'package:pkmproject/utils/hash_utils.dart';
 import 'package:pkmproject/utils/protocol_timestamp.dart';
 import 'package:pkmproject/utils/sos_state_ordering.dart';
 
+class _ProtocolObservationClaim {
+  const _ProtocolObservationClaim({required this.claim, this.blockedResult});
+
+  final ProcessedBleObservationClaim? claim;
+  final BleProcessingResult? blockedResult;
+}
+
 class BleRelayService {
   static final BleRelayService _instance = BleRelayService._internal();
   factory BleRelayService() => _instance;
@@ -40,6 +47,7 @@ class BleRelayService {
   Stream<String> get logStream => _logController.stream;
 
   static bool failSosTransactionForTest = false;
+  static bool failAckTransactionForTest = false;
   static bool failAfterSosDurableCommitForTest = false;
   static bool failAfterLogicalDuplicateCommitForTest = false;
   static bool failAfterAckDurableCommitForTest = false;
@@ -48,6 +56,7 @@ class BleRelayService {
 
   static void resetFailureHooksForTesting() {
     failSosTransactionForTest = false;
+    failAckTransactionForTest = false;
     failAfterSosDurableCommitForTest = false;
     failAfterLogicalDuplicateCommitForTest = false;
     failAfterAckDurableCommitForTest = false;
@@ -220,7 +229,9 @@ class BleRelayService {
         receivedElapsedRealtimeMs: receivedElapsedRealtimeMs,
         sourcePath: sourcePath,
       );
-      if (claimResult != null) return claimResult;
+      if (claimResult.blockedResult != null) {
+        return claimResult.blockedResult!;
+      }
       await _dbHelper.completeBleObservation(observationId, processingNowMs);
       _log('Invalid BLE payload: $e');
       return BleProcessingResult.invalid;
@@ -252,7 +263,9 @@ class BleRelayService {
         receivedElapsedRealtimeMs: receivedElapsedRealtimeMs,
         sourcePath: sourcePath,
       );
-      if (claimResult != null) return claimResult;
+      if (claimResult.blockedResult != null) {
+        return claimResult.blockedResult!;
+      }
       await _dbHelper.completeBleObservation(observationId, processingNowMs);
       _log('Ignored non-ResQMesh BLE packet: ${_hex(payload)}');
       return BleProcessingResult.invalid;
@@ -275,35 +288,41 @@ class BleRelayService {
       rssi: rssi,
       sourcePath: sourcePath,
     );
-    if (claimResult != null) return claimResult;
+    if (claimResult.blockedResult != null) {
+      return claimResult.blockedResult!;
+    }
+    final isPhysicalFirstClaim =
+        claimResult.claim == null || claimResult.claim!.isFirstClaim;
 
-    await _runPostCommitEffect(
-      'ble_packet_received_log',
-      () => _experimentLogger.logEvent(
-        eventType: ExperimentEventTypes.blePacketReceived,
-        deviceId: SyncService().deviceId,
-        senderCrc: packet.senderCrc,
-        hopCount: packet.hopCount,
-        hopIn: packet.hopCount,
-        rssi: rssi,
-        payloadHash: packet.identity,
-        eventTimestampMs: rxAtMs,
-        elapsedRealtimeMs: receivedElapsedRealtimeMs,
-        protocolTimestampMs: packet.timestampMs,
-        packetType: packet.kind.name,
-        status: packet.status.name,
-        detail: {
-          'kind': packet.kind.name,
-          'status': packet.status.name,
-          'from_server': packet.fromServer,
-          if (observationId?.trim().isNotEmpty == true)
-            'observation_id': observationId!.trim(),
-          'observer_key': effectiveObserverKey,
-          if (receivedAtMs != null && receivedAtMs != rxAtMs)
-            'receive_time_fallback_reason': 'invalid_or_future_received_at',
-        },
-      ),
-    );
+    if (isPhysicalFirstClaim) {
+      await _runPostCommitEffect(
+        'ble_packet_received_log',
+        () => _experimentLogger.logEvent(
+          eventType: ExperimentEventTypes.blePacketReceived,
+          deviceId: SyncService().deviceId,
+          senderCrc: packet.senderCrc,
+          hopCount: packet.hopCount,
+          hopIn: packet.hopCount,
+          rssi: rssi,
+          payloadHash: packet.identity,
+          eventTimestampMs: rxAtMs,
+          elapsedRealtimeMs: receivedElapsedRealtimeMs,
+          protocolTimestampMs: packet.timestampMs,
+          packetType: packet.kind.name,
+          status: packet.status.name,
+          detail: {
+            'kind': packet.kind.name,
+            'status': packet.status.name,
+            'from_server': packet.fromServer,
+            if (observationId?.trim().isNotEmpty == true)
+              'observation_id': observationId!.trim(),
+            'observer_key': effectiveObserverKey,
+            if (receivedAtMs != null && receivedAtMs != rxAtMs)
+              'receive_time_fallback_reason': 'invalid_or_future_received_at',
+          },
+        ),
+      );
+    }
 
     try {
       final result = packet.isAck
@@ -313,6 +332,7 @@ class BleRelayService {
               receivedAtMs: rxAtMs,
               receivedElapsedRealtimeMs: receivedElapsedRealtimeMs,
               observationId: observationId,
+              logPhysicalReceive: isPhysicalFirstClaim,
             )
           : await _processSos(
               packet,
@@ -345,7 +365,7 @@ class BleRelayService {
     }
   }
 
-  Future<BleProcessingResult?> _claimProtocolObservation({
+  Future<_ProtocolObservationClaim> _claimProtocolObservation({
     required String? observationId,
     required String packetType,
     required int rxAtMs,
@@ -363,7 +383,9 @@ class BleRelayService {
       processedAtMs: processingNowMs,
       sourcePath: sourcePath,
     );
-    if (claim == null || claim.shouldProcess) return null;
+    if (claim == null || claim.shouldProcess) {
+      return _ProtocolObservationClaim(claim: claim);
+    }
 
     final completed = claim.isCompleted;
     await _runPostCommitEffect(
@@ -397,9 +419,12 @@ class BleRelayService {
         },
       ),
     );
-    return completed
-        ? BleProcessingResult.transportDuplicate
-        : BleProcessingResult.transportInProgress;
+    return _ProtocolObservationClaim(
+      claim: claim,
+      blockedResult: completed
+          ? BleProcessingResult.transportDuplicate
+          : BleProcessingResult.transportInProgress,
+    );
   }
 
   Future<bool> applyAck({
@@ -488,6 +513,7 @@ class BleRelayService {
     int? receivedAtMs,
     int? receivedElapsedRealtimeMs,
     String? observationId,
+    required bool logPhysicalReceive,
   }) async {
     if (packet.status == SOSMessageStatus.active) {
       await _dbHelper.completeBleObservation(
@@ -516,23 +542,25 @@ class BleRelayService {
       return BleProcessingResult.invalid;
     }
 
-    await _runPostCommitEffect(
-      'ack_received_log',
-      () => _experimentLogger.logEvent(
-        eventType: ExperimentEventTypes.ackReceived,
-        deviceId: SyncService().deviceId,
-        senderCrc: packet.senderCrc,
-        hopCount: packet.hopCount,
-        hopIn: packet.hopCount,
-        rssi: rssi,
-        payloadHash: packet.identity,
-        eventTimestampMs: receivedAtMs,
-        elapsedRealtimeMs: receivedElapsedRealtimeMs,
-        protocolTimestampMs: packet.timestampMs,
-        packetType: 'ack',
-        status: packet.status.name,
-      ),
-    );
+    if (logPhysicalReceive) {
+      await _runPostCommitEffect(
+        'ack_received_log',
+        () => _experimentLogger.logEvent(
+          eventType: ExperimentEventTypes.ackReceived,
+          deviceId: SyncService().deviceId,
+          senderCrc: packet.senderCrc,
+          hopCount: packet.hopCount,
+          hopIn: packet.hopCount,
+          rssi: rssi,
+          payloadHash: packet.identity,
+          eventTimestampMs: receivedAtMs,
+          elapsedRealtimeMs: receivedElapsedRealtimeMs,
+          protocolTimestampMs: packet.timestampMs,
+          packetType: 'ack',
+          status: packet.status.name,
+        ),
+      );
+    }
     final AckApplyResult result;
     try {
       result = await _relayQueue.acceptAndQueueAck(
@@ -544,6 +572,7 @@ class BleRelayService {
             : packet.hopCount + 1,
         nowMs: DateTime.now().millisecondsSinceEpoch,
         processedObservationId: observationId,
+        failAfterTombstoneForTest: failAckTransactionForTest,
       );
     } catch (e) {
       await _runPostCommitEffect(
