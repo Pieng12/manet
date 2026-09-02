@@ -9,6 +9,7 @@ typedef BleInboxProcessor =
       String? deviceAddress,
       String? observationId,
       String? observerKey,
+      String? sourcePath,
     });
 typedef BleInboxItemHandler = Future<void> Function(String id);
 
@@ -47,6 +48,7 @@ class NativeBleInboxDrainService {
           deviceAddress: deviceAddress,
           observationId: observationId,
           observerKey: observerKey,
+          sourcePath: 'native_inbox_drain',
         );
       } catch (_) {
         result = BleProcessingResult.failedRetryable;

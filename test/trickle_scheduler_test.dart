@@ -192,90 +192,96 @@ void main() {
     );
   });
 
-  test('transmit time stays in half-open range for odd intervals and Imax', () async {
-    for (final intervalMs in [5, 7, 64000]) {
-      for (var seed = 0; seed < 20; seed++) {
+  test(
+    'transmit time stays in half-open range for odd intervals and Imax',
+    () async {
+      for (final intervalMs in [5, 7, 64000]) {
+        for (var seed = 0; seed < 20; seed++) {
+          final localScheduler = TrickleScheduler(
+            database: db,
+            random: Random(seed),
+            imin: Duration(milliseconds: intervalMs),
+            imax: Duration(milliseconds: intervalMs),
+            redundancyConstant: 2,
+          );
+          final state = await localScheduler.reset(
+            messageId: 'range-$intervalMs-$seed',
+            nowMs: now + seed,
+            reason: 'range_test',
+          );
+
+          expect(
+            state.transmitAt,
+            inInclusiveRange(
+              state.intervalStartedAt + state.intervalMs ~/ 2,
+              state.intervalEndAt - 1,
+            ),
+          );
+          expect(state.transmitAt, isNot(state.intervalEndAt));
+        }
+      }
+    },
+  );
+
+  test(
+    'redundancy constant k controls allow versus suppress threshold',
+    () async {
+      Future<TrickleTransmitDecisionType> decisionFor({
+        required int k,
+        required int c,
+      }) async {
         final localScheduler = TrickleScheduler(
           database: db,
-          random: Random(seed),
-          imin: Duration(milliseconds: intervalMs),
-          imax: Duration(milliseconds: intervalMs),
-          redundancyConstant: 2,
+          random: Random(k * 10 + c),
+          imin: const Duration(seconds: 8),
+          imax: const Duration(seconds: 8),
+          redundancyConstant: k,
         );
         final state = await localScheduler.reset(
-          messageId: 'range-$intervalMs-$seed',
-          nowMs: now + seed,
-          reason: 'range_test',
+          messageId: 'k-$k-c-$c',
+          nowMs: now,
+          reason: 'k_test',
         );
-
-        expect(
-          state.transmitAt,
-          inInclusiveRange(
-            state.intervalStartedAt + state.intervalMs ~/ 2,
-            state.intervalEndAt - 1,
-          ),
-        );
-        expect(state.transmitAt, isNot(state.intervalEndAt));
-      }
-    }
-  });
-
-  test('redundancy constant k controls allow versus suppress threshold', () async {
-    Future<TrickleTransmitDecisionType> decisionFor({
-      required int k,
-      required int c,
-    }) async {
-      final localScheduler = TrickleScheduler(
-        database: db,
-        random: Random(k * 10 + c),
-        imin: const Duration(seconds: 8),
-        imax: const Duration(seconds: 8),
-        redundancyConstant: k,
-      );
-      final state = await localScheduler.reset(
-        messageId: 'k-$k-c-$c',
-        nowMs: now,
-        reason: 'k_test',
-      );
-      for (var i = 0; i < c; i++) {
-        await localScheduler.recordConsistentObservation(
+        for (var i = 0; i < c; i++) {
+          await localScheduler.recordConsistentObservation(
+            messageId: state.messageId,
+            observationId: 'obs-$i',
+            observerKey: 'ble:$i',
+            nowMs: now + i + 1,
+          );
+        }
+        return (await localScheduler.handleQueueEvent(
           messageId: state.messageId,
-          observationId: 'obs-$i',
-          observerKey: 'ble:$i',
-          nowMs: now + i + 1,
-        );
+          nowMs: state.transmitAt,
+        )).type;
       }
-      return (await localScheduler.handleQueueEvent(
-        messageId: state.messageId,
-        nowMs: state.transmitAt,
-      )).type;
-    }
 
-    expect(
-      await decisionFor(k: 1, c: 0),
-      TrickleTransmitDecisionType.allowTransmit,
-    );
-    expect(
-      await decisionFor(k: 1, c: 1),
-      TrickleTransmitDecisionType.suppressTransmit,
-    );
-    expect(
-      await decisionFor(k: 2, c: 1),
-      TrickleTransmitDecisionType.allowTransmit,
-    );
-    expect(
-      await decisionFor(k: 2, c: 2),
-      TrickleTransmitDecisionType.suppressTransmit,
-    );
-    expect(
-      await decisionFor(k: 3, c: 2),
-      TrickleTransmitDecisionType.allowTransmit,
-    );
-    expect(
-      await decisionFor(k: 3, c: 3),
-      TrickleTransmitDecisionType.suppressTransmit,
-    );
-  });
+      expect(
+        await decisionFor(k: 1, c: 0),
+        TrickleTransmitDecisionType.allowTransmit,
+      );
+      expect(
+        await decisionFor(k: 1, c: 1),
+        TrickleTransmitDecisionType.suppressTransmit,
+      );
+      expect(
+        await decisionFor(k: 2, c: 1),
+        TrickleTransmitDecisionType.allowTransmit,
+      );
+      expect(
+        await decisionFor(k: 2, c: 2),
+        TrickleTransmitDecisionType.suppressTransmit,
+      );
+      expect(
+        await decisionFor(k: 3, c: 2),
+        TrickleTransmitDecisionType.allowTransmit,
+      );
+      expect(
+        await decisionFor(k: 3, c: 3),
+        TrickleTransmitDecisionType.suppressTransmit,
+      );
+    },
+  );
 
   test('new inconsistent state resets interval to Imin', () async {
     var state = await scheduler.reset(

@@ -105,6 +105,22 @@ const String createTrickleObservationsIndexSql =
     'CREATE INDEX IF NOT EXISTS idx_trickle_observations_message_interval '
     'ON trickle_observations(message_id, interval_started_at)';
 
+const String createProcessedBleObservationsTableSql = '''
+CREATE TABLE processed_ble_observations (
+  observation_id TEXT PRIMARY KEY,
+  packet_type TEXT NOT NULL,
+  state TEXT NOT NULL,
+  first_received_at INTEGER NOT NULL,
+  processed_at INTEGER NOT NULL,
+  source_path TEXT NULL,
+  updated_at INTEGER NOT NULL
+);
+''';
+
+const String createProcessedBleObservationsStateIndexSql =
+    'CREATE INDEX IF NOT EXISTS idx_processed_ble_observations_state_updated '
+    'ON processed_ble_observations(state, updated_at)';
+
 const String createExperimentSessionsTableSql = '''
 CREATE TABLE experiment_sessions (
   session_id TEXT PRIMARY KEY,

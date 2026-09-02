@@ -170,6 +170,20 @@ baru tidak memakai timestamp BLE yang sama dengan ACK atau state sebelumnya.
 ACK dan SOS disimpan bersama queue dalam transaksi SQLite atomik; recovery
 startup membangun ulang queue SOS/ACK yang hilang dari tabel persisten.
 
+Observasi BLE punya dua lapis deduplikasi. Transport duplicate adalah
+pengiriman ulang internal Android dengan `observation_id` yang sama, misalnya
+direct service lalu native inbox drain. Item seperti ini sudah pernah diproses
+secara protokol, tidak menambah `BLE_PACKET_RECEIVED`,
+`BLE_PACKET_DUPLICATE`, `duplicate_count`, RSSI/hop sample, atau Trickle `c`,
+dan hanya boleh menghasilkan event diagnostik `BLE_TRANSPORT_DUPLICATE`.
+Logical duplicate/consistent transmission adalah `observation_id` baru yang
+membawa state SOS logis yang sama; ini mewakili transmisi radio lain, sehingga
+boleh menambah `BLE_PACKET_DUPLICATE`, `duplicate_count`, dan Trickle `c`.
+Klaim `observation_id` disimpan di `processed_ble_observations` selama 24 jam
+untuk melindungi retry WorkManager/service tanpa membuat tabel tumbuh permanen.
+Native `received_at` diterima untuk timing RX jika tidak kosong dan tidak lebih
+dari 2 detik di masa depan terhadap waktu processing Dart.
+
 ## Format Payload 17 Byte
 
 Manufacturer data memakai `MeshConfig.manufacturerId = 0xFFFF` untuk penelitian

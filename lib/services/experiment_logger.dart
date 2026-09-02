@@ -17,6 +17,7 @@ class ExperimentEventTypes {
   static const blePacketAccepted = 'BLE_PACKET_ACCEPTED';
   static const blePacketStored = 'BLE_PACKET_STORED';
   static const blePacketDuplicate = 'BLE_PACKET_DUPLICATE';
+  static const bleTransportDuplicate = 'BLE_TRANSPORT_DUPLICATE';
   static const blePacketStale = 'BLE_PACKET_STALE';
   static const bleRelayQueued = 'BLE_RELAY_QUEUED';
   static const bleRelayStarted = 'BLE_RELAY_STARTED';

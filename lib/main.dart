@@ -222,6 +222,7 @@ void backgroundServiceMain() {
             deviceAddress: deviceAddress,
             observationId: observationId,
             observerKey: observerKey,
+            sourcePath: 'direct_service',
           );
           if (inboxId != null && inboxId.isNotEmpty) {
             if (result.shouldAcknowledgeInbox) {

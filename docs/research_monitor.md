@@ -225,10 +225,19 @@ burst yang sama tidak selalu bisa dibedakan reliabel.
 
 Untuk Trickle consistency count, interval membership memakai `received_at`
 wall-clock dari native BLE receive. Jika `received_at` null, nol/negatif, atau
-jauh di masa depan terhadap waktu processing, Dart memakai waktu processing
-sebagai fallback dan mencatat alasan fallback pada detail event receive.
+lebih dari 2 detik di masa depan terhadap waktu processing, Dart memakai waktu
+processing sebagai fallback dan mencatat alasan fallback pada detail event
+receive.
 `received_elapsed_realtime_ms` tetap hanya untuk latency diagnostik pada device
 yang sama.
+
+Monitor membedakan transport duplicate dan logical duplicate. Transport
+duplicate adalah retry internal Android dengan `observation_id` sama; event
+diagnostiknya `BLE_TRANSPORT_DUPLICATE` dan tidak dipakai untuk RSSI/hop
+sample, duplicate ratio, atau Trickle `c`. Logical duplicate adalah
+`observation_id` baru untuk state SOS logis yang sama; event
+`BLE_PACKET_DUPLICATE` ini tetap masuk duplicate ratio dan dapat menaikkan
+consistency counter.
 
 Event audit Trickle yang harus dipakai:
 

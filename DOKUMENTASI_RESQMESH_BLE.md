@@ -108,9 +108,19 @@ dibedakan reliabel.
 `observer_key`, `observation_id`, `received_at`, `received_elapsed_realtime_ms`,
 `device_address`, payload, dan RSSI dipropagasi dari native inbox/direct service
 ke Dart. Untuk membership interval Trickle, Dart memakai `received_at` wall
-clock yang tervalidasi; jika null, nol/negatif, atau jauh di masa depan, Dart
-fallback ke waktu processing lokal. `received_elapsed_realtime_ms` hanya untuk
-diagnostik latency lokal dan tidak dibandingkan dengan interval Trickle SQLite.
+clock yang tervalidasi; jika null, nol/negatif, atau lebih dari 2 detik di masa
+depan, Dart fallback ke waktu processing lokal. `received_elapsed_realtime_ms`
+hanya untuk diagnostik latency lokal dan tidak dibandingkan dengan interval
+Trickle SQLite.
+
+Setelah payload valid dibuka, Dart melakukan klaim persisten
+`processed_ble_observations` berdasarkan `observation_id` sebelum mencatat
+`BLE_PACKET_RECEIVED` atau klasifikasi forwarding. Transport duplicate adalah
+retry internal Android dengan `observation_id` yang sama; ini bukan transmisi
+radio baru, sehingga tidak menambah duplicate ratio, RSSI/hop sample,
+`duplicate_count`, atau Trickle `c`. Logical duplicate adalah observation baru
+dengan state SOS logis yang sama; ini tetap dicatat sebagai
+`BLE_PACKET_DUPLICATE` dan dapat menaikkan Trickle `c`.
 
 ## Format Payload BLE 17 Byte
 

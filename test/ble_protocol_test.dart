@@ -471,6 +471,12 @@ CREATE TABLE sos_messages (
     );
     expect(ackTombstones, hasLength(1));
 
+    final processedObservations = await db.rawQuery(
+      "SELECT name FROM sqlite_master WHERE type='table' "
+      "AND name='processed_ble_observations'",
+    );
+    expect(processedObservations, hasLength(1));
+
     final experimentTables = await db.rawQuery(
       "SELECT name FROM sqlite_master WHERE type='table' "
       "AND name IN ('experiment_sessions', 'experiment_trials', 'experiment_events')",

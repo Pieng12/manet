@@ -25,6 +25,10 @@ ditafsirkan melebihi kemampuan implementasi saat ini.
   tidak selalu dapat dibedakan. Repetisi burst yang melintasi boundary bucket
   juga dapat terlihat sebagai observation baru, sehingga hasil fisik tetap perlu
   dikonfirmasi dari log multi-device.
+- Klaim `processed_ble_observations` hanya membedakan retry transport internal
+  Android dari transmisi radio baru selama retention 24 jam. Retry yang muncul
+  setelah retention teoritisnya dapat diproses sebagai observation baru, namun
+  periode ini dipilih agar lebih panjang dari retry WorkManager/service normal.
 - Karena forwarding bersifat persistent sampai ACK, interval Trickle dan
   suppression wajib dipantau pada pengujian baterai multi-jam.
 - Fairness ACK/SOS diverifikasi unit test, tetapi dampaknya pada kepadatan radio

@@ -10,8 +10,24 @@ import 'package:pkmproject/utils/protocol_timestamp.dart';
 import 'package:pkmproject/utils/sos_state_ordering.dart';
 import 'package:pkmproject/utils/sos_status_priority.dart';
 
+class ProcessedBleObservationClaim {
+  const ProcessedBleObservationClaim({
+    required this.observationId,
+    required this.shouldProcess,
+    required this.state,
+  });
+
+  final String observationId;
+  final bool shouldProcess;
+  final String state;
+
+  bool get isTransportDuplicate => !shouldProcess;
+}
+
 class DatabaseHelper {
-  static const int databaseVersion = 11;
+  static const int databaseVersion = 12;
+  static const Duration processedBleObservationRetention = Duration(hours: 24);
+  static const Duration processedBleObservationLease = Duration(minutes: 10);
 
   static final DatabaseHelper _instance = DatabaseHelper._internal();
   static Database? _database;
@@ -29,6 +45,11 @@ class DatabaseHelper {
   }
 
   DatabaseHelper._internal();
+
+  static Future<void> resetForTesting() async {
+    await _database?.close();
+    _database = null;
+  }
 
   // 2. Getter for UI to listen to
   Stream<List<SOSMessage>> get messageStream => _messageStreamController.stream;
@@ -73,9 +94,11 @@ class DatabaseHelper {
         await db.execute(createAckTombstonesTableSql);
         await db.execute(createTrickleStatesTableSql);
         await db.execute(createTrickleObservationsTableSql);
+        await db.execute(createProcessedBleObservationsTableSql);
         await db.execute(createExperimentSessionsTableSql);
         await db.execute(createExperimentTrialsTableSql);
         await db.execute(createExperimentEventsTableSql);
+        await db.execute(createProcessedBleObservationsStateIndexSql);
         await ensureExperimentIndexes(db);
         print("[DatabaseHelper] Table created in onCreate");
       },
@@ -98,8 +121,10 @@ class DatabaseHelper {
         await ensureRelayQueueColumns(db);
         await ensureAckTombstonesTable(db);
         await ensureTrickleTables(db);
+        await ensureProcessedBleObservationsTable(db);
         await ensureExperimentTables(db);
         await ensureExperimentColumns(db);
+        await db.execute(createProcessedBleObservationsStateIndexSql);
         await ensureExperimentIndexes(db);
       },
     );
@@ -158,6 +183,21 @@ class DatabaseHelper {
       await ensureTrickleTables(db);
       await ensureTrickleObservationSchema(db);
     }
+
+    if (oldVersion < 12) {
+      await ensureProcessedBleObservationsTable(db);
+    }
+  }
+
+  static Future<void> ensureProcessedBleObservationsTable(Database db) async {
+    final tables = await db.rawQuery(
+      "SELECT name FROM sqlite_master WHERE type='table' "
+      "AND name='processed_ble_observations'",
+    );
+    if (tables.isEmpty) {
+      await db.execute(createProcessedBleObservationsTableSql);
+    }
+    await db.execute(createProcessedBleObservationsStateIndexSql);
   }
 
   static Future<void> ensureTrickleTables(Database db) async {
@@ -214,6 +254,152 @@ FROM trickle_observations_legacy
     if (tables.isEmpty) {
       await db.execute(createAckTombstonesTableSql);
     }
+  }
+
+  Future<ProcessedBleObservationClaim?> claimBleObservation({
+    required String? observationId,
+    required String packetType,
+    required int receivedAtMs,
+    required int processedAtMs,
+    String? sourcePath,
+  }) async {
+    final id = observationId?.trim();
+    if (id == null || id.isEmpty) return null;
+
+    final db = await database;
+    final retentionCutoff =
+        processedAtMs - processedBleObservationRetention.inMilliseconds;
+    await cleanupProcessedBleObservationsInDb(db, beforeMs: retentionCutoff);
+
+    return claimBleObservationInDb(
+      db,
+      observationId: id,
+      packetType: packetType,
+      receivedAtMs: receivedAtMs,
+      processedAtMs: processedAtMs,
+      sourcePath: sourcePath,
+    );
+  }
+
+  static Future<ProcessedBleObservationClaim> claimBleObservationInDb(
+    Database db, {
+    required String observationId,
+    required String packetType,
+    required int receivedAtMs,
+    required int processedAtMs,
+    String? sourcePath,
+  }) {
+    return db.transaction((txn) async {
+      final rows = await txn.query(
+        'processed_ble_observations',
+        where: 'observation_id = ?',
+        whereArgs: [observationId],
+        limit: 1,
+      );
+      if (rows.isEmpty) {
+        await txn.insert('processed_ble_observations', {
+          'observation_id': observationId,
+          'packet_type': packetType,
+          'state': 'processing',
+          'first_received_at': receivedAtMs,
+          'processed_at': processedAtMs,
+          'source_path': sourcePath,
+          'updated_at': processedAtMs,
+        });
+        return ProcessedBleObservationClaim(
+          observationId: observationId,
+          shouldProcess: true,
+          state: 'processing',
+        );
+      }
+
+      final row = rows.first;
+      final state = row['state']?.toString() ?? 'completed';
+      final updatedAt = row['updated_at'] as int? ?? 0;
+      final staleProcessing =
+          state == 'processing' &&
+          updatedAt <=
+              processedAtMs - processedBleObservationLease.inMilliseconds;
+      if (state == 'failed_retryable' || staleProcessing) {
+        await txn.update(
+          'processed_ble_observations',
+          {
+            'packet_type': packetType,
+            'state': 'processing',
+            'processed_at': processedAtMs,
+            'source_path': sourcePath,
+            'updated_at': processedAtMs,
+          },
+          where: 'observation_id = ?',
+          whereArgs: [observationId],
+        );
+        return ProcessedBleObservationClaim(
+          observationId: observationId,
+          shouldProcess: true,
+          state: 'processing',
+        );
+      }
+
+      return ProcessedBleObservationClaim(
+        observationId: observationId,
+        shouldProcess: false,
+        state: state,
+      );
+    });
+  }
+
+  Future<void> completeBleObservation(String? observationId, int nowMs) async {
+    final id = observationId?.trim();
+    if (id == null || id.isEmpty) return;
+    final db = await database;
+    await completeBleObservationInDb(db, id, nowMs);
+  }
+
+  static Future<void> completeBleObservationInDb(
+    DatabaseExecutor db,
+    String observationId,
+    int nowMs,
+  ) async {
+    await db.update(
+      'processed_ble_observations',
+      {'state': 'completed', 'processed_at': nowMs, 'updated_at': nowMs},
+      where: 'observation_id = ?',
+      whereArgs: [observationId],
+    );
+  }
+
+  Future<void> markBleObservationRetryable(
+    String? observationId,
+    int nowMs,
+  ) async {
+    final id = observationId?.trim();
+    if (id == null || id.isEmpty) return;
+    final db = await database;
+    await markBleObservationRetryableInDb(db, id, nowMs);
+  }
+
+  static Future<void> markBleObservationRetryableInDb(
+    DatabaseExecutor db,
+    String observationId,
+    int nowMs,
+  ) async {
+    await db.update(
+      'processed_ble_observations',
+      {'state': 'failed_retryable', 'processed_at': nowMs, 'updated_at': nowMs},
+      where: 'observation_id = ?',
+      whereArgs: [observationId],
+    );
+  }
+
+  static Future<int> cleanupProcessedBleObservationsInDb(
+    DatabaseExecutor db, {
+    required int beforeMs,
+  }) {
+    return db.delete(
+      'processed_ble_observations',
+      where: 'updated_at < ? AND state IN (?, ?)',
+      whereArgs: [beforeMs, 'completed', 'failed_retryable'],
+    );
   }
 
   static Future<void> ensureExperimentTables(Database db) async {

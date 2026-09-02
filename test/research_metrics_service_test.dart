@@ -109,6 +109,28 @@ void main() {
     expect(metrics.duplicateRatioPercent, closeTo(50, 0.01));
   });
 
+  test('transport duplicate is excluded from logical duplicate metrics', () {
+    final metrics = service.calculate(
+      events: [
+        event(ExperimentEventTypes.blePacketAccepted, 1000, packetType: 'sos'),
+        event(
+          ExperimentEventTypes.bleTransportDuplicate,
+          1001,
+          packetType: 'sos',
+          rssi: -55,
+          hopIn: 1,
+        ),
+      ],
+      trials: const [],
+    );
+
+    expect(metrics.acceptedCount, 1);
+    expect(metrics.duplicateCount, 0);
+    expect(metrics.duplicateRatioPercent, closeTo(0, 0.01));
+    expect(metrics.rssiStats.count, 0);
+    expect(metrics.hopInStats.count, 0);
+  });
+
   test('logical duplicate ratio is policy-level and excludes stale', () {
     final metrics = service.calculate(
       events: [

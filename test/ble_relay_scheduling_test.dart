@@ -201,8 +201,21 @@ void main() {
     );
     expect(
       BleRelayService.effectiveObservationTime(
-        receivedAtMs:
-            processingNow + const Duration(hours: 1).inMilliseconds,
+        receivedAtMs: processingNow + 1000,
+        processingNowMs: processingNow,
+      ),
+      processingNow + 1000,
+    );
+    expect(
+      BleRelayService.effectiveObservationTime(
+        receivedAtMs: processingNow + 3000,
+        processingNowMs: processingNow,
+      ),
+      processingNow,
+    );
+    expect(
+      BleRelayService.effectiveObservationTime(
+        receivedAtMs: processingNow + const Duration(hours: 1).inMilliseconds,
         processingNowMs: processingNow,
       ),
       processingNow,

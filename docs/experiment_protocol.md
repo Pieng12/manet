@@ -123,7 +123,9 @@ Hitung metrik dari event export:
 - Gateway latency: `GATEWAY_UPLOAD_SUCCEEDED.timestamp_ms` dikurangi
   `GATEWAY_UPLOAD_STARTED.timestamp_ms`.
 - Logical duplicate ratio: jumlah `BLE_PACKET_DUPLICATE` dibagi
-  `BLE_PACKET_ACCEPTED + BLE_PACKET_DUPLICATE`.
+  `BLE_PACKET_ACCEPTED + BLE_PACKET_DUPLICATE`. Retry transport Android dengan
+  `observation_id` yang sama hanya dicatat sebagai `BLE_TRANSPORT_DUPLICATE`
+  dan tidak masuk pembilang atau penyebut.
 - Forwarding overhead network-wide: jumlah successful SOS radio TX starts dari
   event canonical `BLE_ADVERTISE_STARTED` dengan `packet_type=sos` di log
   gabungan semua node dibagi pesan logical SOS yang delivered.
@@ -149,10 +151,17 @@ sekali per `observation_id`; raw BLE repeat dalam burst yang sama tidak
 menambah `c`, tetapi burst independen berikutnya dari observer yang sama dapat
 menjadi observation baru.
 Membership interval Trickle memakai `received_at` wall-clock dari native BLE
-receive. Waktu drain/processing Dart hanya dipakai sebagai fallback jika metadata
-receive null, nol/negatif, atau jauh di masa depan. Jangan membandingkan
-`received_elapsed_realtime_ms` dengan interval SQLite karena clock domain-nya
-berbeda.
+receive. Waktu drain/processing Dart hanya dipakai sebagai fallback jika
+metadata receive null, nol/negatif, atau lebih dari 2 detik di masa depan.
+Jangan membandingkan `received_elapsed_realtime_ms` dengan interval SQLite
+karena clock domain-nya berbeda.
+
+Transport duplicate berarti `observation_id` sama terkirim ulang lewat direct
+service, WorkManager, service retry, atau native inbox drain. Ini tidak
+mewakili transmisi BLE baru dan tidak boleh membuat `BLE_PACKET_RECEIVED`,
+`BLE_PACKET_DUPLICATE`, atau Trickle `c` kedua. Logical duplicate berarti
+`observation_id` berbeda tetapi state SOS logis sama; ini adalah consistent
+transmission yang valid untuk duplicate ratio dan Trickle suppression.
 
 ## Catatan P5 untuk Uji Perangkat Fisik
 

@@ -28,6 +28,8 @@ class BleRelayService {
   factory BleRelayService() => _instance;
   BleRelayService._internal();
 
+  static const Duration nativeReceiveFutureTolerance = Duration(seconds: 2);
+
   final DatabaseHelper _dbHelper = DatabaseHelper();
   final BleAdvertiserService _advertiser = BleAdvertiserService();
   final ForwardingPolicy _forwardingPolicy = const ForwardingPolicy();
@@ -174,6 +176,7 @@ class BleRelayService {
     String? deviceAddress,
     String? observationId,
     String? observerKey,
+    String? sourcePath,
   }) async {
     try {
       final payload = base64Decode(payloadBase64);
@@ -185,8 +188,24 @@ class BleRelayService {
         deviceAddress: deviceAddress,
         observationId: observationId,
         observerKey: observerKey,
+        sourcePath: sourcePath,
       );
     } on FormatException catch (e) {
+      final processingNowMs = DateTime.now().millisecondsSinceEpoch;
+      final rxAtMs = effectiveObservationTime(
+        receivedAtMs: receivedAtMs,
+        processingNowMs: processingNowMs,
+      );
+      final claimed = await _claimProtocolObservation(
+        observationId: observationId,
+        packetType: 'invalid',
+        rxAtMs: rxAtMs,
+        processingNowMs: processingNowMs,
+        receivedElapsedRealtimeMs: receivedElapsedRealtimeMs,
+        sourcePath: sourcePath,
+      );
+      if (!claimed) return BleProcessingResult.transportDuplicate;
+      await _dbHelper.completeBleObservation(observationId, processingNowMs);
       _log('Invalid BLE payload: $e');
       return BleProcessingResult.invalid;
     }
@@ -200,24 +219,48 @@ class BleRelayService {
     String? deviceAddress,
     String? observationId,
     String? observerKey,
+    String? sourcePath,
   }) async {
-    final packet = BlePacket.unpack(payload);
-    if (packet == null) {
-      _log('Ignored non-ResQMesh BLE packet: ${_hex(payload)}');
-      return BleProcessingResult.invalid;
-    }
-
-    _log('Received BLE payload ${_hex(payload)} -> ${_describePacket(packet)}');
     final processingNowMs = DateTime.now().millisecondsSinceEpoch;
     final rxAtMs = effectiveObservationTime(
       receivedAtMs: receivedAtMs,
       processingNowMs: processingNowMs,
     );
+    final packet = BlePacket.unpack(payload);
+    if (packet == null) {
+      final claimed = await _claimProtocolObservation(
+        observationId: observationId,
+        packetType: 'invalid',
+        rxAtMs: rxAtMs,
+        processingNowMs: processingNowMs,
+        receivedElapsedRealtimeMs: receivedElapsedRealtimeMs,
+        sourcePath: sourcePath,
+      );
+      if (!claimed) return BleProcessingResult.transportDuplicate;
+      await _dbHelper.completeBleObservation(observationId, processingNowMs);
+      _log('Ignored non-ResQMesh BLE packet: ${_hex(payload)}');
+      return BleProcessingResult.invalid;
+    }
+
+    _log('Received BLE payload ${_hex(payload)} -> ${_describePacket(packet)}');
     final effectiveObserverKey = _trickleObserverKey(
       packet,
       deviceAddress,
       observerKey: observerKey,
     );
+    final claimed = await _claimProtocolObservation(
+      observationId: observationId,
+      packetType: packet.kind.name,
+      rxAtMs: rxAtMs,
+      processingNowMs: processingNowMs,
+      receivedElapsedRealtimeMs: receivedElapsedRealtimeMs,
+      observerKey: effectiveObserverKey,
+      packet: packet,
+      rssi: rssi,
+      sourcePath: sourcePath,
+    );
+    if (!claimed) return BleProcessingResult.transportDuplicate;
+
     await _experimentLogger.logEvent(
       eventType: ExperimentEventTypes.blePacketReceived,
       deviceId: SyncService().deviceId,
@@ -244,28 +287,89 @@ class BleRelayService {
     );
 
     try {
-      if (packet.isAck) {
-        return await _processAck(
-          packet,
-          rssi: rssi,
-          receivedAtMs: rxAtMs,
-          receivedElapsedRealtimeMs: receivedElapsedRealtimeMs,
+      final result = packet.isAck
+          ? await _processAck(
+              packet,
+              rssi: rssi,
+              receivedAtMs: rxAtMs,
+              receivedElapsedRealtimeMs: receivedElapsedRealtimeMs,
+            )
+          : await _processSos(
+              packet,
+              rssi: rssi,
+              receivedAtMs: rxAtMs,
+              receivedElapsedRealtimeMs: receivedElapsedRealtimeMs,
+              deviceAddress: deviceAddress,
+              observationId: observationId,
+              observerKey: observerKey,
+            );
+      if (result.shouldRetryInbox) {
+        await _dbHelper.markBleObservationRetryable(
+          observationId,
+          DateTime.now().millisecondsSinceEpoch,
         );
       } else {
-        return await _processSos(
-          packet,
-          rssi: rssi,
-          receivedAtMs: rxAtMs,
-          receivedElapsedRealtimeMs: receivedElapsedRealtimeMs,
-          deviceAddress: deviceAddress,
-          observationId: observationId,
-          observerKey: observerKey,
+        await _dbHelper.completeBleObservation(
+          observationId,
+          DateTime.now().millisecondsSinceEpoch,
         );
       }
+      return result;
     } catch (e) {
+      await _dbHelper.markBleObservationRetryable(
+        observationId,
+        DateTime.now().millisecondsSinceEpoch,
+      );
       _log('Retryable BLE processing failure for ${packet.identity}: $e');
       return BleProcessingResult.failedRetryable;
     }
+  }
+
+  Future<bool> _claimProtocolObservation({
+    required String? observationId,
+    required String packetType,
+    required int rxAtMs,
+    required int processingNowMs,
+    int? receivedElapsedRealtimeMs,
+    String? observerKey,
+    BlePacket? packet,
+    int? rssi,
+    String? sourcePath,
+  }) async {
+    final claim = await _dbHelper.claimBleObservation(
+      observationId: observationId,
+      packetType: packetType,
+      receivedAtMs: rxAtMs,
+      processedAtMs: processingNowMs,
+      sourcePath: sourcePath,
+    );
+    if (claim == null || claim.shouldProcess) return true;
+
+    await _experimentLogger.logEvent(
+      eventType: ExperimentEventTypes.bleTransportDuplicate,
+      deviceId: SyncService().deviceId,
+      senderCrc: packet?.senderCrc,
+      hopCount: packet?.hopCount,
+      hopIn: packet?.hopCount,
+      rssi: rssi,
+      payloadHash: packet?.identity,
+      eventTimestampMs: rxAtMs,
+      elapsedRealtimeMs: receivedElapsedRealtimeMs,
+      protocolTimestampMs: packet?.timestampMs,
+      packetType: packetType,
+      status: packet?.status.name,
+      detail: {
+        'reason': 'OBSERVATION_ALREADY_PROCESSED',
+        'observation_id': claim.observationId,
+        'observer_key': observerKey,
+        'received_at': rxAtMs,
+        'processed_at': processingNowMs,
+        'processing_delay_ms': processingNowMs - rxAtMs,
+        'source_path': sourcePath,
+        'existing_state': claim.state,
+      },
+    );
+    return false;
   }
 
   Future<bool> applyAck({
@@ -554,6 +658,8 @@ class BleRelayService {
           hopIn: packet.hopCount,
           rssi: rssi,
           payloadHash: packet.identity,
+          eventTimestampMs: rxAtMs,
+          elapsedRealtimeMs: receivedElapsedRealtimeMs,
           protocolTimestampMs: packet.timestampMs,
           packetType: 'sos',
           status: packet.status.name,
@@ -576,6 +682,8 @@ class BleRelayService {
           hopIn: packet.hopCount,
           rssi: rssi,
           payloadHash: packet.identity,
+          eventTimestampMs: rxAtMs,
+          elapsedRealtimeMs: receivedElapsedRealtimeMs,
           protocolTimestampMs: packet.timestampMs,
           packetType: 'sos',
           status: packet.status.name,
@@ -591,6 +699,8 @@ class BleRelayService {
         hopIn: packet.hopCount,
         rssi: rssi,
         payloadHash: packet.identity,
+        eventTimestampMs: rxAtMs,
+        elapsedRealtimeMs: receivedElapsedRealtimeMs,
         protocolTimestampMs: packet.timestampMs,
         packetType: 'sos',
         status: packet.status.name,
@@ -654,6 +764,8 @@ class BleRelayService {
         hopIn: packet.hopCount,
         rssi: rssi,
         payloadHash: packet.identity,
+        eventTimestampMs: rxAtMs,
+        elapsedRealtimeMs: receivedElapsedRealtimeMs,
         protocolTimestampMs: packet.timestampMs,
         packetType: 'sos',
         status: packet.status.name,
@@ -844,9 +956,10 @@ class BleRelayService {
           'observation_id': effectiveObservationId,
           'observer_key': effectiveObserverKey,
           'received_at': receivedAtMs,
-          if (processedAtMs != null) 'processed_at': processedAtMs,
-          if (processedAtMs != null && receivedAtMs != null)
-            'processing_delay_ms': processedAtMs - receivedAtMs,
+          'processed_at': processedAtMs,
+          'processing_delay_ms': processedAtMs != null && receivedAtMs != null
+              ? processedAtMs - receivedAtMs
+              : null,
           'Imin': MeshConfig.trickleImin.inMilliseconds,
           'Imax': MeshConfig.trickleImax.inMilliseconds,
           'k': MeshConfig.trickleRedundancyConstant,
@@ -966,7 +1079,7 @@ class BleRelayService {
   static int effectiveObservationTime({
     required int? receivedAtMs,
     required int processingNowMs,
-    Duration maxFutureSkew = const Duration(minutes: 5),
+    Duration maxFutureSkew = nativeReceiveFutureTolerance,
   }) {
     if (receivedAtMs == null || receivedAtMs <= 0) return processingNowMs;
     if (receivedAtMs > processingNowMs + maxFutureSkew.inMilliseconds) {

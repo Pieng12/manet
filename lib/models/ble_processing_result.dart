@@ -1,6 +1,7 @@
 enum BleProcessingResult {
   accepted,
   duplicate,
+  transportDuplicate,
   stale,
   suppressedByAck,
   invalid,
@@ -9,6 +10,7 @@ enum BleProcessingResult {
   bool get shouldAcknowledgeInbox =>
       this == BleProcessingResult.accepted ||
       this == BleProcessingResult.duplicate ||
+      this == BleProcessingResult.transportDuplicate ||
       this == BleProcessingResult.stale ||
       this == BleProcessingResult.suppressedByAck ||
       this == BleProcessingResult.invalid;
