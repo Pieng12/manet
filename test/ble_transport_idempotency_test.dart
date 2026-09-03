@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -19,10 +20,21 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   const nativeChannel = MethodChannel('id.ac.usu.resqmesh/mesh');
+  late Directory testDatabaseDirectory;
 
-  setUpAll(() {
+  setUpAll(() async {
     sqfliteFfiInit();
     sqflite.databaseFactory = databaseFactoryFfi;
+    testDatabaseDirectory = await Directory.systemTemp.createTemp(
+      'resqmesh_ble_transport_',
+    );
+    await sqflite.databaseFactory.setDatabasesPath(testDatabaseDirectory.path);
+  });
+
+  tearDownAll(() async {
+    if (await testDatabaseDirectory.exists()) {
+      await testDatabaseDirectory.delete(recursive: true);
+    }
   });
 
   setUp(() async {
@@ -270,7 +282,10 @@ void main() {
         await eventsOf(ExperimentEventTypes.bleTransportDuplicate),
         hasLength(1),
       );
-      expect(await eventsOf(ExperimentEventTypes.blePacketReceived), isEmpty);
+      expect(
+        await eventsOf(ExperimentEventTypes.blePacketReceived),
+        hasLength(1),
+      );
       expect(await eventsOf(ExperimentEventTypes.blePacketDuplicate), isEmpty);
     },
   );
@@ -360,6 +375,111 @@ void main() {
         hasLength(1),
       );
       expect(await eventsOf(ExperimentEventTypes.blePacketDuplicate), isEmpty);
+    },
+  );
+
+  test(
+    'completed SOS observation with missing RX event recreates canonical event',
+    () async {
+      final service = BleRelayService();
+      final db = await DatabaseHelper().database;
+      final firstReceivedAt = DateTime.now().millisecondsSinceEpoch - 3000;
+      final payload = await sosPayloadBase64(
+        senderCrc: 1004,
+        timestampMs: DateTime.now().millisecondsSinceEpoch,
+        hopCount: 2,
+      );
+      await DatabaseHelper.claimBleObservationInDb(
+        db,
+        observationId: 'obs-completed-missing-rx',
+        packetType: 'sos',
+        receivedAtMs: firstReceivedAt,
+        processedAtMs: firstReceivedAt + 100,
+        sourcePath: 'direct_service',
+      );
+      await DatabaseHelper.completeBleObservationInDb(
+        db,
+        'obs-completed-missing-rx',
+        firstReceivedAt + 200,
+      );
+
+      final duplicate = await service.processIncomingBase64(
+        payload,
+        rssi: -58,
+        receivedAtMs: DateTime.now().millisecondsSinceEpoch,
+        observationId: 'obs-completed-missing-rx',
+        observerKey: 'ble:AA',
+        sourcePath: 'native_inbox_drain',
+      );
+      final rxEvents = await eventsOf(ExperimentEventTypes.blePacketReceived);
+
+      expect(duplicate, BleProcessingResult.transportDuplicate);
+      expect(rxEvents, hasLength(1));
+      expect(rxEvents.single['event_timestamp_ms'], firstReceivedAt);
+      expect(
+        rxEvents.single['event_key'],
+        'BLE_PACKET_RECEIVED|obs-completed-missing-rx',
+      );
+      await expectPhysicalSosSamples(
+        receivedCount: 1,
+        rssiCount: 1,
+        hopInCount: 1,
+      );
+    },
+  );
+
+  test(
+    'completed SOS retry does not duplicate existing canonical RX event',
+    () async {
+      final service = BleRelayService();
+      final db = await DatabaseHelper().database;
+      final firstReceivedAt = DateTime.now().millisecondsSinceEpoch - 3000;
+      final payload = await sosPayloadBase64(
+        senderCrc: 1005,
+        timestampMs: DateTime.now().millisecondsSinceEpoch,
+      );
+      await DatabaseHelper.claimBleObservationInDb(
+        db,
+        observationId: 'obs-completed-existing-rx',
+        packetType: 'sos',
+        receivedAtMs: firstReceivedAt,
+        processedAtMs: firstReceivedAt + 100,
+        sourcePath: 'direct_service',
+      );
+      await DatabaseHelper.completeBleObservationInDb(
+        db,
+        'obs-completed-existing-rx',
+        firstReceivedAt + 200,
+      );
+      await ExperimentLogger().logEvent(
+        eventType: ExperimentEventTypes.blePacketReceived,
+        deviceId: 'test-device',
+        senderCrc: 1005,
+        hopCount: 0,
+        hopIn: 0,
+        rssi: -57,
+        payloadHash: 'existing-rx',
+        eventTimestampMs: firstReceivedAt,
+        packetType: 'sos',
+        status: SOSMessageStatus.active.name,
+        eventKey: 'BLE_PACKET_RECEIVED|obs-completed-existing-rx',
+        detail: {'observation_id': 'obs-completed-existing-rx'},
+      );
+
+      final duplicate = await service.processIncomingBase64(
+        payload,
+        rssi: -56,
+        receivedAtMs: DateTime.now().millisecondsSinceEpoch,
+        observationId: 'obs-completed-existing-rx',
+        observerKey: 'ble:AA',
+        sourcePath: 'native_inbox_drain',
+      );
+      final rxEvents = await eventsOf(ExperimentEventTypes.blePacketReceived);
+
+      expect(duplicate, BleProcessingResult.transportDuplicate);
+      expect(rxEvents, hasLength(1));
+      expect(rxEvents.single['event_timestamp_ms'], firstReceivedAt);
+      expect(rxEvents.single['rssi'], -57);
     },
   );
 
@@ -945,6 +1065,127 @@ void main() {
     expect(await eventsOf(ExperimentEventTypes.ackReceived), hasLength(1));
   });
 
+  test(
+    'completed ACK observation with missing ACK_RECEIVED recreates it once',
+    () async {
+      final service = BleRelayService();
+      final db = await DatabaseHelper().database;
+      final firstReceivedAt = DateTime.now().millisecondsSinceEpoch - 3000;
+      final payload = base64Encode(
+        BlePacket.packAck(
+          senderCrc: 2003,
+          ackTimestampMs: DateTime.now().millisecondsSinceEpoch,
+        ),
+      );
+      await DatabaseHelper.claimBleObservationInDb(
+        db,
+        observationId: 'ack-completed-missing-rx',
+        packetType: 'ack',
+        receivedAtMs: firstReceivedAt,
+        processedAtMs: firstReceivedAt + 100,
+        sourcePath: 'direct_service',
+      );
+      await DatabaseHelper.completeBleObservationInDb(
+        db,
+        'ack-completed-missing-rx',
+        firstReceivedAt + 200,
+      );
+
+      final duplicate = await service.processIncomingBase64(
+        payload,
+        rssi: -73,
+        receivedAtMs: DateTime.now().millisecondsSinceEpoch,
+        observationId: 'ack-completed-missing-rx',
+        observerKey: 'ble:AA',
+        sourcePath: 'native_inbox_drain',
+      );
+      final rxEvents = await eventsOf(ExperimentEventTypes.blePacketReceived);
+      final ackEvents = await eventsOf(ExperimentEventTypes.ackReceived);
+
+      expect(duplicate, BleProcessingResult.transportDuplicate);
+      expect(rxEvents, hasLength(1));
+      expect(ackEvents, hasLength(1));
+      expect(rxEvents.single['event_timestamp_ms'], firstReceivedAt);
+      expect(ackEvents.single['event_timestamp_ms'], firstReceivedAt);
+      expect(
+        ackEvents.single['event_key'],
+        'ACK_RECEIVED|ack-completed-missing-rx',
+      );
+    },
+  );
+
+  test(
+    'completed ACK retry does not duplicate existing ACK_RECEIVED',
+    () async {
+      final service = BleRelayService();
+      final db = await DatabaseHelper().database;
+      final firstReceivedAt = DateTime.now().millisecondsSinceEpoch - 3000;
+      final payload = base64Encode(
+        BlePacket.packAck(
+          senderCrc: 2004,
+          ackTimestampMs: DateTime.now().millisecondsSinceEpoch,
+        ),
+      );
+      await DatabaseHelper.claimBleObservationInDb(
+        db,
+        observationId: 'ack-completed-existing-rx',
+        packetType: 'ack',
+        receivedAtMs: firstReceivedAt,
+        processedAtMs: firstReceivedAt + 100,
+        sourcePath: 'direct_service',
+      );
+      await DatabaseHelper.completeBleObservationInDb(
+        db,
+        'ack-completed-existing-rx',
+        firstReceivedAt + 200,
+      );
+      await ExperimentLogger().logEvent(
+        eventType: ExperimentEventTypes.blePacketReceived,
+        deviceId: 'test-device',
+        senderCrc: 2004,
+        hopCount: 0,
+        hopIn: 0,
+        rssi: -74,
+        payloadHash: 'existing-ack-rx',
+        eventTimestampMs: firstReceivedAt,
+        packetType: 'ack',
+        status: SOSMessageStatus.resolved.name,
+        eventKey: 'BLE_PACKET_RECEIVED|ack-completed-existing-rx',
+        detail: {'observation_id': 'ack-completed-existing-rx'},
+      );
+      await ExperimentLogger().logEvent(
+        eventType: ExperimentEventTypes.ackReceived,
+        deviceId: 'test-device',
+        senderCrc: 2004,
+        hopCount: 0,
+        hopIn: 0,
+        rssi: -74,
+        payloadHash: 'existing-ack-rx',
+        eventTimestampMs: firstReceivedAt,
+        packetType: 'ack',
+        status: SOSMessageStatus.resolved.name,
+        eventKey: 'ACK_RECEIVED|ack-completed-existing-rx',
+      );
+
+      final duplicate = await service.processIncomingBase64(
+        payload,
+        rssi: -72,
+        receivedAtMs: DateTime.now().millisecondsSinceEpoch,
+        observationId: 'ack-completed-existing-rx',
+        observerKey: 'ble:AA',
+        sourcePath: 'native_inbox_drain',
+      );
+      final rxEvents = await eventsOf(ExperimentEventTypes.blePacketReceived);
+      final ackEvents = await eventsOf(ExperimentEventTypes.ackReceived);
+
+      expect(duplicate, BleProcessingResult.transportDuplicate);
+      expect(rxEvents, hasLength(1));
+      expect(ackEvents, hasLength(1));
+      expect(rxEvents.single['rssi'], -74);
+      expect(ackEvents.single['rssi'], -74);
+    },
+  );
+
   test('active ACK processing retry stays pending until completed', () async {
     final service = BleRelayService();
     final db = await DatabaseHelper().database;
@@ -994,7 +1235,7 @@ void main() {
     );
 
     expect(duplicate, BleProcessingResult.transportDuplicate);
-    expect(await eventsOf(ExperimentEventTypes.ackReceived), isEmpty);
+    expect(await eventsOf(ExperimentEventTypes.ackReceived), hasLength(1));
     expect(
       await eventsOf(ExperimentEventTypes.bleTransportDuplicate),
       hasLength(1),
