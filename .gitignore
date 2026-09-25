@@ -33,6 +33,8 @@ migrate_working_dir/
 /build/
 /coverage/
 /android/build/
+**/.pio/
+**/__pycache__/
 
 # Local diagnostics and command captures
 /*_log.txt
