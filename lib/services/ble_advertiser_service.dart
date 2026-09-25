@@ -82,7 +82,7 @@ class BleAdvertiserService {
 
   Future<bool> _requestPermissions() async {
     try {
-      return AndroidPermissionService.areCriticalPermissionsGranted();
+      return await AndroidPermissionService.areCriticalPermissionsGranted();
     } catch (_) {
       return true;
     }

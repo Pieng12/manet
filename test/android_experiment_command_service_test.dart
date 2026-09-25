@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:pkmproject/config/mesh_config.dart';
 import 'package:pkmproject/database_schema.dart';
 import 'package:pkmproject/services/android_experiment_command_service.dart';
+import 'package:pkmproject/services/experiment_clock.dart';
 import 'package:pkmproject/services/experiment_logger.dart';
 import 'package:pkmproject/services/relay_queue_service.dart';
 import 'package:pkmproject/services/research_session_service.dart';
@@ -55,6 +56,10 @@ void main() {
         activated++;
         await db.insert('sos_messages', message.toDbMap());
       },
+      clock: FixedExperimentClock(
+        wallMs: DateTime.utc(2026, 8, 1).millisecondsSinceEpoch,
+        monotonicMs: 1000,
+      ),
       resetQuietPeriod: Duration.zero,
     );
   });
@@ -114,6 +119,40 @@ void main() {
       (await db.rawQuery('SELECT COUNT(*) c FROM sos_messages')).single['c'],
       1,
     );
+  });
+
+  test('readiness reports the configured 24-bit protocol epoch', () async {
+    final result = await commands.execute('readiness', const {});
+    final epoch = result['protocol_epoch'] as Map<String, dynamic>;
+
+    expect(epoch['epoch_id'], MeshConfig.protocolEpochId);
+    expect(epoch['epoch_start'], '2026-06-01T00:00:00.000Z');
+    expect(epoch['representable_end'], isNotNull);
+    expect(epoch['remaining_days'], greaterThan(0));
+    expect(epoch['valid'], isTrue);
+  });
+
+  test('start trial fails clearly when protocol epoch is exhausted', () async {
+    final endExclusiveMs = (MeshConfig.protocolEpochSeconds + (1 << 24)) * 1000;
+    final sessions = ResearchSessionService(database: db);
+    final expiredCommands = AndroidExperimentCommandService(
+      database: db,
+      sessions: sessions,
+      logger: ExperimentLogger(database: db),
+      activateSos: (_) async {},
+      clock: FixedExperimentClock(wallMs: endExclusiveMs, monotonicMs: 1000),
+      resetQuietPeriod: Duration.zero,
+    );
+
+    final result = await expiredCommands.execute('start_trial', {
+      'command_id': 'expired-start',
+      'session_id': 'missing-session',
+      'trial_id': 'expired-trial',
+      'trial_code': 'EXPIRED',
+    });
+
+    expect(result['ok'], isFalse);
+    expect(result['error'], contains('PROTOCOL_EPOCH_OUT_OF_RANGE'));
   });
 
   test('reset removes protocol state but preserves archived events', () async {

@@ -76,12 +76,12 @@ void callbackDispatcher() {
     print('[WorkManager] Task executed: $task');
 
     if (task != WorkManagerService.syncTaskName) {
-      return Future.value(true);
+      return true;
     }
 
     if (SyncService.offlineOnly) {
       print('[WorkManager] Offline-only mode active. Task skipped.');
-      return Future.value(true);
+      return true;
     }
 
     try {
@@ -98,10 +98,10 @@ void callbackDispatcher() {
       } catch (e) {
         print('[WorkManager] Failed to clear pending_sync after sync: $e');
       }
-      return Future.value(true);
+      return true;
     } catch (e, st) {
       print('[WorkManager] Error in sync task: $e\n$st');
-      return Future.value(false);
+      return false;
     }
   });
 }

@@ -211,7 +211,7 @@ class BleRelayService {
   }) async {
     try {
       final payload = base64Decode(payloadBase64);
-      return processIncomingPayload(
+      return await processIncomingPayload(
         Uint8List.fromList(payload),
         rssi: rssi,
         receivedAtMs: receivedAtMs,
@@ -787,13 +787,19 @@ class BleRelayService {
         : await researchSessions.currentTrial(
             sessionId: researchSession.sessionId,
           );
+    final message = messageFromSosPacket(packet, rxAtMs);
+    final existing = await _dbHelper.getLatestMessageForSender(
+      senderId: message.senderId,
+      senderCrc: message.senderCrc,
+    );
     final topologyDecision = _topologyPolicy.evaluate(
       packet: packet,
       session: researchSession,
+      existingMessage: existing,
       observerKey: observerKey,
       trialStartedAt: researchTrial?.startedAt,
     );
-    if (!topologyDecision.acceptState) {
+    if (topologyDecision.isTopologyIgnored) {
       await _dbHelper.completeBleObservation(observationId, now);
       await _experimentLogger.logEvent(
         eventType: ExperimentEventTypes.topologyIgnored,
@@ -842,11 +848,75 @@ class BleRelayService {
       return BleProcessingResult.suppressedByAck;
     }
 
-    final message = messageFromSosPacket(packet, rxAtMs);
-    final existing = await _dbHelper.getLatestMessageForSender(
-      senderId: message.senderId,
-      senderCrc: message.senderCrc,
-    );
+    if (topologyDecision.countAsLogicalDuplicate && existing != null) {
+      final duplicateRecord = await _relayQueue
+          .recordLogicalDuplicateObservation(
+            messageId: existing.id,
+            observationId: observationId,
+            observerKey: _trickleObserverKey(
+              packet,
+              deviceAddress,
+              observerKey: observerKey,
+            ),
+            nowMs: _clock.monotonicTimeMs(),
+            completedAtMs: now,
+          );
+      await _runPostCommitEffect(
+        'parallel_relay_duplicate_log',
+        () => _experimentLogger.logEvent(
+          eventType: ExperimentEventTypes.blePacketDuplicate,
+          deviceId: SyncService().deviceId,
+          messageId: existing.id,
+          senderCrc: packet.senderCrc,
+          hopCount: packet.hopCount,
+          hopIn: packet.hopCount,
+          rssi: rssi,
+          payloadHash: packet.identity,
+          eventTimestampMs: rxAtMs,
+          elapsedRealtimeMs: receivedElapsedRealtimeMs,
+          protocolTimestampMs: packet.timestampMs,
+          packetType: 'sos',
+          status: packet.status.name,
+          messageKey: packet.messageKey.value,
+          stateIdentity: packet.stateIdentity.value,
+          observationId: observationId,
+          detail: {
+            'reason': topologyDecision.reason,
+            'trickle_consistency_eligible':
+                topologyDecision.countAsTrickleConsistency,
+            'trickle_observation_recorded': duplicateRecord.trickleRecorded,
+          },
+        ),
+      );
+      return BleProcessingResult.duplicate;
+    }
+
+    if (topologyDecision.countAsTrickleInconsistency && existing != null) {
+      final inconsistency = await _relayQueue.recordTopologyInconsistency(
+        messageId: existing.id,
+        nowMs: _clock.monotonicTimeMs(),
+        observationId: observationId,
+        completedAtMs: now,
+      );
+      await _runPostCommitEffect(
+        'parallel_relay_inconsistent_log',
+        () => _logTrickleReset(
+          message: existing,
+          reason: inconsistency?.reason ?? 'parallel_relay_inconsistent_state',
+          nowMs: _clock.monotonicTimeMs(),
+          packet: packet,
+          rssi: rssi,
+          receivedAtMs: rxAtMs,
+          receivedElapsedRealtimeMs: receivedElapsedRealtimeMs,
+          deviceAddress: deviceAddress,
+          observationId: observationId,
+          observerKey: observerKey,
+          resetPerformed: inconsistency?.resetPerformed ?? false,
+        ),
+      );
+      return BleProcessingResult.stale;
+    }
+
     final decision = _forwardingPolicy.decideSos(
       packet: packet,
       nowMs: now,
@@ -866,7 +936,7 @@ class BleRelayService {
                 deviceAddress,
                 observerKey: observerKey,
               ),
-              nowMs: rxAtMs,
+              nowMs: _clock.monotonicTimeMs(),
               completedAtMs: now,
             );
         await _runPostCommitEffect(

@@ -6,10 +6,12 @@ import 'package:pkmproject/services/ble_advertiser_service.dart';
 import 'package:pkmproject/services/ble_relay_service.dart';
 import 'package:pkmproject/services/database_helper.dart';
 import 'package:pkmproject/services/experiment_export_service.dart';
+import 'package:pkmproject/services/experiment_clock.dart';
 import 'package:pkmproject/services/experiment_logger.dart';
 import 'package:pkmproject/services/native_bridge_service.dart';
 import 'package:pkmproject/services/relay_queue_service.dart';
 import 'package:pkmproject/services/research_session_service.dart';
+import 'package:pkmproject/services/protocol_epoch_readiness.dart';
 import 'package:pkmproject/sync_service.dart';
 import 'package:pkmproject/utils/hash_utils.dart';
 import 'package:sqflite/sqflite.dart';
@@ -24,6 +26,7 @@ class AndroidExperimentCommandService {
     ExperimentLogger? logger,
     ExperimentExportService? exporter,
     SosActivator? activateSos,
+    ClockSource? clock,
     Duration resetQuietPeriod = MeshConfig.sosAdvertiseBurstDuration,
   }) : _database = database,
        _databaseHelper = databaseHelper ?? DatabaseHelper(),
@@ -43,6 +46,7 @@ class AndroidExperimentCommandService {
              researchSessionService: sessions,
            ),
        _activateSos = activateSos ?? BleRelayService().activateForMessage,
+       _clock = clock ?? ExperimentClock.instance,
        _resetQuietPeriod = resetQuietPeriod;
 
   final Database? _database;
@@ -51,6 +55,7 @@ class AndroidExperimentCommandService {
   final ExperimentLogger _logger;
   final ExperimentExportService _exporter;
   final SosActivator _activateSos;
+  final ClockSource _clock;
   final Duration _resetQuietPeriod;
 
   Future<Database> get _db async => _database ?? _databaseHelper.database;
@@ -210,6 +215,7 @@ class AndroidExperimentCommandService {
   }
 
   Future<Map<String, dynamic>> _startTrial(Map<String, dynamic> args) async {
+    _requireValidProtocolEpoch();
     final trial = await _sessions.startTrial(
       sessionId: _requiredString(args, 'session_id'),
       trialId: _requiredString(args, 'trial_id'),
@@ -226,6 +232,7 @@ class AndroidExperimentCommandService {
   }
 
   Future<Map<String, dynamic>> _triggerSos(Map<String, dynamic> args) async {
+    _requireValidProtocolEpoch();
     final trialId = _requiredString(args, 'trial_id');
     final db = await _db;
     final trialRows = await db.query(
@@ -244,7 +251,7 @@ class AndroidExperimentCommandService {
     if (existing.isNotEmpty) {
       throw StateError('TRIAL_ALREADY_HAS_LOGICAL_SOS');
     }
-    final now = DateTime.now().millisecondsSinceEpoch;
+    final now = _clock.wallTimeMs();
     final nodeId = args['node_id']?.toString() ?? SyncService().deviceId;
     final message = SOSMessage(
       id: 'research-$trialId',
@@ -421,6 +428,7 @@ class AndroidExperimentCommandService {
           await db.rawQuery('SELECT COUNT(*) FROM relay_queue'),
         ) ??
         0;
+    final epoch = ProtocolEpochReadiness.at(_clock.wallTimeMs());
     return {
       'ok': true,
       'bluetooth': capabilities['bluetoothEnabled'],
@@ -435,7 +443,18 @@ class AndroidExperimentCommandService {
       'trial_id': trial?.trialId,
       'queue_size': queueCount,
       'last_error': capabilities['lastErrorCode'],
+      'protocol_epoch': epoch.toJson(),
     };
+  }
+
+  void _requireValidProtocolEpoch() {
+    final epoch = ProtocolEpochReadiness.at(_clock.wallTimeMs());
+    if (!epoch.isValid) {
+      throw StateError(
+        'PROTOCOL_EPOCH_OUT_OF_RANGE: ${epoch.epochId} '
+        'ended at ${DateTime.fromMillisecondsSinceEpoch(epoch.representableEndMs, isUtc: true).toIso8601String()}',
+      );
+    }
   }
 
   static String _requiredString(Map<String, dynamic> args, String key) {

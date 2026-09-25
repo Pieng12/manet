@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:pkmproject/config/mesh_config.dart';
 import 'package:pkmproject/database_schema.dart';
 import 'package:pkmproject/models/ack_apply_result.dart';
+import 'package:pkmproject/models/experiment_session.dart';
 import 'package:pkmproject/models/forwarding_decision.dart';
 import 'package:pkmproject/models/sos_message.dart';
 import 'package:pkmproject/models/trickle_state.dart';
@@ -13,6 +14,7 @@ import 'package:pkmproject/services/ble_protocol.dart';
 import 'package:pkmproject/services/database_helper.dart';
 import 'package:pkmproject/services/forwarding_policy.dart';
 import 'package:pkmproject/services/relay_queue_service.dart';
+import 'package:pkmproject/services/topology_policy.dart';
 import 'package:pkmproject/utils/protocol_timestamp.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
@@ -29,6 +31,7 @@ void main() {
     await db.execute(createAckTombstonesTableSql);
     await db.execute(createTrickleStatesTableSql);
     await db.execute(createTrickleObservationsTableSql);
+    await db.execute(createProcessedBleObservationsTableSql);
     queue = RelayQueueService(
       database: db,
       random: Random(1),
@@ -496,6 +499,108 @@ void main() {
       expect(item.queueState, RelayQueueService.stateQueued);
       expect(item.relayCount, 0);
       expect(item.nextEligibleAt, decision.state.intervalEndAt);
+    },
+  );
+
+  test(
+    'parallel relay suppresses R2 for one interval without replacing state',
+    () async {
+      final trickle = RelayQueueService(
+        database: db,
+        random: Random(7),
+        mode: ForwardingMode.trickle,
+      );
+      final sourcePacket = BlePacket(
+        kind: BlePacketKind.sos,
+        senderCrc: 4400,
+        timestampMs: now,
+        latitude: 3.5952,
+        longitude: 98.6722,
+        status: SOSMessageStatus.active,
+        hopCount: 1,
+      );
+      final localState = BleRelayService.messageFromSosPacket(
+        sourcePacket,
+        now,
+      );
+      await trickle.storeAndQueueSos(message: localState, nextEligibleAt: now);
+      final beforeItem = (await trickle.getItem(localState.id, 'sos'))!;
+      final beforeState = (await trickle.trickleStateFor(localState.id))!;
+
+      final peerPacket = BlePacket(
+        kind: BlePacketKind.sos,
+        senderCrc: sourcePacket.senderCrc,
+        timestampMs: sourcePacket.timestampMs,
+        latitude: sourcePacket.latitude,
+        longitude: sourcePacket.longitude,
+        status: sourcePacket.status,
+        hopCount: 2,
+      );
+      final topology = const TopologyPolicy().evaluate(
+        packet: peerPacket,
+        session: ExperimentSession(
+          sessionId: 'parallel-relay',
+          deviceId: 'R2',
+          deviceModel: 'test',
+          androidVersion: 'test',
+          forwardingMode: 'trickle',
+          maxHop: 63,
+          messageLifetimeMs: 0,
+          relayCooldownMs: 0,
+          startedAt: now - 1000,
+          sessionKind: 'RESEARCH',
+          nodeRole: 'RELAY',
+          protocolActive: true,
+          expectedHopIn: 1,
+        ),
+        existingMessage: localState,
+        observerKey: 'ble:R1',
+      );
+
+      expect(topology.countAsLogicalDuplicate, isTrue);
+      expect(topology.countAsTrickleConsistency, isTrue);
+      expect(topology.acceptForState, isFalse);
+      expect(topology.relay, isFalse);
+      final recorded = await trickle.recordLogicalDuplicateObservation(
+        messageId: localState.id,
+        observationId: 'r1-burst-1',
+        observerKey: 'ble:R1',
+        nowMs: beforeState.transmitAt - 1,
+      );
+      expect(recorded.trickleRecorded, isTrue);
+
+      final atTransmit = (await trickle.getItem(localState.id, 'sos'))!;
+      final decision = await trickle.handleTrickleQueueEvent(
+        item: atTransmit,
+        nowMs: beforeState.transmitAt,
+      );
+      final storedMessage = SOSMessage.fromDbMap(
+        (await db.query(
+          'sos_messages',
+          where: 'id = ?',
+          whereArgs: [localState.id],
+        )).single,
+      );
+      final afterSuppression = (await trickle.getItem(localState.id, 'sos'))!;
+
+      expect(decision.type, TrickleTransmitDecisionType.suppressTransmit);
+      expect(decision.state.consistencyCount, 1);
+      expect(storedMessage.hopCount, 2);
+      expect(storedMessage.relayCount, 0);
+      expect(afterSuppression.relayCount, beforeItem.relayCount);
+      expect(afterSuppression.queueState, RelayQueueService.stateQueued);
+
+      final nextInterval = await trickle.handleTrickleQueueEvent(
+        item: afterSuppression,
+        nowMs: decision.state.intervalEndAt,
+      );
+      final persisted = await trickle.trickleStateFor(localState.id);
+
+      expect(nextInterval.type, TrickleTransmitDecisionType.intervalAdvanced);
+      expect(persisted, isNotNull);
+      expect(persisted!.intervalMs, MeshConfig.trickleImin.inMilliseconds * 2);
+      expect(persisted.consistencyCount, 0);
+      expect(await trickle.getItem(localState.id, 'sos'), isNotNull);
     },
   );
 

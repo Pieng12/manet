@@ -843,6 +843,39 @@ WHERE id = ?
     });
   }
 
+  Future<TrickleInconsistencyResult?> recordTopologyInconsistency({
+    required String messageId,
+    required int nowMs,
+    String? observationId,
+    int? completedAtMs,
+  }) async {
+    final db = await _db;
+    return db.transaction((txn) async {
+      TrickleInconsistencyResult? result;
+      if (mode == ForwardingMode.trickle) {
+        result =
+            await TrickleScheduler(
+              database: txn,
+              random: _random,
+              clock: _clock,
+            ).handleInconsistentInformation(
+              messageId: messageId,
+              nowMs: nowMs,
+              reason: 'parallel_relay_inconsistent_state',
+            );
+      }
+      final completedObservationId = observationId?.trim();
+      if (completedObservationId != null && completedObservationId.isNotEmpty) {
+        await DatabaseHelper.completeBleObservationInDb(
+          txn,
+          completedObservationId,
+          completedAtMs ?? nowMs,
+        );
+      }
+      return result;
+    });
+  }
+
   static Future<void> _completeProcessedObservationInExecutor(
     DatabaseExecutor db,
     String? observationId,
