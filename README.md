@@ -29,6 +29,8 @@ sudah tersedia:
   `protocol_timestamp_ms`, hop in/out, RSSI RX-only, dan device metadata.
 - Gateway sync melalui WorkManager unique work `resqmeshGatewaySync`.
 - Experiment session, event log, RSSI capture, dan export CSV/JSON.
+- Firmware ESP32-C3 generik berbasis PlatformIO/NimBLE dan controller Python
+  untuk readiness, smoke test, resume trial, serta penggabungan log lintas-node.
 
 ## Arsitektur
 
@@ -107,6 +109,13 @@ Mode forwarding:
   interval doubling sampai `Imax`, suppression, dan fairness.
 - `basic`: scheduler memakai interval dan slot aktual 2 detik plus jitter
   sebagai pembanding eksperimen yang lebih agresif.
+
+Relay penelitian dengan `expectedHopIn=N` juga menerima packet hop `N+1` dari
+relay sejajar sebagai consistency-only jika `MessageKey` dan `StateIdentity`
+sama. Observasi ini menambah logical duplicate dan `c` Trickle tanpa mengganti
+hop/state lokal, membuat queue baru, atau meneruskan jalur baru. Paket layer
+lain tetap `TOPOLOGY_IGNORED`. Pada Basic, logical duplicate tetap dihitung
+untuk LDR tetapi tidak mengaktifkan suppression.
 
 ```bash
 flutter run --dart-define=RESQMESH_FORWARDING_MODE=trickle
@@ -228,6 +237,12 @@ Payload harus tetap 17 byte kecuali protokol diubah secara terdokumentasi.
 Timestamp protokol selalu canonical pada presisi satu detik untuk payload,
 identity, tombstone, dan recovery.
 
+Epoch bawaan `resqmesh-2026-06-01` dimulai pada 1 Juni 2026 UTC. Timestamp
+24-bit valid sampai detik representabel terakhir pada Desember 2026. Readiness
+menampilkan awal, akhir, sisa hari, dan status valid; `start_trial` serta
+`trigger_sos` ditolak bila epoch tidak valid. Tidak ada nearest-window
+reconstruction.
+
 ## Persyaratan Perangkat
 
 - Minimum resmi Android 8.0/API 26.
@@ -252,6 +267,22 @@ flutter test
 flutter build apk --debug --dart-define=RESQMESH_MODE=offline --dart-define=RESQMESH_FORWARDING_MODE=trickle --dart-define=RESQMESH_BLE_DEBUG_VISIBLE=true
 flutter build apk --release --dart-define=RESQMESH_MODE=offline --dart-define=RESQMESH_FORWARDING_MODE=trickle
 ```
+
+Firmware dan controller:
+
+```powershell
+cd firmware/esp32c3
+py -m platformio test -e native
+py -m platformio run -e esp32c3
+cd ../..
+py -m pip install -r tools/experiment_controller/requirements.txt
+py tools/experiment_controller/run.py readiness --config experiment.local.json
+```
+
+Lihat [firmware ESP32-C3](firmware/esp32c3/README.md),
+[controller eksperimen](tools/experiment_controller/README.md), dan
+[checklist smoke test fisik](docs/physical_smoke_test.md). Jangan menjalankan
+matrix 90 trial sebelum smoke H1/H2/H3 untuk kedua mode valid.
 
 ## Cara Memulai Sesi Eksperimen
 

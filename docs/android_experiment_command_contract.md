@@ -56,5 +56,8 @@ adb shell am broadcast -a id.ac.usu.resqmesh.RESEARCH_COMMAND -n id.ac.usu.resqm
 ```
 
 Respons memuat status Bluetooth, izin scan/advertise, scanner, advertiser,
-mode, session, trial, ukuran queue, dan error native terakhir.
+mode, session, trial, ukuran queue, error native terakhir, serta
+`protocol_epoch` yang berisi ID, awal, akhir representasi, sisa hari, dan
+validitas. `start_trial` dan `trigger_sos` gagal dengan
+`PROTOCOL_EPOCH_OUT_OF_RANGE` jika epoch 24-bit sudah tidak valid.
 

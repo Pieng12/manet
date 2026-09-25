@@ -128,7 +128,8 @@ Hitung metrik dari event export:
   atau `BLE_TRANSPORT_IN_PROGRESS` dan tidak masuk pembilang atau penyebut.
 - Forwarding overhead network-wide: jumlah successful SOS radio TX starts dari
   event canonical `BLE_ADVERTISE_STARTED` dengan `packet_type=sos` di log
-  gabungan semua node dibagi pesan logical SOS yang delivered.
+  gabungan semua node dibagi jumlah trial valid (`SUCCESS` maupun
+  `FAILED_DELIVERY`).
   `BLE_RELAY_STARTED` dipakai untuk bukti relay/hop/latency dan tidak
   dijumlahkan lagi sebagai TX kedua. `BLE_ADVERTISE_REQUESTED` dan
   `TRICKLE_TX_SUPPRESSED` bukan TX sukses.
@@ -150,6 +151,17 @@ memakai interval `[Imin, Imax]`, consistency counter `k`, waktu transmit acak
 sekali per `observation_id`; raw BLE repeat dalam burst yang sama tidak
 menambah `c`, tetapi burst independen berikutnya dari observer yang sama dapat
 menjadi observation baru.
+
+Untuk relay sejajar, hop satu layer di atas `expectedHopIn` hanya dianggap
+consistent jika `MessageKey` dan `StateIdentity` cocok dengan state lokal.
+Packet tersebut tidak mengganti state/hop lokal atau menambah queue. Pada
+Trickle ia dapat menaikkan `c`; pada Basic ia hanya menambah logical duplicate.
+State identity berbeda adalah informasi inkonsisten dan tidak boleh dihitung
+sebagai observasi konsisten.
+
+Readiness wajib memeriksa epoch ID, awal, akhir representasi 24-bit, sisa hari,
+dan validitas. Android, firmware, dan controller memakai
+`resqmesh-2026-06-01` / `1780272000`. Tidak ada nearest-window reconstruction.
 Membership interval Trickle memakai `received_at` wall-clock dari native BLE
 receive. Waktu drain/processing Dart hanya dipakai sebagai fallback jika
 metadata receive null, nol/negatif, atau lebih dari 2 detik di masa depan.

@@ -37,3 +37,24 @@ jobs:
       - name: Native unit tests
         working-directory: android
         run: ./gradlew :app:testDebugUnitTest
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Test experiment controller
+        env:
+          PYTHONPATH: tools/experiment_controller
+        run: python -m unittest discover -s tools/experiment_controller/tests -v
+
+      - name: Install PlatformIO
+        run: python -m pip install platformio
+
+      - name: Test firmware codec
+        working-directory: firmware/esp32c3
+        run: python -m platformio test -e native
+
+      - name: Build ESP32-C3 firmware
+        working-directory: firmware/esp32c3
+        run: python -m platformio run -e esp32c3
