@@ -1,0 +1,68 @@
+{
+  "session_id": "resqmesh-physical-001",
+  "build_id": "replace-with-shared-build-id",
+  "modes": ["trickle", "basic_flooding"],
+  "hypotheses": ["H1", "H2", "H3"],
+  "trials_per_condition": 15,
+  "observation_window_seconds": 60,
+  "quiet_period_seconds": 5,
+  "latitude": 3.5952,
+  "longitude": 98.6722,
+  "nodes": [
+    {
+      "node_id": "android-source",
+      "transport": "adb",
+      "serial": "REPLACE_ADB_SERIAL",
+      "role": "SOURCE",
+      "topology": {
+        "H1": {"role": "SOURCE", "node_layer": 0, "expected_hop_in": 0},
+        "H2": {"role": "SOURCE", "node_layer": 0, "expected_hop_in": 0},
+        "H3": {"role": "SOURCE", "node_layer": 0, "expected_hop_in": 0}
+      }
+    },
+    {
+      "node_id": "esp-r1a",
+      "transport": "serial",
+      "port": "COM3",
+      "role": "RELAY",
+      "topology": {
+        "H1": {"role": "OBSERVER", "active": false},
+        "H2": {"role": "RELAY", "node_layer": 1, "expected_hop_in": 1, "hop_out": 2},
+        "H3": {"role": "RELAY", "node_layer": 1, "expected_hop_in": 1, "hop_out": 2}
+      }
+    },
+    {
+      "node_id": "esp-r1b",
+      "transport": "serial",
+      "port": "COM4",
+      "role": "RELAY",
+      "topology": {
+        "H1": {"role": "OBSERVER", "active": false},
+        "H2": {"role": "RELAY", "node_layer": 1, "expected_hop_in": 1, "hop_out": 2},
+        "H3": {"role": "RELAY", "node_layer": 1, "expected_hop_in": 1, "hop_out": 2}
+      }
+    },
+    {
+      "node_id": "esp-r2",
+      "transport": "serial",
+      "port": "COM5",
+      "role": "RELAY",
+      "topology": {
+        "H1": {"role": "OBSERVER", "active": false},
+        "H2": {"role": "OBSERVER", "active": false},
+        "H3": {"role": "RELAY", "node_layer": 2, "expected_hop_in": 2, "hop_out": 3}
+      }
+    },
+    {
+      "node_id": "esp-destination",
+      "transport": "serial",
+      "port": "COM6",
+      "role": "DESTINATION",
+      "topology": {
+        "H1": {"role": "DESTINATION", "node_layer": 1, "expected_hop_in": 1},
+        "H2": {"role": "DESTINATION", "node_layer": 2, "expected_hop_in": 2},
+        "H3": {"role": "DESTINATION", "node_layer": 3, "expected_hop_in": 3}
+      }
+    }
+  ]
+}

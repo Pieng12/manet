@@ -1,0 +1,5 @@
+"""ResQMesh physical experiment controller."""
+
+PROTOCOL_EPOCH_ID = "resqmesh-2026-06-01"
+PROTOCOL_EPOCH_SECONDS = 1780272000
+PROTOCOL_EPOCH_END_SECONDS = PROTOCOL_EPOCH_SECONDS + (1 << 24) - 1
