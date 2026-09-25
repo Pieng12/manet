@@ -100,6 +100,13 @@ class NativeBridgeService {
     }
   }
 
+  static Future<void> setResearchRxBurstGapMs(int value) async {
+    if (value <= 0) throw ArgumentError.value(value, 'value');
+    await _platform.invokeMethod('setResearchRxBurstGapMs', {
+      'rxBurstGapMs': value,
+    });
+  }
+
   static Future<bool> hasPendingRelayWork() async {
     try {
       return await _platform.invokeMethod<bool>('hasPendingRelayWork') ?? false;
@@ -194,5 +201,9 @@ class NativeBridgeService {
       );
       return false;
     }
+  }
+
+  static Future<void> clearNativeBleInbox() async {
+    await _platform.invokeMethod('clearNativeBleInbox');
   }
 }

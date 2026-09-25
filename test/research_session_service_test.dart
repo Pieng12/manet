@@ -286,7 +286,7 @@ void main() {
     expect(events.single.hopIn, 1);
   });
 
-  test('running trial timeout marks explicit FAILED/TIMEOUT', () async {
+  test('running trial timeout ends window pending merged evaluation', () async {
     final session = await research.startSession(
       deviceId: 'device-a',
       name: 'TIMEOUT',
@@ -305,9 +305,9 @@ void main() {
     final trials = await research.trialsForSession(session.sessionId);
 
     expect(updated, 1);
-    expect(trials.single.status, 'COMPLETED');
-    expect(trials.single.result, 'FAILED');
-    expect(trials.single.failureReason, 'TIMEOUT');
+    expect(trials.single.status, 'WINDOW_ENDED');
+    expect(trials.single.result, 'PENDING_EVALUATION');
+    expect(trials.single.failureReason, isNull);
   });
 
   test(

@@ -58,8 +58,18 @@ object NativeBleInbox {
         cleanupProcessed(context, receivedAt)
         val payloadBase64 = Base64.getEncoder().encodeToString(payload)
         val payloadHash = exactPayloadHash(payload)
-        val observerKey = observerKey(deviceAddress, receivedAt, receivedElapsedRealtimeMs)
-        val burstStartedAt = burstStartedAt(receivedElapsedRealtimeMs, receivedAt)
+        val rxBurstGapMs = NativeBleConfig.rxBurstGapMs(context)
+        val observerKey = observerKey(
+            deviceAddress,
+            receivedAt,
+            receivedElapsedRealtimeMs,
+            rxBurstGapMs
+        )
+        val burstStartedAt = burstStartedAt(
+            receivedElapsedRealtimeMs,
+            receivedAt,
+            rxBurstGapMs
+        )
         val observationId = observationId(payloadHash, observerKey, burstStartedAt)
         val metadata = protocolMetadata(payload)
         val items = readItems(context)
@@ -116,6 +126,14 @@ object NativeBleInbox {
     }
 
     @Synchronized
+    fun clear(context: Context) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .remove(KEY_ITEMS)
+            .apply()
+    }
+
+    @Synchronized
     fun markPermissionBlocked(context: Context, blockedAt: Long = System.currentTimeMillis()) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .edit()
@@ -143,12 +161,22 @@ object NativeBleInbox {
         deviceAddress: String?,
         rssi: Int,
         receivedAt: Long,
-        receivedElapsedRealtimeMs: Long = receivedAt
+        receivedElapsedRealtimeMs: Long = receivedAt,
+        rxBurstGapMs: Long = NativeBleConfig.DEFAULT_RX_BURST_GAP_MS
     ): NativeBleInboxStoreMutation {
         val payloadBase64 = Base64.getEncoder().encodeToString(payload)
         val payloadHash = exactPayloadHash(payload)
-        val observerKey = observerKey(deviceAddress, receivedAt, receivedElapsedRealtimeMs)
-        val burstStartedAt = burstStartedAt(receivedElapsedRealtimeMs, receivedAt)
+        val observerKey = observerKey(
+            deviceAddress,
+            receivedAt,
+            receivedElapsedRealtimeMs,
+            rxBurstGapMs
+        )
+        val burstStartedAt = burstStartedAt(
+            receivedElapsedRealtimeMs,
+            receivedAt,
+            rxBurstGapMs
+        )
         return storeIntoItems(
             items = JSONArray(rawItemsJson),
             payloadBase64 = payloadBase64,
@@ -337,21 +365,26 @@ object NativeBleInbox {
     fun observerKey(
         deviceAddress: String?,
         receivedAt: Long,
-        receivedElapsedRealtimeMs: Long
+        receivedElapsedRealtimeMs: Long,
+        rxBurstGapMs: Long = NativeBleConfig.DEFAULT_RX_BURST_GAP_MS
     ): String {
         val normalized = deviceAddress?.trim().orEmpty()
         return if (normalized.isNotEmpty() && normalized != "unknown") {
             "ble:$normalized"
         } else {
-            "unknown:${burstStartedAt(receivedElapsedRealtimeMs, receivedAt)}"
+            "unknown:${burstStartedAt(receivedElapsedRealtimeMs, receivedAt, rxBurstGapMs)}"
         }
     }
 
-    fun burstStartedAt(receivedElapsedRealtimeMs: Long, receivedAt: Long = 0L): Long {
+    fun burstStartedAt(
+        receivedElapsedRealtimeMs: Long,
+        receivedAt: Long = 0L,
+        rxBurstGapMs: Long = NativeBleConfig.DEFAULT_RX_BURST_GAP_MS
+    ): Long {
         val base = if (receivedElapsedRealtimeMs > 0L) receivedElapsedRealtimeMs else receivedAt
         return if (base > 0L) {
-            base / BleWakeUpReceiver.DEDUPLICATION_WINDOW_MS *
-                BleWakeUpReceiver.DEDUPLICATION_WINDOW_MS
+            val gap = rxBurstGapMs.coerceAtLeast(1L)
+            base / gap * gap
         } else {
             0L
         }

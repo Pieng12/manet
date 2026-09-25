@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_map_tile_caching/flutter_map_tile_caching.dart';
@@ -8,6 +10,7 @@ import 'package:pkmproject/screen/permission_screen.dart';
 import 'package:pkmproject/screen/research_monitor_screen.dart';
 import 'package:pkmproject/screen/splash_screen.dart';
 import 'package:pkmproject/services/android_permission_service.dart';
+import 'package:pkmproject/services/android_experiment_command_service.dart';
 import 'package:pkmproject/services/background_service_manager.dart';
 import 'package:pkmproject/services/ble_advertiser_service.dart';
 import 'package:pkmproject/services/ble_relay_service.dart';
@@ -17,6 +20,7 @@ import 'package:pkmproject/services/experiment_logger.dart';
 import 'package:pkmproject/services/native_bridge_service.dart';
 import 'package:pkmproject/services/native_ble_inbox_drain_service.dart';
 import 'package:pkmproject/services/relay_queue_service.dart';
+import 'package:pkmproject/services/research_session_service.dart';
 import 'package:pkmproject/services/workmanager_service.dart';
 import 'package:pkmproject/sync_service.dart';
 import 'package:pkmproject/utils/navigator_key.dart';
@@ -163,6 +167,14 @@ void backgroundServiceMain() {
 
   DatabaseHelper().database.then((_) async {
     await SyncService().initializeIdentity();
+    final researchSession = await ResearchSessionService().currentSession();
+    if (researchSession != null) {
+      RelayQueueService.configureSessionMode(
+        RelayQueueService.modeFromPersistedValue(
+          researchSession.forwardingMode,
+        ),
+      );
+    }
     await ExperimentLogger().ensureSession(deviceId: SyncService().deviceId);
     await ExperimentLogger().logEvent(
       eventType: ExperimentEventTypes.serviceStarted,
@@ -194,6 +206,13 @@ void backgroundServiceMain() {
           preemptCurrent: true,
         );
         break;
+      case "researchCommand":
+        final decoded = jsonDecode(call.arguments as String);
+        final arguments = Map<String, dynamic>.from(decoded as Map);
+        final command = arguments.remove('command')?.toString() ?? '';
+        return jsonEncode(
+          await AndroidExperimentCommandService().execute(command, arguments),
+        );
       case "environmentResumed":
         debugPrint("[backgroundServiceMain] Scheduler environment resumed");
         await NativeBridgeService.resumePendingNativeBleInbox();
@@ -211,7 +230,7 @@ void backgroundServiceMain() {
         final inboxId = args['inbox_id'] as String?;
         final observationId = args['observation_id'] as String? ?? inboxId;
         final observerKey = args['observer_key'] as String?;
-        if (payloadBase64 == null || payloadBase64.isEmpty) return;
+        if (payloadBase64 == null || payloadBase64.isEmpty) return null;
 
         try {
           final result = await BleRelayService().processIncomingBase64(
@@ -306,14 +325,8 @@ Future<bool> _attemptHeadlessRelayIfEligible() async {
   await ExperimentLogger().logEvent(
     eventType: ExperimentEventTypes.headlessRelayAttempted,
     deviceId: SyncService().deviceId,
+    detail: {'scheduler_owner': 'background_service'},
   );
-  final started = await BleAdvertiserService().advertiseOneHeadlessSlot();
-  await ExperimentLogger().logEvent(
-    eventType: started
-        ? ExperimentEventTypes.headlessRelayStarted
-        : ExperimentEventTypes.headlessRelayFailed,
-    deviceId: SyncService().deviceId,
-    detail: {'pending_relay_work': await RelayQueueService().hasActiveItems()},
-  );
+  await BackgroundServiceManager.requestSchedulerTick();
   return true;
 }

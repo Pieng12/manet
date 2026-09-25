@@ -12,9 +12,11 @@ import 'package:pkmproject/services/background_service_manager.dart';
 import 'package:pkmproject/services/ble_protocol.dart';
 import 'package:pkmproject/services/database_helper.dart';
 import 'package:pkmproject/services/experiment_logger.dart';
+import 'package:pkmproject/services/experiment_clock.dart';
 import 'package:pkmproject/services/native_bridge_service.dart';
 import 'package:pkmproject/services/relay_queue_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:uuid/uuid.dart';
 
 class BleAdvertiserService {
   static final BleAdvertiserService _instance =
@@ -37,6 +39,7 @@ class BleAdvertiserService {
   final DatabaseHelper _dbHelper = DatabaseHelper();
   final RelayQueueService _relayQueue = RelayQueueService();
   final ExperimentLogger _experimentLogger = ExperimentLogger();
+  final ClockSource _clock = ExperimentClock.instance;
   final _isAdvertisingController = StreamController<bool>.broadcast();
 
   Stream<bool> get onAdvertisingChanged => _isAdvertisingController.stream;
@@ -45,6 +48,17 @@ class BleAdvertiserService {
   bool get isAdvertising => _isAdvertising;
 
   String? _currentAdvertisedMessageId;
+  String? _currentBurstId;
+  int? _currentBurstStartedWallMs;
+  int? _currentBurstStartedMonotonicMs;
+  int? _currentBurstTargetDurationMs;
+  String? _currentBurstPacketType;
+  int? _currentBurstHopOut;
+  int? _currentBurstSenderCrc;
+  int? _currentBurstProtocolTimestampMs;
+  String? _currentBurstMessageKey;
+  String? _currentBurstStateIdentity;
+  String? _currentBurstStatus;
   Timer? _watchdogTimer;
   Timer? _ackRestoreTimer;
   Timer? _slotTimer;
@@ -214,7 +228,7 @@ class BleAdvertiserService {
       return;
     }
 
-    final now = DateTime.now().millisecondsSinceEpoch;
+    final now = _clock.monotonicTimeMs();
     final delayMs = earliest <= now ? 0 : earliest - now;
     _setSchedulerState(RelaySchedulerState.waitingNextSlot);
     if (delayMs > 0) {
@@ -479,13 +493,15 @@ class BleAdvertiserService {
       print("[BleAdvertiserService] Native stop failed: $e");
     }
 
+    await _logCurrentBurstEnded();
+
     _isAdvertising = false;
     _currentAdvertisedMessageId = null;
     _isAdvertisingController.add(_isAdvertising);
   }
 
   Future<_QueuedAdvertisement?> _nextQueuedAdvertisement() async {
-    final now = DateTime.now().millisecondsSinceEpoch;
+    final now = _clock.monotonicTimeMs();
     for (var attempt = 0; attempt < 20; attempt++) {
       final item = await _relayQueue.nextEligible(now);
       if (item == null) return null;
@@ -524,7 +540,7 @@ class BleAdvertiserService {
         'packet_type': item.packetType,
         'relay_count': item.relayCount,
         'queue_state': item.queueState,
-        'forwarding_mode': MeshConfig.forwardingMode.logValue,
+        'forwarding_mode': _relayQueue.mode.logValue,
         'ack_queue_size': await _relayQueue.queueSizeByType('ack'),
         'sos_queue_size': await _relayQueue.queueSizeByType('sos'),
       },
@@ -590,10 +606,10 @@ class BleAdvertiserService {
     final message = queued.message;
     if (message == null) return;
 
-    final now = DateTime.now().millisecondsSinceEpoch;
+    final now = _clock.monotonicTimeMs();
     final originalNextEligibleAt = queued.item.nextEligibleAt;
     TrickleTransmitDecision? trickleDecision;
-    if (MeshConfig.forwardingMode == ForwardingMode.trickle) {
+    if (_relayQueue.mode == ForwardingMode.trickle) {
       trickleDecision = await _relayQueue.handleTrickleQueueEvent(
         item: queued.item,
         nowMs: now,
@@ -605,10 +621,12 @@ class BleAdvertiserService {
       }
     }
 
+    final burstId = const Uuid().v4();
+    final burstDuration = _relayQueue.slotDurationForMode();
     await _relayQueue.markAdvertisingStarted(
       queued.item,
       nowMs: now,
-      slotDuration: _relayQueue.slotDurationForMode(),
+      slotDuration: burstDuration,
     );
 
     final payload = BlePacket.packSos(message);
@@ -630,17 +648,46 @@ class BleAdvertiserService {
       packetType: 'sos',
       status: message.status.name,
     );
+    await _experimentLogger.logEvent(
+      eventType: ExperimentEventTypes.advertiseBurstRequested,
+      deviceId: 'unknown',
+      messageId: message.id,
+      senderCrc: message.senderCrc,
+      hopOut: message.hopCount,
+      protocolTimestampMs: packet?.timestampMs,
+      packetType: 'sos',
+      status: message.status.name,
+      messageKey: packet?.messageKey.value,
+      stateIdentity: packet?.stateIdentity.value,
+      burstId: burstId,
+      elapsedRealtimeMs: now,
+      detail: {'target_duration_ms': burstDuration.inMilliseconds},
+    );
 
     try {
       if (await _startNativePayload(payload)) {
-        final succeededAt = DateTime.now().millisecondsSinceEpoch;
+        final succeededAt = _clock.wallTimeMs();
+        final succeededAtMonotonic = _clock.monotonicTimeMs();
         _isAdvertising = true;
+        _rememberStartedBurst(
+          burstId: burstId,
+          wallMs: succeededAt,
+          monotonicMs: succeededAtMonotonic,
+          targetDuration: burstDuration,
+          packetType: 'sos',
+          hopOut: message.hopCount,
+          senderCrc: message.senderCrc,
+          protocolTimestampMs: packet?.timestampMs,
+          messageKey: packet?.messageKey.value,
+          stateIdentity: packet?.stateIdentity.value,
+          status: message.status.name,
+        );
         _setSchedulerState(RelaySchedulerState.advertising);
         _isAdvertisingController.add(_isAdvertising);
         _startWatchdog();
         await _relayQueue.markAdvertisingSucceeded(
           queued.item,
-          nowMs: succeededAt,
+          nowMs: succeededAtMonotonic,
           slotDuration: _relayQueue.slotDurationForMode(),
           nextEligibleAtOverride: trickleDecision?.nextEligibleAt,
         );
@@ -654,10 +701,46 @@ class BleAdvertiserService {
           hopOut: message.hopCount,
           payloadHash: payloadHash,
           eventTimestampMs: succeededAt,
+          elapsedRealtimeMs: succeededAtMonotonic,
           protocolTimestampMs: packet?.timestampMs,
           packetType: 'sos',
           status: message.status.name,
         );
+        await _experimentLogger.logEvent(
+          eventType: ExperimentEventTypes.advertiseBurstStarted,
+          deviceId: 'unknown',
+          messageId: message.id,
+          senderCrc: message.senderCrc,
+          hopOut: message.hopCount,
+          eventTimestampMs: succeededAt,
+          elapsedRealtimeMs: succeededAtMonotonic,
+          protocolTimestampMs: packet?.timestampMs,
+          packetType: 'sos',
+          status: message.status.name,
+          messageKey: packet?.messageKey.value,
+          stateIdentity: packet?.stateIdentity.value,
+          burstId: burstId,
+          detail: {'target_duration_ms': burstDuration.inMilliseconds},
+        );
+        final session = await _experimentLogger.currentSession();
+        if (session?.nodeRole?.toUpperCase() == 'SOURCE') {
+          await _experimentLogger.logEvent(
+            eventType: ExperimentEventTypes.sourceFirstAdvertiseStarted,
+            deviceId: 'unknown',
+            messageId: message.id,
+            senderCrc: message.senderCrc,
+            eventTimestampMs: succeededAt,
+            elapsedRealtimeMs: succeededAtMonotonic,
+            protocolTimestampMs: packet?.timestampMs,
+            packetType: 'sos',
+            status: message.status.name,
+            messageKey: packet?.messageKey.value,
+            stateIdentity: packet?.stateIdentity.value,
+            burstId: burstId,
+            eventKey:
+                'SOURCE_FIRST_ADVERTISE_STARTED|${packet?.messageKey.value}',
+          );
+        }
         await _experimentLogger.logEvent(
           eventType: ExperimentEventTypes.bleRelayStarted,
           deviceId: 'unknown',
@@ -667,6 +750,7 @@ class BleAdvertiserService {
           hopOut: message.hopCount,
           payloadHash: payloadHash,
           eventTimestampMs: succeededAt,
+          elapsedRealtimeMs: succeededAtMonotonic,
           protocolTimestampMs: packet?.timestampMs,
           packetType: 'sos',
           status: message.status.name,
@@ -691,7 +775,7 @@ class BleAdvertiserService {
     if (blockedState == null) {
       await _relayQueue.markAdvertisingFailed(
         queued.item,
-        nowMs: DateTime.now().millisecondsSinceEpoch,
+        nowMs: _clock.monotonicTimeMs(),
         retryDelay: _nextTransientRetryDelay(),
       );
     } else {
@@ -711,6 +795,21 @@ class BleAdvertiserService {
       protocolTimestampMs: packet?.timestampMs,
       packetType: 'sos',
       status: message.status.name,
+    );
+    await _experimentLogger.logEvent(
+      eventType: ExperimentEventTypes.advertiseBurstFailed,
+      deviceId: 'unknown',
+      messageId: message.id,
+      senderCrc: message.senderCrc,
+      hopOut: message.hopCount,
+      protocolTimestampMs: packet?.timestampMs,
+      packetType: 'sos',
+      status: message.status.name,
+      messageKey: packet?.messageKey.value,
+      stateIdentity: packet?.stateIdentity.value,
+      burstId: burstId,
+      elapsedRealtimeMs: _clock.monotonicTimeMs(),
+      detail: {'error_code': errorCode},
     );
     if (blockedState != null) {
       _enterBlockedState(blockedState);
@@ -737,24 +836,54 @@ class BleAdvertiserService {
 
     _ackRestoreTimer?.cancel();
     _stopSlotTimer();
+    final burstId = const Uuid().v4();
+    final requestedMonotonic = _clock.monotonicTimeMs();
     final originalNextEligibleAt = queued.item.nextEligibleAt;
     await _relayQueue.markAdvertisingStarted(
       queued.item,
-      nowMs: DateTime.now().millisecondsSinceEpoch,
+      nowMs: _clock.monotonicTimeMs(),
       slotDuration: duration,
+    );
+    await _experimentLogger.logEvent(
+      eventType: ExperimentEventTypes.advertiseBurstRequested,
+      deviceId: 'unknown',
+      senderCrc: packet.senderCrc,
+      hopOut: packet.hopCount,
+      protocolTimestampMs: packet.timestampMs,
+      packetType: 'ack',
+      status: packet.status.name,
+      messageKey: packet.messageKey.value,
+      stateIdentity: packet.stateIdentity.value,
+      burstId: burstId,
+      elapsedRealtimeMs: requestedMonotonic,
+      detail: {'target_duration_ms': duration.inMilliseconds},
     );
 
     try {
       if (await _startNativePayload(payload)) {
-        final succeededAt = DateTime.now().millisecondsSinceEpoch;
+        final succeededAt = _clock.wallTimeMs();
+        final succeededAtMonotonic = _clock.monotonicTimeMs();
         _isAdvertising = true;
         _setSchedulerState(RelaySchedulerState.advertising);
         _currentAdvertisedMessageId = null;
+        _rememberStartedBurst(
+          burstId: burstId,
+          wallMs: succeededAt,
+          monotonicMs: succeededAtMonotonic,
+          targetDuration: duration,
+          packetType: 'ack',
+          hopOut: packet.hopCount,
+          senderCrc: packet.senderCrc,
+          protocolTimestampMs: packet.timestampMs,
+          messageKey: packet.messageKey.value,
+          stateIdentity: packet.stateIdentity.value,
+          status: packet.status.name,
+        );
         _isAdvertisingController.add(_isAdvertising);
         _startWatchdog();
         await _relayQueue.markAdvertisingSucceeded(
           queued.item,
-          nowMs: succeededAt,
+          nowMs: succeededAtMonotonic,
           slotDuration: duration,
         );
         _resetTransientRetry();
@@ -766,10 +895,26 @@ class BleAdvertiserService {
           hopOut: packet.hopCount,
           payloadHash: packet.identity,
           eventTimestampMs: succeededAt,
+          elapsedRealtimeMs: succeededAtMonotonic,
           protocolTimestampMs: packet.timestampMs,
           packetType: 'ack',
           status: packet.status.name,
           detail: {'kind': 'ack'},
+        );
+        await _experimentLogger.logEvent(
+          eventType: ExperimentEventTypes.advertiseBurstStarted,
+          deviceId: 'unknown',
+          senderCrc: packet.senderCrc,
+          hopOut: packet.hopCount,
+          eventTimestampMs: succeededAt,
+          elapsedRealtimeMs: succeededAtMonotonic,
+          protocolTimestampMs: packet.timestampMs,
+          packetType: 'ack',
+          status: packet.status.name,
+          messageKey: packet.messageKey.value,
+          stateIdentity: packet.stateIdentity.value,
+          burstId: burstId,
+          detail: {'target_duration_ms': duration.inMilliseconds},
         );
         await _experimentLogger.logEvent(
           eventType: ExperimentEventTypes.bleRelayStarted,
@@ -779,6 +924,7 @@ class BleAdvertiserService {
           hopOut: packet.hopCount,
           payloadHash: packet.identity,
           eventTimestampMs: succeededAt,
+          elapsedRealtimeMs: succeededAtMonotonic,
           protocolTimestampMs: packet.timestampMs,
           packetType: 'ack',
           status: packet.status.name,
@@ -804,7 +950,7 @@ class BleAdvertiserService {
     if (blockedState == null) {
       await _relayQueue.markAdvertisingFailed(
         queued.item,
-        nowMs: DateTime.now().millisecondsSinceEpoch,
+        nowMs: _clock.monotonicTimeMs(),
         retryDelay: _nextTransientRetryDelay(),
       );
     } else {
@@ -825,6 +971,20 @@ class BleAdvertiserService {
       status: packet.status.name,
       detail: {'kind': 'ack'},
     );
+    await _experimentLogger.logEvent(
+      eventType: ExperimentEventTypes.advertiseBurstFailed,
+      deviceId: 'unknown',
+      senderCrc: packet.senderCrc,
+      hopOut: packet.hopCount,
+      protocolTimestampMs: packet.timestampMs,
+      packetType: 'ack',
+      status: packet.status.name,
+      messageKey: packet.messageKey.value,
+      stateIdentity: packet.stateIdentity.value,
+      burstId: burstId,
+      elapsedRealtimeMs: _clock.monotonicTimeMs(),
+      detail: {'error_code': errorCode},
+    );
     await _persistPendingAck(payload);
     if (blockedState != null) {
       _enterBlockedState(blockedState);
@@ -838,6 +998,70 @@ class BleAdvertiserService {
     _isAdvertising = false;
     _currentAdvertisedMessageId = null;
     _isAdvertisingController.add(_isAdvertising);
+  }
+
+  void _rememberStartedBurst({
+    required String burstId,
+    required int wallMs,
+    required int monotonicMs,
+    required Duration targetDuration,
+    required String packetType,
+    required int hopOut,
+    int? senderCrc,
+    int? protocolTimestampMs,
+    String? messageKey,
+    String? stateIdentity,
+    String? status,
+  }) {
+    _currentBurstId = burstId;
+    _currentBurstStartedWallMs = wallMs;
+    _currentBurstStartedMonotonicMs = monotonicMs;
+    _currentBurstTargetDurationMs = targetDuration.inMilliseconds;
+    _currentBurstPacketType = packetType;
+    _currentBurstHopOut = hopOut;
+    _currentBurstSenderCrc = senderCrc;
+    _currentBurstProtocolTimestampMs = protocolTimestampMs;
+    _currentBurstMessageKey = messageKey;
+    _currentBurstStateIdentity = stateIdentity;
+    _currentBurstStatus = status;
+  }
+
+  Future<void> _logCurrentBurstEnded() async {
+    final burstId = _currentBurstId;
+    final startedMonotonic = _currentBurstStartedMonotonicMs;
+    if (burstId == null || startedMonotonic == null) return;
+    final endedMonotonic = _clock.monotonicTimeMs();
+    await _experimentLogger.logEvent(
+      eventType: ExperimentEventTypes.advertiseBurstEnded,
+      deviceId: 'unknown',
+      messageId: _currentAdvertisedMessageId,
+      senderCrc: _currentBurstSenderCrc,
+      hopOut: _currentBurstHopOut,
+      eventTimestampMs: _clock.wallTimeMs(),
+      elapsedRealtimeMs: endedMonotonic,
+      protocolTimestampMs: _currentBurstProtocolTimestampMs,
+      packetType: _currentBurstPacketType,
+      status: _currentBurstStatus,
+      messageKey: _currentBurstMessageKey,
+      stateIdentity: _currentBurstStateIdentity,
+      burstId: burstId,
+      detail: {
+        'started_wall_ms': _currentBurstStartedWallMs,
+        'target_duration_ms': _currentBurstTargetDurationMs,
+        'actual_duration_ms': endedMonotonic - startedMonotonic,
+      },
+    );
+    _currentBurstId = null;
+    _currentBurstStartedWallMs = null;
+    _currentBurstStartedMonotonicMs = null;
+    _currentBurstTargetDurationMs = null;
+    _currentBurstPacketType = null;
+    _currentBurstHopOut = null;
+    _currentBurstSenderCrc = null;
+    _currentBurstProtocolTimestampMs = null;
+    _currentBurstMessageKey = null;
+    _currentBurstStateIdentity = null;
+    _currentBurstStatus = null;
   }
 
   Future<void> _persistPendingAck(Uint8List payload) async {

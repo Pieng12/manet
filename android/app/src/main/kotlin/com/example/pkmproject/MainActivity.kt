@@ -98,6 +98,15 @@ class MainActivity : FlutterActivity() {
                     "resumePendingNativeBleInbox" -> {
                         result.success(NativeBleInboxWorker.enqueueIfPendingAndPermitted(this))
                     }
+                    "clearNativeBleInbox" -> {
+                        NativeBleInbox.clear(this)
+                        result.success(true)
+                    }
+                    "setResearchRxBurstGapMs" -> {
+                        val value = call.argument<Number>("rxBurstGapMs")?.toLong() ?: 0L
+                        NativeBleConfig.setRxBurstGapMs(this, value)
+                        result.success(true)
+                    }
                     "clearNativeBleInboxPermissionBlocked" -> {
                         if (NativeBlePermissions.hasRequiredRuntimePermissions(this)) {
                             NativeBleInbox.clearPermissionBlocked(this)

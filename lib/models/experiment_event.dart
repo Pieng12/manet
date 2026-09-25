@@ -20,6 +20,10 @@ class ExperimentEvent {
   final String? payloadHash;
   final String? eventKey;
   final String? detailJson;
+  final String? messageKey;
+  final String? stateIdentity;
+  final String? observationId;
+  final String? burstId;
 
   const ExperimentEvent({
     this.id,
@@ -43,6 +47,10 @@ class ExperimentEvent {
     this.payloadHash,
     this.eventKey,
     this.detailJson,
+    this.messageKey,
+    this.stateIdentity,
+    this.observationId,
+    this.burstId,
   });
 
   Map<String, dynamic> toDbMap() {
@@ -68,6 +76,10 @@ class ExperimentEvent {
       'payload_hash': payloadHash,
       'event_key': eventKey,
       'detail_json': detailJson,
+      'message_key': messageKey,
+      'state_identity': stateIdentity,
+      'observation_id': observationId,
+      'burst_id': burstId,
     };
   }
 
@@ -94,6 +106,10 @@ class ExperimentEvent {
       payloadHash: map['payload_hash'] as String?,
       eventKey: map['event_key'] as String?,
       detailJson: map['detail_json'] as String?,
+      messageKey: map['message_key'] as String?,
+      stateIdentity: map['state_identity'] as String?,
+      observationId: map['observation_id'] as String?,
+      burstId: map['burst_id'] as String?,
     );
   }
 }

@@ -9,6 +9,9 @@ class ExperimentTrial {
   final String? result;
   final String? failureReason;
   final String? notes;
+  final int? observationEndedAt;
+  final int? finalizedAt;
+  final String? commandId;
 
   const ExperimentTrial({
     required this.trialId,
@@ -21,6 +24,9 @@ class ExperimentTrial {
     this.result,
     this.failureReason,
     this.notes,
+    this.observationEndedAt,
+    this.finalizedAt,
+    this.commandId,
   });
 
   Map<String, dynamic> toDbMap() {
@@ -35,6 +41,9 @@ class ExperimentTrial {
       'result': result,
       'failure_reason': failureReason,
       'notes': notes,
+      'observation_ended_at': observationEndedAt,
+      'finalized_at': finalizedAt,
+      'command_id': commandId,
     };
   }
 
@@ -50,6 +59,9 @@ class ExperimentTrial {
       result: map['result'] as String?,
       failureReason: map['failure_reason'] as String?,
       notes: map['notes'] as String?,
+      observationEndedAt: map['observation_ended_at'] as int?,
+      finalizedAt: map['finalized_at'] as int?,
+      commandId: map['command_id'] as String?,
     );
   }
 

@@ -14,9 +14,12 @@ import 'package:pkmproject/services/ble_advertiser_service.dart';
 import 'package:pkmproject/services/ble_protocol.dart';
 import 'package:pkmproject/services/database_helper.dart';
 import 'package:pkmproject/services/experiment_logger.dart';
+import 'package:pkmproject/services/experiment_clock.dart';
 import 'package:pkmproject/services/forwarding_policy.dart';
 import 'package:pkmproject/services/native_bridge_service.dart';
 import 'package:pkmproject/services/relay_queue_service.dart';
+import 'package:pkmproject/services/research_session_service.dart';
+import 'package:pkmproject/services/topology_policy.dart';
 import 'package:pkmproject/services/workmanager_service.dart';
 import 'package:pkmproject/sync_service.dart';
 import 'package:pkmproject/utils/hash_utils.dart';
@@ -42,6 +45,8 @@ class BleRelayService {
   final ForwardingPolicy _forwardingPolicy = const ForwardingPolicy();
   final RelayQueueService _relayQueue = RelayQueueService();
   final ExperimentLogger _experimentLogger = ExperimentLogger();
+  final ClockSource _clock = ExperimentClock.instance;
+  final TopologyPolicy _topologyPolicy = const TopologyPolicy();
   final _logController = StreamController<String>.broadcast();
 
   Stream<String> get logStream => _logController.stream;
@@ -133,6 +138,7 @@ class BleRelayService {
       status: packet.status,
       createdAt: timestampMs,
       updatedAt: timestampMs,
+      protocolTimestampMs: timestampMs,
       isSynced: packet.fromServer ? 1 : 0,
       hopCount: nextHopCount,
       maxHop: MeshConfig.legacyHopMetadata,
@@ -174,13 +180,13 @@ class BleRelayService {
   Future<void> activateForMessage(SOSMessage message) async {
     await _dbHelper.ensureMonotonicStateTimestamp(message);
     await start();
-    final now = DateTime.now().millisecondsSinceEpoch;
+    final now = _clock.monotonicTimeMs();
     await _advertiser.enqueueSosForAdvertising(
       message,
       nextEligibleAt: now,
       preemptCurrent: true,
     );
-    if (MeshConfig.forwardingMode == ForwardingMode.trickle) {
+    if (_relayQueue.mode == ForwardingMode.trickle) {
       await _logTrickleReset(
         message: message,
         reason: 'local_source_event',
@@ -366,12 +372,20 @@ class BleRelayService {
     int? rssi,
     String? sourcePath,
   }) async {
+    final researchSessions = ResearchSessionService();
+    final researchSession = await researchSessions.currentSession();
+    final researchTrial = researchSession == null
+        ? null
+        : await researchSessions.currentTrial(
+            sessionId: researchSession.sessionId,
+          );
     final claim = await _dbHelper.claimBleObservation(
       observationId: observationId,
       packetType: packetType,
       receivedAtMs: rxAtMs,
       processedAtMs: processingNowMs,
       sourcePath: sourcePath,
+      trialId: researchTrial?.trialId,
     );
     if (claim == null || claim.shouldProcess) {
       return _ProtocolObservationClaim(claim: claim);
@@ -449,6 +463,9 @@ class BleRelayService {
         packetType: packet.kind.name,
         status: packet.status.name,
         eventKey: physicalRxEventKey,
+        messageKey: packet.messageKey.value,
+        stateIdentity: packet.stateIdentity.value,
+        observationId: hasObservationId ? trimmedObservationId : null,
         detail: {
           'kind': packet.kind.name,
           'status': packet.status.name,
@@ -482,6 +499,9 @@ class BleRelayService {
         packetType: 'ack',
         status: packet.status.name,
         eventKey: ackReceivedEventKey,
+        messageKey: packet.messageKey.value,
+        stateIdentity: packet.stateIdentity.value,
+        observationId: hasObservationId ? trimmedObservationId : null,
       ),
     );
   }
@@ -573,6 +593,27 @@ class BleRelayService {
     int? receivedElapsedRealtimeMs,
     String? observationId,
   }) async {
+    final researchSessions = ResearchSessionService();
+    final researchSession = await researchSessions.currentSession();
+    if (researchSession != null && !researchSession.ackEnabled) {
+      await _dbHelper.completeBleObservation(
+        observationId,
+        DateTime.now().millisecondsSinceEpoch,
+      );
+      await _experimentLogger.logEvent(
+        eventType: ExperimentEventTypes.experimentConfigViolation,
+        deviceId: SyncService().deviceId,
+        senderCrc: packet.senderCrc,
+        protocolTimestampMs: packet.timestampMs,
+        packetType: 'ack',
+        status: packet.status.name,
+        messageKey: packet.messageKey.value,
+        stateIdentity: packet.stateIdentity.value,
+        observationId: observationId,
+        detail: {'reason': 'ACK_DURING_MAIN_TRIAL'},
+      );
+      return BleProcessingResult.invalid;
+    }
     if (packet.status == SOSMessageStatus.active) {
       await _dbHelper.completeBleObservation(
         observationId,
@@ -599,6 +640,11 @@ class BleRelayService {
       _log('ACK_ACTIVE_REJECTED ${packet.identity}');
       return BleProcessingResult.invalid;
     }
+    final researchTrial = researchSession == null
+        ? null
+        : await researchSessions.currentTrial(
+            sessionId: researchSession.sessionId,
+          );
 
     final AckApplyResult result;
     try {
@@ -610,7 +656,9 @@ class BleRelayService {
             ? MeshConfig.maxProtocolHop
             : packet.hopCount + 1,
         nowMs: DateTime.now().millisecondsSinceEpoch,
+        schedulerNowMs: _clock.monotonicTimeMs(),
         processedObservationId: observationId,
+        trialId: researchTrial?.trialId,
         failAfterTombstoneForTest: failAckTransactionForTest,
       );
     } catch (e) {
@@ -732,6 +780,40 @@ class BleRelayService {
       receivedAtMs: receivedAtMs,
       processingNowMs: now,
     );
+    final researchSessions = ResearchSessionService();
+    final researchSession = await researchSessions.currentSession();
+    final researchTrial = researchSession == null
+        ? null
+        : await researchSessions.currentTrial(
+            sessionId: researchSession.sessionId,
+          );
+    final topologyDecision = _topologyPolicy.evaluate(
+      packet: packet,
+      session: researchSession,
+      observerKey: observerKey,
+      trialStartedAt: researchTrial?.startedAt,
+    );
+    if (!topologyDecision.acceptState) {
+      await _dbHelper.completeBleObservation(observationId, now);
+      await _experimentLogger.logEvent(
+        eventType: ExperimentEventTypes.topologyIgnored,
+        deviceId: SyncService().deviceId,
+        senderCrc: packet.senderCrc,
+        hopIn: packet.hopCount,
+        rssi: rssi,
+        payloadHash: packet.identity,
+        eventTimestampMs: rxAtMs,
+        elapsedRealtimeMs: receivedElapsedRealtimeMs,
+        protocolTimestampMs: packet.timestampMs,
+        packetType: 'sos',
+        status: packet.status.name,
+        messageKey: packet.messageKey.value,
+        stateIdentity: packet.stateIdentity.value,
+        observationId: observationId,
+        detail: {'reason': topologyDecision.reason},
+      );
+      return BleProcessingResult.stale;
+    }
     final suppressedByAck = await _dbHelper.isSuppressedByAckTombstone(
       senderCrc: packet.senderCrc,
       sosTimestampMs: packet.timestampMs,
@@ -814,9 +896,9 @@ class BleRelayService {
             packetType: 'sos',
             status: packet.status.name,
             detail: {
-              if (MeshConfig.forwardingMode == ForwardingMode.trickle)
+              if (_relayQueue.mode == ForwardingMode.trickle)
                 'trickle_observation_recorded': duplicateRecord.trickleRecorded,
-              if (MeshConfig.forwardingMode == ForwardingMode.trickle &&
+              if (_relayQueue.mode == ForwardingMode.trickle &&
                   !duplicateRecord.trickleRecorded)
                 'trickle_observation_ignored_reason':
                     'duplicate_or_delayed_old_interval_observation',
@@ -902,7 +984,7 @@ class BleRelayService {
     }
 
     final nextEligibleAt = determineSosNextEligibleAt(
-      nowMs: now,
+      nowMs: _clock.monotonicTimeMs(),
       decision: decision,
       incoming: message,
       existing: existing,
@@ -916,6 +998,7 @@ class BleRelayService {
         nextEligibleAt: nextEligibleAt,
         processedObservationId: observationId,
         failAfterStoreForTest: failSosTransactionForTest,
+        queueForRelay: topologyDecision.relay,
       );
     } catch (e) {
       await _runPostCommitEffect(
@@ -949,7 +1032,7 @@ class BleRelayService {
         throw StateError('Simulated SOS post-commit failure');
       }
     });
-    if (MeshConfig.forwardingMode == ForwardingMode.trickle) {
+    if (_relayQueue.mode == ForwardingMode.trickle) {
       await _runPostCommitEffect(
         'trickle_reset_log',
         () => _logTrickleReset(
@@ -1029,6 +1112,30 @@ class BleRelayService {
         detail: {'local_state': message.localState},
       ),
     );
+    if (!topologyDecision.relay) {
+      if (researchSession?.nodeRole?.toUpperCase() == 'DESTINATION') {
+        await _experimentLogger.logEvent(
+          eventType: ExperimentEventTypes.destinationFirstValidReceive,
+          deviceId: SyncService().deviceId,
+          messageId: message.id,
+          senderCrc: message.senderCrc,
+          hopIn: packet.hopCount,
+          rssi: rssi,
+          payloadHash: packet.identity,
+          eventTimestampMs: rxAtMs,
+          elapsedRealtimeMs: receivedElapsedRealtimeMs,
+          protocolTimestampMs: packet.timestampMs,
+          packetType: 'sos',
+          status: message.status.name,
+          messageKey: packet.messageKey.value,
+          stateIdentity: packet.stateIdentity.value,
+          observationId: observationId,
+          eventKey:
+              'DESTINATION_FIRST_VALID_RECEIVE|${packet.messageKey.value}',
+        );
+      }
+      return BleProcessingResult.accepted;
+    }
     await _runPostCommitEffect('workmanager_register_sync_task', () async {
       if (failWorkManagerPostCommitForTest) {
         throw StateError('Simulated WorkManager post-commit failure');
@@ -1141,7 +1248,7 @@ class BleRelayService {
     String? observationId,
     String? observerKey,
   }) async {
-    if (MeshConfig.forwardingMode != ForwardingMode.trickle) return;
+    if (_relayQueue.mode != ForwardingMode.trickle) return;
     final state = await _relayQueue.trickleStateFor(message.id);
     final detail = {
       'reset_reason': reason,
@@ -1262,7 +1369,7 @@ class BleRelayService {
 
   Future<void> _recoverQueues() async {
     final preRecoveryTrickleStateIds =
-        MeshConfig.forwardingMode == ForwardingMode.trickle
+        _relayQueue.mode == ForwardingMode.trickle
         ? (await _relayQueue.allTrickleStates())
               .map((state) => state.messageId)
               .toSet()
@@ -1283,7 +1390,7 @@ class BleRelayService {
         detail: {'queue_size': sosRecovered},
       );
     }
-    if (MeshConfig.forwardingMode == ForwardingMode.trickle) {
+    if (_relayQueue.mode == ForwardingMode.trickle) {
       final states = await _relayQueue.allTrickleStates();
       for (final state in states) {
         final persistedStateFound = preRecoveryTrickleStateIds.contains(

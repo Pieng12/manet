@@ -21,6 +21,7 @@ import io.flutter.FlutterInjector
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.embedding.engine.dart.DartExecutor
 import io.flutter.plugin.common.MethodChannel
+import io.flutter.plugin.common.MethodChannel.Result
 import io.flutter.plugins.GeneratedPluginRegistrant
 
 class MeshBackgroundService : Service() {
@@ -66,6 +67,7 @@ class MeshBackgroundService : Service() {
         const val TASK_REMOVED_RECOVERY_ACTION = "id.ac.usu.resqmesh.TASK_REMOVED_RECOVERY"
         const val SCHEDULER_TICK_ACTION = "id.ac.usu.resqmesh.SCHEDULER_TICK"
         const val NATIVE_INBOX_RECOVERY_ACTION = "id.ac.usu.resqmesh.NATIVE_INBOX_RECOVERY"
+        const val RESEARCH_COMMAND_ACTION = "id.ac.usu.resqmesh.RESEARCH_COMMAND_INTERNAL"
         private const val PREFS = "resqmesh_service_state"
         private const val KEY_RELAY_MODE_ENABLED = "relay_mode_enabled"
         private const val KEY_HAS_PENDING_RELAY_WORK = "has_pending_relay_work"
@@ -159,6 +161,11 @@ class MeshBackgroundService : Service() {
                 }
                 SCHEDULER_TICK_ACTION -> {
                     sendWakeUpToFlutter("schedulerTick", null, null, 0)
+                }
+                RESEARCH_COMMAND_ACTION -> {
+                    sendResearchCommandToFlutter(
+                        intent.getStringExtra("research_command_json") ?: "{}"
+                    )
                 }
             }
         }
@@ -350,6 +357,10 @@ class MeshBackgroundService : Service() {
                     "resumePendingNativeBleInbox" -> {
                         result.success(NativeBleInboxWorker.enqueueIfPendingAndPermitted(this))
                     }
+                    "clearNativeBleInbox" -> {
+                        NativeBleInbox.clear(this)
+                        result.success(true)
+                    }
                     "clearNativeBleInboxPermissionBlocked" -> {
                         if (NativeBlePermissions.hasRequiredRuntimePermissions(this)) {
                             NativeBleInbox.clearPermissionBlocked(this)
@@ -371,6 +382,11 @@ class MeshBackgroundService : Service() {
                     }
                     "getBleCapabilities" -> {
                         result.success(bleCapabilities())
+                    }
+                    "setResearchRxBurstGapMs" -> {
+                        val value = call.argument<Number>("rxBurstGapMs")?.toLong() ?: 0L
+                        NativeBleConfig.setRxBurstGapMs(this, value)
+                        result.success(true)
                     }
                     "getDeviceMetadata" -> {
                         result.success(deviceMetadata())
@@ -458,6 +474,40 @@ class MeshBackgroundService : Service() {
             receivedAt,
             receivedElapsedRealtimeMs
         )
+    }
+
+    private fun sendResearchCommandToFlutter(commandJson: String, retryCount: Int = 0) {
+        val maxRetries = 10
+        if (flutterEngine == null) startFlutterHeadlessEngine()
+        val engine = flutterEngine
+        if (engine == null || !engine.dartExecutor.isExecutingDart) {
+            if (retryCount < maxRetries) {
+                dutyCycleHandler.postDelayed({
+                    sendResearchCommandToFlutter(commandJson, retryCount + 1)
+                }, 500L)
+            }
+            return
+        }
+        MethodChannel(engine.dartExecutor.binaryMessenger, MainActivity.MESH_CHANNEL)
+            .invokeMethod("researchCommand", commandJson, object : Result {
+                override fun success(result: Any?) {
+                    Log.i("ResQMeshCommand", "RESQMESH_CMD_RESULT $result")
+                }
+
+                override fun error(code: String, message: String?, details: Any?) {
+                    Log.e(
+                        "ResQMeshCommand",
+                        "RESQMESH_CMD_RESULT {\"ok\":false,\"error\":\"$code:$message\"}"
+                    )
+                }
+
+                override fun notImplemented() {
+                    Log.e(
+                        "ResQMeshCommand",
+                        "RESQMESH_CMD_RESULT {\"ok\":false,\"error\":\"not_implemented\"}"
+                    )
+                }
+            })
     }
 
     private fun sendWakeUpToFlutter(

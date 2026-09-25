@@ -10,14 +10,11 @@ import android.content.Context
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
-import android.os.ParcelUuid
 import android.util.Log
 import androidx.annotation.RequiresApi
 
 object NativeBleAdvertiser {
     private const val TAG = "NativeBleAdvertiser"
-    private const val RESQ_MESH_SERVICE_UUID_STRING = NativeBleConfig.RESQ_MESH_SERVICE_UUID_STRING
-    private val RESQ_MESH_SERVICE_UUID = ParcelUuid.fromString(RESQ_MESH_SERVICE_UUID_STRING)
 
     private var advertiser: BluetoothLeAdvertiser? = null
     private var isAdvertising = false
@@ -42,12 +39,12 @@ object NativeBleAdvertiser {
         context: Context,
         payload: ByteArray?,
         debugVisible: Boolean = currentDebugVisible,
-        connectable: Boolean = currentConnectable,
+        connectable: Boolean = false,
         callback: ((Boolean, String, String?) -> Unit)? = null
     ): Boolean {
         val finalPayload = payload ?: currentPayload
         currentDebugVisible = debugVisible
-        currentConnectable = connectable
+        currentConnectable = false
 
         Log.d(
             TAG,
@@ -83,24 +80,15 @@ object NativeBleAdvertiser {
 
         val dataBuilder = AdvertiseData.Builder()
             .setIncludeDeviceName(false)
-            .setIncludeTxPowerLevel(debugVisible)
+            .setIncludeTxPowerLevel(false)
 
         dataBuilder.addManufacturerData(NativeBleConfig.MANUFACTURER_ID, finalPayload)
         currentPayload = finalPayload
 
-        val scanResponse = if (debugVisible) {
-            AdvertiseData.Builder()
-                .setIncludeDeviceName(false)
-                .addServiceUuid(RESQ_MESH_SERVICE_UUID)
-                .build()
-        } else {
-            null
-        }
-
         val settings = AdvertiseSettings.Builder()
             .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_BALANCED)
             .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_MEDIUM)
-            .setConnectable(connectable)
+            .setConnectable(false)
             .setTimeout(0)
             .build()
 
@@ -130,16 +118,7 @@ object NativeBleAdvertiser {
                 }, 2500L)
             }
 
-            if (scanResponse != null) {
-                advertiser?.startAdvertising(
-                    settings,
-                    dataBuilder.build(),
-                    scanResponse,
-                    advertiseCallback
-                )
-            } else {
-                advertiser?.startAdvertising(settings, dataBuilder.build(), advertiseCallback)
-            }
+            advertiser?.startAdvertising(settings, dataBuilder.build(), advertiseCallback)
             true
         } catch (e: Exception) {
             Log.e(TAG, "Fatal error starting advertiser: ${e.message}", e)

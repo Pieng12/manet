@@ -14,8 +14,6 @@ class BleWakeUpReceiver : BroadcastReceiver() {
 
     companion object {
         private const val TAG = "BleWakeUpReceiver"
-        const val DEDUPLICATION_WINDOW_MS = 5000L
-
         private val lastProcessedPayloads = mutableMapOf<String, Long>()
     }
 
@@ -26,6 +24,7 @@ class BleWakeUpReceiver : BroadcastReceiver() {
         if (results.isEmpty()) return
 
         for (scanResult in results) {
+            val deduplicationWindowMs = NativeBleConfig.rxBurstGapMs(context)
             val scanRecord = scanResult.scanRecord ?: continue
             val manufacturerData = scanRecord.manufacturerSpecificData
             val id = when {
@@ -44,23 +43,35 @@ class BleWakeUpReceiver : BroadcastReceiver() {
             val hex = data.joinToString("") { String.format("%02X", it) }
             val deviceAddress = safeDeviceAddress(scanResult)
             val cacheKey = dedupeCacheKey(data, deviceAddress, hex)
-            val currentTime = System.currentTimeMillis()
+            val observedElapsedRealtimeMs = scanResult.timestampNanos / 1_000_000L
+            val callbackElapsedRealtimeMs = SystemClock.elapsedRealtime()
+            val callbackWallTimeMs = System.currentTimeMillis()
+            val observedWallTimeMs = callbackWallTimeMs -
+                (callbackElapsedRealtimeMs - observedElapsedRealtimeMs).coerceAtLeast(0L)
+            val currentTime = observedElapsedRealtimeMs
             val lastProcessed = lastProcessedPayloads[cacheKey] ?: 0L
 
-            if (currentTime - lastProcessed <= DEDUPLICATION_WINDOW_MS) {
+            if (currentTime - lastProcessed <= deduplicationWindowMs) {
                 continue
             }
 
             lastProcessedPayloads[cacheKey] = currentTime
             if (lastProcessedPayloads.size > 50) {
                 lastProcessedPayloads.entries.removeIf {
-                    currentTime - it.value > DEDUPLICATION_WINDOW_MS
+                    currentTime - it.value > deduplicationWindowMs
                 }
             }
 
             val idLabel = if (id == -1) "raw" else "0x${String.format("%04X", id)}"
             Log.i(TAG, "ResQMesh BLE candidate. ID=$idLabel, RSSI=${scanResult.rssi}")
-            processPotentialPayload(context, data, deviceAddress, scanResult.rssi)
+            processPotentialPayload(
+                context,
+                data,
+                deviceAddress,
+                scanResult.rssi,
+                observedWallTimeMs,
+                observedElapsedRealtimeMs
+            )
         }
     }
 
@@ -104,7 +115,9 @@ class BleWakeUpReceiver : BroadcastReceiver() {
         context: Context,
         rawPayload: ByteArray,
         deviceAddress: String,
-        rssi: Int
+        rssi: Int,
+        receivedAt: Long,
+        receivedElapsedRealtimeMs: Long
     ) {
         var startIndex = -1
         for (i in 0 until rawPayload.size - 1) {
@@ -127,8 +140,6 @@ class BleWakeUpReceiver : BroadcastReceiver() {
             payload,
             android.util.Base64.NO_WRAP
         )
-        val receivedAt = System.currentTimeMillis()
-        val receivedElapsedRealtimeMs = SystemClock.elapsedRealtime()
         val storeResult = NativeBleInbox.store(
             context,
             payload,

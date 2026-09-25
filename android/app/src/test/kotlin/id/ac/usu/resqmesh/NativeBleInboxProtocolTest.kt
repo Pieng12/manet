@@ -161,6 +161,42 @@ class NativeBleInboxProtocolTest {
     }
 
     @Test
+    fun configuredBurstGapControlsObservationBoundary() {
+        val payload = hex("52 4D C6 A2 99 A9 E2 6F 7D 0E 45 FD 2A 83 1F 00 01")
+        val first = NativeBleInbox.storeForTest(
+            "[]",
+            payload,
+            "AA:AA",
+            -60,
+            1000L,
+            1000L,
+            rxBurstGapMs = 2000L
+        )
+        val inside = NativeBleInbox.storeForTest(
+            first.itemsJson,
+            payload,
+            "AA:AA",
+            -61,
+            1900L,
+            1900L,
+            rxBurstGapMs = 2000L
+        )
+        val next = NativeBleInbox.storeForTest(
+            inside.itemsJson,
+            payload,
+            "AA:AA",
+            -62,
+            2100L,
+            2100L,
+            rxBurstGapMs = 2000L
+        )
+
+        assertEquals(first.result.observationId, inside.result.observationId)
+        assertNotEquals(first.result.observationId, next.result.observationId)
+        assertEquals(2, JSONArray(next.itemsJson).length())
+    }
+
+    @Test
     fun unknownDeviceSamePayloadInsideBurstUsesStableFallbackObservation() {
         val payload = hex("52 4D C6 A2 99 A9 E2 6F 7D 0E 45 FD 2A 83 1F 00 01")
         val first = NativeBleInbox.storeForTest("[]", payload, "unknown", -60, 1000L, 1000L)

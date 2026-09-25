@@ -16,6 +16,8 @@ class ResearchSessionService {
   Future<Database> get _db async => _database ?? _databaseHelper.database;
 
   Future<ExperimentSession> startSession({
+    String? sessionId,
+    String? sessionCode,
     required String deviceId,
     required String name,
     required String nodeRole,
@@ -31,6 +33,20 @@ class ResearchSessionService {
     int? androidSdk,
     String? appVersionCode,
     String? buildId,
+    ForwardingMode? forwardingMode,
+    String? hypothesis,
+    int? observationWindowMs,
+    double? clockOffsetMs,
+    double? clockDriftPpm,
+    int? clockToleranceMs,
+    bool gatewayEnabled = false,
+    bool ackEnabled = false,
+    bool protocolActive = true,
+    int? expectedHopIn,
+    int? hopOut,
+    int? nodeLayer,
+    String? allowedAdvertisersJson,
+    int? rxBurstGapMs,
   }) async {
     final db = await _db;
     final now = DateTime.now().millisecondsSinceEpoch;
@@ -63,14 +79,16 @@ class ResearchSessionService {
         whereArgs: const ['RESEARCH'],
       );
       final session = ExperimentSession(
-        sessionId: const Uuid().v4(),
+        sessionId: sessionId?.trim().isNotEmpty == true
+            ? sessionId!.trim()
+            : const Uuid().v4(),
         deviceId: deviceId,
         deviceModel: deviceModel,
         androidVersion: androidVersion,
-        forwardingMode: MeshConfig.forwardingMode.logValue,
-        maxHop: MeshConfig.legacyHopMetadata,
-        messageLifetimeMs: MeshConfig.defaultMessageLifetime.inMilliseconds,
-        relayCooldownMs: MeshConfig.relayCooldown.inMilliseconds,
+        forwardingMode: (forwardingMode ?? MeshConfig.forwardingMode).logValue,
+        maxHop: MeshConfig.hopSaturation,
+        messageLifetimeMs: 0,
+        relayCooldownMs: 0,
         startedAt: now,
         name: name.trim().isEmpty ? _defaultSessionName(now) : name.trim(),
         nodeRole: nodeRole,
@@ -92,6 +110,30 @@ class ResearchSessionService {
         trickleK: MeshConfig.trickleRedundancyConstant,
         sosAdvertiseBurstMs:
             MeshConfig.sosAdvertiseBurstDuration.inMilliseconds,
+        sessionCode: sessionCode,
+        hypothesis: hypothesis,
+        observationWindowMs: observationWindowMs,
+        basicIntervalMs: MeshConfig.basicFloodingInterval.inMilliseconds,
+        jitterMinMs: MeshConfig.relayJitterMin.inMilliseconds,
+        jitterMaxMs: MeshConfig.relayJitterMax.inMilliseconds,
+        scanMode: 'LOW_LATENCY',
+        advertiseMode: 'BALANCED_LEGACY',
+        txPower: 'MEDIUM',
+        manufacturerId: MeshConfig.manufacturerId,
+        protocolEpochSeconds: MeshConfig.protocolEpochSeconds,
+        protocolEpochId: MeshConfig.protocolEpochId,
+        clockOffsetMs: clockOffsetMs,
+        clockDriftPpm: clockDriftPpm,
+        clockToleranceMs: clockToleranceMs,
+        gatewayEnabled: gatewayEnabled,
+        ackEnabled: ackEnabled,
+        protocolActive: protocolActive,
+        expectedHopIn: expectedHopIn,
+        hopOut: hopOut,
+        nodeLayer: nodeLayer,
+        allowedAdvertisersJson: allowedAdvertisersJson,
+        rxBurstGapMs:
+            rxBurstGapMs ?? MeshConfig.defaultRxBurstGap.inMilliseconds,
       );
       await txn.insert('experiment_sessions', session.toDbMap());
       return session;
@@ -139,6 +181,9 @@ class ResearchSessionService {
 
   Future<ExperimentTrial> startTrial({
     required String sessionId,
+    String? trialId,
+    String? trialCode,
+    String? commandId,
     String? trialCodePrefix,
     String? notes,
   }) async {
@@ -162,13 +207,18 @@ class ResearchSessionService {
           ? sessionId.substring(0, 8).toUpperCase()
           : trialCodePrefix.trim();
       final trial = ExperimentTrial(
-        trialId: const Uuid().v4(),
+        trialId: trialId?.trim().isNotEmpty == true
+            ? trialId!.trim()
+            : const Uuid().v4(),
         sessionId: sessionId,
         trialNumber: nextNumber,
-        trialCode: '$prefix-${nextNumber.toString().padLeft(3, '0')}',
+        trialCode: trialCode?.trim().isNotEmpty == true
+            ? trialCode!.trim()
+            : '$prefix-${nextNumber.toString().padLeft(3, '0')}',
         startedAt: DateTime.now().millisecondsSinceEpoch,
         status: 'RUNNING',
         notes: notes?.trim(),
+        commandId: commandId,
       );
       await txn.insert('experiment_trials', trial.toDbMap());
       return trial;
@@ -254,9 +304,9 @@ class ResearchSessionService {
           'experiment_trials',
           {
             'ended_at': now,
-            'status': 'COMPLETED',
-            'result': 'FAILED',
-            'failure_reason': 'TIMEOUT',
+            'status': 'WINDOW_ENDED',
+            'result': 'PENDING_EVALUATION',
+            'failure_reason': null,
           },
           where: 'trial_id = ? AND status = ?',
           whereArgs: [trial.trialId, 'RUNNING'],

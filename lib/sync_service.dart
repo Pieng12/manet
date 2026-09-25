@@ -10,6 +10,7 @@ import 'package:pkmproject/services/ble_advertiser_service.dart';
 import 'package:pkmproject/services/database_helper.dart';
 import 'package:pkmproject/services/experiment_logger.dart';
 import 'package:pkmproject/services/relay_queue_service.dart';
+import 'package:pkmproject/services/research_session_service.dart';
 import 'package:pkmproject/services/workmanager_service.dart';
 import 'package:pkmproject/utils/hash_utils.dart';
 import 'package:pkmproject/utils/sos_state_ordering.dart';
@@ -98,7 +99,7 @@ class SyncService {
   }
 
   Future<bool> checkGatewayAvailability() async {
-    if (!gatewayMode) return false;
+    if (!await _gatewayAllowedForCurrentSession()) return false;
     if (!await checkInternetConnection()) return false;
     final reachable = await ApiService.ping();
     if (reachable) {
@@ -118,7 +119,7 @@ class SyncService {
     }
     _isSyncInProgress = true;
     try {
-      if (offlineOnly) {
+      if (!await _gatewayAllowedForCurrentSession()) {
         print('[SyncService] Offline-only mode active. Server sync skipped.');
         await _bleAdvertiser.advertiseLatestOrStop();
         return;
@@ -260,6 +261,15 @@ class SyncService {
   }
 
   Future<void> _processAckData(GatewayAck ack) async {
+    final session = await ResearchSessionService().currentSession();
+    if (session != null && !session.ackEnabled) {
+      await _experimentLogger.logEvent(
+        eventType: ExperimentEventTypes.experimentConfigViolation,
+        deviceId: _deviceId,
+        detail: {'reason': 'ACK_DURING_MAIN_TRIAL'},
+      );
+      return;
+    }
     final result = await _relayQueue.acceptAndQueueAck(
       senderCrc: ack.senderCrc,
       ackTimestampMs: ack.ackTimestampMs,
@@ -269,6 +279,20 @@ class SyncService {
     if (result.shouldRelay) {
       await _bleAdvertiser.advertiseLatestOrStop(preemptCurrent: true);
     }
+  }
+
+  Future<bool> _gatewayAllowedForCurrentSession() async {
+    final session = await ResearchSessionService().currentSession();
+    if (session != null) {
+      if (session.gatewayEnabled) return true;
+      await _experimentLogger.logEvent(
+        eventType: ExperimentEventTypes.experimentConfigViolation,
+        deviceId: _deviceId,
+        detail: {'reason': 'GATEWAY_DURING_MAIN_TRIAL'},
+      );
+      return false;
+    }
+    return gatewayMode;
   }
 
   Future<void> _acceptAckForLocalMessage(
