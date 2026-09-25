@@ -24,6 +24,7 @@ class AndroidExperimentCommandService {
     ExperimentLogger? logger,
     ExperimentExportService? exporter,
     SosActivator? activateSos,
+    Duration resetQuietPeriod = MeshConfig.sosAdvertiseBurstDuration,
   }) : _database = database,
        _databaseHelper = databaseHelper ?? DatabaseHelper(),
        _sessions =
@@ -41,7 +42,8 @@ class AndroidExperimentCommandService {
              logger: logger,
              researchSessionService: sessions,
            ),
-       _activateSos = activateSos ?? BleRelayService().activateForMessage;
+       _activateSos = activateSos ?? BleRelayService().activateForMessage,
+       _resetQuietPeriod = resetQuietPeriod;
 
   final Database? _database;
   final DatabaseHelper _databaseHelper;
@@ -49,6 +51,7 @@ class AndroidExperimentCommandService {
   final ExperimentLogger _logger;
   final ExperimentExportService _exporter;
   final SosActivator _activateSos;
+  final Duration _resetQuietPeriod;
 
   Future<Database> get _db async => _database ?? _databaseHelper.database;
 
@@ -398,10 +401,9 @@ class AndroidExperimentCommandService {
       eventType: ExperimentEventTypes.trialReset,
       deviceId: SyncService().deviceId,
       eventKey: 'TRIAL_RESET|$trialId',
-      detail: {
-        'quiet_period_ms': MeshConfig.sosAdvertiseBurstDuration.inMilliseconds,
-      },
+      detail: {'quiet_period_ms': _resetQuietPeriod.inMilliseconds},
     );
+    await Future<void>.delayed(_resetQuietPeriod);
     return {
       'trial_id': trialId,
       'state_cleared': true,

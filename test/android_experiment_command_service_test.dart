@@ -55,6 +55,7 @@ void main() {
         activated++;
         await db.insert('sos_messages', message.toDbMap());
       },
+      resetQuietPeriod: Duration.zero,
     );
   });
 
