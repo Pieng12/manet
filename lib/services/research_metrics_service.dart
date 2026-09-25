@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:pkmproject/config/mesh_config.dart';
 import 'package:pkmproject/models/experiment_event.dart';
 import 'package:pkmproject/models/experiment_metrics.dart';
+import 'package:pkmproject/models/experiment_session.dart';
 import 'package:pkmproject/models/experiment_trial.dart';
 import 'package:pkmproject/services/experiment_logger.dart';
 import 'package:pkmproject/services/research_session_service.dart';
@@ -23,9 +24,12 @@ class ResearchMetricsService {
     String? trialId,
   }) async {
     final events = await _logger.events(sessionId: sessionId, trialId: trialId);
+    final sessionTrials = await _researchSessionService.trialsForSession(
+      sessionId,
+    );
     final trials = trialId == null
-        ? await _researchSessionService.trialsForSession(sessionId)
-        : <ExperimentTrial>[];
+        ? sessionTrials
+        : sessionTrials.where((trial) => trial.trialId == trialId).toList();
     return calculate(events: events, trials: trials);
   }
 
@@ -34,7 +38,12 @@ class ResearchMetricsService {
     required List<ExperimentTrial> trials,
   }) {
     final validCompletedTrials = trials
-        .where((trial) => trial.result == 'SUCCESS' || trial.result == 'FAILED')
+        .where(
+          (trial) =>
+              trial.result == 'SUCCESS' ||
+              trial.result == 'FAILED_DELIVERY' ||
+              trial.result == 'FAILED',
+        )
         .length;
     final successfulTrials = trials
         .where((trial) => trial.result == 'SUCCESS')
@@ -88,9 +97,16 @@ class ResearchMetricsService {
     final txAttempts = _count(events, {
       ExperimentEventTypes.bleAdvertiseRequested,
     }, packetType: 'sos');
-    final txSuccess = _count(events, {
-      ExperimentEventTypes.bleAdvertiseStarted,
-    }, packetType: 'sos');
+    final canonicalBurstEvents = events.where(
+      (event) =>
+          event.eventType == ExperimentEventTypes.advertiseBurstStarted &&
+          _isPacketType(event, 'sos'),
+    );
+    final txSuccess = canonicalBurstEvents.isNotEmpty
+        ? canonicalBurstEvents.length
+        : _count(events, {
+            ExperimentEventTypes.bleAdvertiseStarted,
+          }, packetType: 'sos');
     final relaySlots = _count(events, {
       ExperimentEventTypes.bleRelayStarted,
     }, packetType: 'sos');
@@ -122,7 +138,16 @@ class ResearchMetricsService {
         .map((event) => event.hopOut!)
         .toList();
     final localRelayLatencies = initialRelayLatencySamples(events);
-    final e2eLatencies = endToEndLatencySamples(events);
+    final successfulTrialIds = trials
+        .where((trial) => trial.result == 'SUCCESS')
+        .map((trial) => trial.trialId)
+        .toSet();
+    final e2eEvents = trials.isEmpty
+        ? events
+        : events
+              .where((event) => successfulTrialIds.contains(event.trialId))
+              .toList();
+    final e2eLatencies = endToEndLatencySamples(e2eEvents);
     final ackTerminationLatencies = localLatencySamples(
       events,
       startType: ExperimentEventTypes.ackReceived,
@@ -153,9 +178,9 @@ class ResearchMetricsService {
       txAttemptCount: txAttempts,
       txSuccessCount: txSuccess,
       relaySlotCount: relaySlots,
-      transmissionOverhead: successfulTrials == 0
+      transmissionOverhead: validCompletedTrials == 0
           ? null
-          : txSuccess / successfulTrials,
+          : txSuccess / validCompletedTrials,
       rssiStats: NumericStats.fromSamples(rssiSamples),
       hopInStats: NumericStats.fromSamples(hopInSamples),
       hopOutStats: NumericStats.fromSamples(hopOutSamples),
@@ -167,7 +192,44 @@ class ResearchMetricsService {
       latestHopValidation: latestHopValidation,
       currentPacket: currentPacketSnapshot(events),
       e2eRequiresPeerLog: e2eLatencies.isEmpty,
+      requiresMergedPeerLogs: true,
     );
+  }
+
+  Map<String, ExperimentMetrics> calculateGrouped({
+    required List<ExperimentSession> sessions,
+    required List<ExperimentEvent> events,
+    required List<ExperimentTrial> trials,
+  }) {
+    final sessionById = {
+      for (final session in sessions) session.sessionId: session,
+    };
+    final eventsByGroup = <String, List<ExperimentEvent>>{};
+    final trialsByGroup = <String, List<ExperimentTrial>>{};
+    for (final event in events) {
+      final session = sessionById[event.sessionId];
+      if (session == null) continue;
+      eventsByGroup.putIfAbsent(_groupKey(session), () => []).add(event);
+    }
+    for (final trial in trials) {
+      final session = sessionById[trial.sessionId];
+      if (session == null) continue;
+      trialsByGroup.putIfAbsent(_groupKey(session), () => []).add(trial);
+    }
+    final keys = {...eventsByGroup.keys, ...trialsByGroup.keys};
+    return {
+      for (final key in keys)
+        key: calculate(
+          events: eventsByGroup[key] ?? const [],
+          trials: trialsByGroup[key] ?? const [],
+        ),
+    };
+  }
+
+  String _groupKey(ExperimentSession session) {
+    final hypothesis =
+        session.hypothesis ?? session.scenarioLabel ?? 'UNSPECIFIED';
+    return '${session.forwardingMode}|${hypothesis.toUpperCase()}';
   }
 
   List<int> localLatencySamples(
@@ -219,9 +281,13 @@ class ResearchMetricsService {
     for (final event in events) {
       final key = logicalPacketKey(event);
       if (key == null) continue;
-      if (event.eventType == 'SOURCE_FIRST_ADVERTISE') {
+      if (event.eventType == ExperimentEventTypes.sourceFirstAdvertiseStarted ||
+          event.eventType == 'SOURCE_FIRST_ADVERTISE') {
         sourceStarts[key] = _wallTime(event);
-      } else if (event.eventType == 'DESTINATION_FIRST_RECEIVE') {
+      } else if (event.eventType ==
+              ExperimentEventTypes.destinationFirstValidReceive ||
+          event.eventType == 'DESTINATION_FIRST_RECEIVE') {
+        if (_detail(event)['clock_sync_valid'] != true) continue;
         final start = sourceStarts[key];
         if (start == null) continue;
         final end = _wallTime(event);
@@ -331,15 +397,13 @@ class ResearchMetricsService {
   }
 
   String? logicalPacketKey(ExperimentEvent event) {
-    final packetType = event.packetType;
-    final status = event.status;
+    if (event.messageKey != null && event.messageKey!.isNotEmpty) {
+      return event.messageKey;
+    }
     final protocolTimestamp = event.protocolTimestampMs;
     final senderCrc = event.senderCrc;
-    if (packetType != null &&
-        status != null &&
-        protocolTimestamp != null &&
-        senderCrc != null) {
-      return '$packetType|$senderCrc|$protocolTimestamp|$status';
+    if (protocolTimestamp != null && senderCrc != null) {
+      return '$senderCrc|$protocolTimestamp';
     }
     return event.payloadHash ?? event.messageId;
   }

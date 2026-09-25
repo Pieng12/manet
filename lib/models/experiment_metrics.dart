@@ -1,9 +1,15 @@
+import 'dart:math';
+
 class NumericStats {
   final int count;
   final num? min;
   final num? max;
   final double? mean;
   final double? median;
+  final double? sampleStandardDeviation;
+  final double? q1;
+  final double? q3;
+  final double? iqr;
 
   const NumericStats({
     required this.count,
@@ -11,6 +17,10 @@ class NumericStats {
     this.max,
     this.mean,
     this.median,
+    this.sampleStandardDeviation,
+    this.q1,
+    this.q3,
+    this.iqr,
   });
 
   static NumericStats fromSamples(List<num> samples) {
@@ -21,13 +31,39 @@ class NumericStats {
     final median = sorted.length.isOdd
         ? sorted[middle].toDouble()
         : ((sorted[middle - 1] + sorted[middle]) / 2).toDouble();
+    final mean = sum / sorted.length;
+    final sampleVariance = sorted.length < 2
+        ? null
+        : sorted.fold<double>(
+                0,
+                (total, value) => total + pow(value - mean, 2).toDouble(),
+              ) /
+              (sorted.length - 1);
+    final lower = sorted.sublist(0, sorted.length ~/ 2);
+    final upper = sorted.sublist((sorted.length + 1) ~/ 2);
+    final q1 = _median(lower);
+    final q3 = _median(upper);
     return NumericStats(
       count: sorted.length,
       min: sorted.first,
       max: sorted.last,
-      mean: sum / sorted.length,
+      mean: mean,
       median: median,
+      sampleStandardDeviation: sampleVariance == null
+          ? null
+          : sqrt(sampleVariance),
+      q1: q1,
+      q3: q3,
+      iqr: q1 == null || q3 == null ? null : q3 - q1,
     );
+  }
+
+  static double? _median(List<num> sorted) {
+    if (sorted.isEmpty) return null;
+    final middle = sorted.length ~/ 2;
+    return sorted.length.isOdd
+        ? sorted[middle].toDouble()
+        : ((sorted[middle - 1] + sorted[middle]) / 2).toDouble();
   }
 }
 
@@ -105,6 +141,7 @@ class ExperimentMetrics {
   final HopValidation? latestHopValidation;
   final CurrentPacketSnapshot? currentPacket;
   final bool e2eRequiresPeerLog;
+  final bool requiresMergedPeerLogs;
 
   const ExperimentMetrics({
     required this.successfulTrials,
@@ -134,6 +171,7 @@ class ExperimentMetrics {
     required this.latestHopValidation,
     required this.currentPacket,
     required this.e2eRequiresPeerLog,
+    required this.requiresMergedPeerLogs,
   });
 
   NumericStats get hopStats => hopInStats;

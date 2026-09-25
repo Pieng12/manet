@@ -2,7 +2,9 @@ import 'dart:convert';
 
 import 'package:pkmproject/config/mesh_config.dart';
 import 'package:pkmproject/models/experiment_event.dart';
+import 'package:pkmproject/models/message_identity.dart';
 import 'package:pkmproject/models/experiment_session.dart';
+import 'package:pkmproject/models/sos_message.dart';
 import 'package:pkmproject/services/database_helper.dart';
 import 'package:pkmproject/services/research_session_service.dart';
 import 'package:sqflite/sqflite.dart';
@@ -87,6 +89,17 @@ class ExperimentEventTypes {
   static const trickleTxSuppressed = 'TRICKLE_TX_SUPPRESSED';
   static const trickleIntervalDoubled = 'TRICKLE_INTERVAL_DOUBLED';
   static const trickleStateRecovered = 'TRICKLE_STATE_RECOVERED';
+  static const sourceFirstAdvertiseStarted = 'SOURCE_FIRST_ADVERTISE_STARTED';
+  static const destinationFirstValidReceive = 'DESTINATION_FIRST_VALID_RECEIVE';
+  static const topologyIgnored = 'TOPOLOGY_IGNORED';
+  static const trialWindowStarted = 'TRIAL_WINDOW_STARTED';
+  static const trialWindowEnded = 'TRIAL_WINDOW_ENDED';
+  static const trialReset = 'TRIAL_RESET';
+  static const advertiseBurstRequested = 'ADVERTISE_BURST_REQUESTED';
+  static const advertiseBurstStarted = 'ADVERTISE_BURST_STARTED';
+  static const advertiseBurstEnded = 'ADVERTISE_BURST_ENDED';
+  static const advertiseBurstFailed = 'ADVERTISE_BURST_FAILED';
+  static const experimentConfigViolation = 'EXPERIMENT_CONFIG_VIOLATION';
 }
 
 class ExperimentLogger {
@@ -139,9 +152,9 @@ class ExperimentLogger {
       deviceModel: deviceModel,
       androidVersion: androidVersion,
       forwardingMode: MeshConfig.forwardingMode.logValue,
-      maxHop: MeshConfig.legacyHopMetadata,
-      messageLifetimeMs: MeshConfig.defaultMessageLifetime.inMilliseconds,
-      relayCooldownMs: MeshConfig.relayCooldown.inMilliseconds,
+      maxHop: MeshConfig.hopSaturation,
+      messageLifetimeMs: 0,
+      relayCooldownMs: 0,
       startedAt: now,
       name: 'AUTO-${now.toString()}',
       nodeRole: 'UNKNOWN',
@@ -157,6 +170,14 @@ class ExperimentLogger {
       trickleImaxDoublings: MeshConfig.trickleImaxDoublings,
       trickleK: MeshConfig.trickleRedundancyConstant,
       sosAdvertiseBurstMs: MeshConfig.sosAdvertiseBurstDuration.inMilliseconds,
+      basicIntervalMs: MeshConfig.basicFloodingInterval.inMilliseconds,
+      jitterMinMs: MeshConfig.relayJitterMin.inMilliseconds,
+      jitterMaxMs: MeshConfig.relayJitterMax.inMilliseconds,
+      manufacturerId: MeshConfig.manufacturerId,
+      protocolEpochSeconds: MeshConfig.protocolEpochSeconds,
+      protocolEpochId: MeshConfig.protocolEpochId,
+      gatewayEnabled: MeshConfig.resqMeshMode == ResqMeshMode.gateway,
+      ackEnabled: MeshConfig.resqMeshMode == ResqMeshMode.gateway,
     );
     await db.insert('experiment_sessions', session.toDbMap());
     return session;
@@ -204,12 +225,46 @@ class ExperimentLogger {
     String? status,
     Map<String, dynamic>? detail,
     String? eventKey,
+    String? messageKey,
+    String? stateIdentity,
+    String? observationId,
+    String? burstId,
   }) async {
     final session = await ensureSession(deviceId: deviceId);
     final trial = await ResearchSessionService(
       database: await _db,
     ).currentTrial(sessionId: session.sessionId);
     final timestamp = eventTimestampMs ?? DateTime.now().millisecondsSinceEpoch;
+    final effectiveMessageKey =
+        messageKey ??
+        (senderCrc != null && protocolTimestampMs != null
+            ? MessageKey(
+                senderCrc: senderCrc,
+                protocolTimestampMs: protocolTimestampMs,
+              ).value
+            : null);
+    final statusIndex = switch (status?.toLowerCase()) {
+      'cancelled' => SOSMessageStatus.cancelled.index,
+      'active' => SOSMessageStatus.active.index,
+      'resolved' => SOSMessageStatus.resolved.index,
+      _ => null,
+    };
+    final effectiveStateIdentity =
+        stateIdentity ??
+        (effectiveMessageKey != null &&
+                statusIndex != null &&
+                senderCrc != null &&
+                protocolTimestampMs != null
+            ? StateIdentity(
+                messageKey: MessageKey(
+                  senderCrc: senderCrc,
+                  protocolTimestampMs: protocolTimestampMs,
+                ),
+                statusIndex: statusIndex,
+                isAck: packetType == 'ack',
+                fromServer: detail?['from_server'] == true,
+              ).value
+            : null);
     final event = ExperimentEvent(
       sessionId: session.sessionId,
       trialId: trial?.trialId,
@@ -231,6 +286,10 @@ class ExperimentLogger {
       payloadHash: payloadHash,
       eventKey: eventKey,
       detailJson: detail == null ? null : jsonEncode(detail),
+      messageKey: effectiveMessageKey,
+      stateIdentity: effectiveStateIdentity,
+      observationId: observationId,
+      burstId: burstId,
     );
     final db = await _db;
     await db.insert(

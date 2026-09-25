@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:pkmproject/config/mesh_config.dart';
 import 'package:pkmproject/models/experiment_event.dart';
 import 'package:pkmproject/models/experiment_metrics.dart';
+import 'package:pkmproject/models/experiment_session.dart';
 import 'package:pkmproject/models/experiment_trial.dart';
 import 'package:pkmproject/services/experiment_logger.dart';
 import 'package:pkmproject/services/research_metrics_service.dart';
@@ -71,7 +72,14 @@ void main() {
     expect(odd.max, 9);
     expect(odd.mean, closeTo(5, 0.001));
     expect(odd.median, 5);
+    expect(odd.sampleStandardDeviation, 4);
+    expect(odd.q1, 1);
+    expect(odd.q3, 9);
+    expect(odd.iqr, 8);
     expect(even.median, 6);
+    expect(even.q1, 3);
+    expect(even.q3, 9);
+    expect(even.iqr, 6);
     expect(empty.count, 0);
     expect(empty.mean, isNull);
   });
@@ -89,6 +97,66 @@ void main() {
     expect(metrics.successfulTrials, 29);
     expect(metrics.validCompletedTrials, 30);
     expect(metrics.dsrPercent, closeTo(96.67, 0.01));
+  });
+
+  test('aggregates stay separated by forwarding mode and hypothesis', () {
+    ExperimentSession session(String id, String mode, String hypothesis) =>
+        ExperimentSession(
+          sessionId: id,
+          deviceId: 'node',
+          deviceModel: 'test',
+          androidVersion: 'test',
+          forwardingMode: mode,
+          maxHop: 63,
+          messageLifetimeMs: 0,
+          relayCooldownMs: 0,
+          startedAt: 1,
+          hypothesis: hypothesis,
+        );
+    final sessions = [
+      session('trickle-h1', 'trickle', 'H1'),
+      session('basic-h1', 'basic_flooding', 'H1'),
+      session('trickle-h2', 'trickle', 'H2'),
+    ];
+    final trials = [
+      ExperimentTrial(
+        trialId: 't1',
+        sessionId: 'trickle-h1',
+        trialNumber: 1,
+        trialCode: 'T1',
+        startedAt: 1,
+        status: 'COMPLETED',
+        result: 'SUCCESS',
+      ),
+      ExperimentTrial(
+        trialId: 't2',
+        sessionId: 'basic-h1',
+        trialNumber: 1,
+        trialCode: 'T2',
+        startedAt: 1,
+        status: 'COMPLETED',
+        result: 'FAILED_DELIVERY',
+      ),
+      ExperimentTrial(
+        trialId: 't3',
+        sessionId: 'trickle-h2',
+        trialNumber: 1,
+        trialCode: 'T3',
+        startedAt: 1,
+        status: 'COMPLETED',
+        result: 'SUCCESS',
+      ),
+    ];
+
+    final grouped = service.calculateGrouped(
+      sessions: sessions,
+      events: const [],
+      trials: trials,
+    );
+
+    expect(grouped.keys, {'trickle|H1', 'basic_flooding|H1', 'trickle|H2'});
+    expect(grouped['trickle|H1']!.dsrPercent, 100);
+    expect(grouped['basic_flooding|H1']!.dsrPercent, 0);
   });
 
   test('duplicate ratio excludes stale events from duplicate numerator', () {
@@ -268,7 +336,12 @@ void main() {
       ]);
       final available = service.endToEndLatencySamples([
         event('SOURCE_FIRST_ADVERTISE', 1000, payloadHash: 'p'),
-        event('DESTINATION_FIRST_RECEIVE', 3420, payloadHash: 'p'),
+        event(
+          'DESTINATION_FIRST_RECEIVE',
+          3420,
+          payloadHash: 'p',
+          detail: {'clock_sync_valid': true},
+        ),
       ]);
 
       expect(none, isEmpty);
@@ -498,6 +571,7 @@ void main() {
         3420,
         payloadHash: 'e2e',
         elapsedRealtimeMs: 100,
+        detail: {'clock_sync_valid': true},
       ),
     ]);
 
@@ -1189,7 +1263,7 @@ void main() {
     expect(metrics.txSuccessCount, 0);
   });
 
-  test('local TX per successful trial only uses SOS successful TX', () {
+  test('overhead divides SOS burst starts by all valid trial outcomes', () {
     final metrics = service.calculate(
       events: [
         for (var i = 0; i < 4; i++)
@@ -1208,10 +1282,12 @@ void main() {
       trials: [
         trial(1, result: 'SUCCESS'),
         trial(2, result: 'SUCCESS'),
+        trial(3, result: 'FAILED_DELIVERY'),
+        trial(4, status: 'INVALID', result: 'INVALID'),
       ],
     );
 
     expect(metrics.txSuccessCount, 4);
-    expect(metrics.transmissionOverhead, 2);
+    expect(metrics.transmissionOverhead, closeTo(4 / 3, 0.0001));
   });
 }

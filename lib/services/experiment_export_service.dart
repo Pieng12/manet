@@ -64,7 +64,7 @@ class ExperimentExportService {
     final file = File('${dir.path}/resqmesh_$suffix.csv');
     final buffer = StringBuffer()
       ..writeln(
-        'session_id,session_kind,session_name,trial_id,trial_number,trial_status,trial_result,failure_reason,device_id,device_manufacturer,device_model,android_version,android_sdk,app_version,app_version_code,build_id,node_role,forwarding_mode,trickle_imin_ms,trickle_imax_ms,trickle_imax_doublings,trickle_k,sos_advertise_burst_ms,target_hop,topology_label,scenario_label,event_timestamp_ms,event_timestamp_iso,elapsed_realtime_ms,protocol_timestamp_ms,event_type,message_id,sender_crc,packet_type,status,hop_in,hop_out,rssi,payload_hash,relay_count,duplicate_count,queue_size,sos_queue_size,ack_queue_size,detail',
+        'session_id,session_kind,session_name,session_code,trial_id,trial_code,trial_number,trial_status,trial_result,failure_reason,node_id,node_role,forwarding_mode,target_hop,topology_label,hypothesis,message_key,state_identity,observation_id,burst_id,event_timestamp_ms,event_timestamp_iso,elapsed_realtime_ms,protocol_timestamp_ms,event_type,message_id,sender_crc,packet_type,status,hop_in,hop_out,rssi,payload_hash,trickle_imin_ms,trickle_imax_ms,trickle_k,basic_interval_ms,jitter_min_ms,jitter_max_ms,burst_duration_ms,scan_mode,advertise_mode,tx_power,manufacturer_id,protocol_epoch_seconds,protocol_epoch_id,clock_offset_ms,clock_drift_ppm,clock_tolerance_ms,gateway_enabled,ack_enabled,protocol_active,expected_hop_in,configured_hop_out,node_layer,allowed_advertisers,rx_burst_gap_ms,observation_window_ms,trial_command_id,detail',
       );
     for (final event in events) {
       final trial = trialsById[event.trialId];
@@ -73,29 +73,23 @@ class ExperimentExportService {
           event.sessionId,
           session?.sessionKind,
           session?.name,
+          session?.sessionCode,
           event.trialId,
+          trial?.trialCode,
           trial?.trialNumber,
           trial?.status,
           trial?.result,
           trial?.failureReason,
           session?.deviceId,
-          session?.deviceManufacturer,
-          session?.deviceModel,
-          session?.androidVersion,
-          session?.androidSdk,
-          session?.appVersion,
-          session?.appVersionCode,
-          session?.buildId,
           event.nodeRole ?? session?.nodeRole,
           event.forwardingMode ?? session?.forwardingMode,
-          session?.trickleIminMs,
-          session?.trickleImaxMs,
-          session?.trickleImaxDoublings,
-          session?.trickleK,
-          session?.sosAdvertiseBurstMs,
           session?.targetHop,
           session?.topologyLabel,
-          session?.scenarioLabel,
+          session?.hypothesis ?? session?.scenarioLabel,
+          event.messageKey,
+          event.stateIdentity,
+          event.observationId,
+          event.burstId,
           event.eventTimestampMs ?? event.timestampMs,
           DateTime.fromMillisecondsSinceEpoch(
             event.eventTimestampMs ?? event.timestampMs,
@@ -111,11 +105,32 @@ class ExperimentExportService {
           event.hopOut,
           event.rssi,
           event.payloadHash,
-          _detailValue(event.detailJson, 'relay_count'),
-          _detailValue(event.detailJson, 'duplicate_count'),
-          _detailValue(event.detailJson, 'queue_size'),
-          _detailValue(event.detailJson, 'sos_queue_size'),
-          _detailValue(event.detailJson, 'ack_queue_size'),
+          session?.trickleIminMs,
+          session?.trickleImaxMs,
+          session?.trickleK,
+          session?.basicIntervalMs,
+          session?.jitterMinMs,
+          session?.jitterMaxMs,
+          session?.sosAdvertiseBurstMs,
+          session?.scanMode,
+          session?.advertiseMode,
+          session?.txPower,
+          session?.manufacturerId,
+          session?.protocolEpochSeconds,
+          session?.protocolEpochId,
+          session?.clockOffsetMs,
+          session?.clockDriftPpm,
+          session?.clockToleranceMs,
+          session?.gatewayEnabled,
+          session?.ackEnabled,
+          session?.protocolActive,
+          session?.expectedHopIn,
+          session?.hopOut,
+          session?.nodeLayer,
+          session?.allowedAdvertisersJson,
+          session?.rxBurstGapMs,
+          session?.observationWindowMs,
+          trial?.commandId,
           event.detailJson,
         ].map(_csvCell).join(','),
       );
@@ -163,6 +178,29 @@ class ExperimentExportService {
       'trickle_k': session.trickleK,
       'sos_advertise_burst_ms': session.sosAdvertiseBurstMs,
       'trial_timeout_seconds': session.trialTimeoutSeconds,
+      'session_code': session.sessionCode,
+      'hypothesis': session.hypothesis,
+      'observation_window_ms': session.observationWindowMs,
+      'basic_interval_ms': session.basicIntervalMs,
+      'jitter_min_ms': session.jitterMinMs,
+      'jitter_max_ms': session.jitterMaxMs,
+      'scan_mode': session.scanMode,
+      'advertise_mode': session.advertiseMode,
+      'tx_power': session.txPower,
+      'manufacturer_id': session.manufacturerId,
+      'protocol_epoch_seconds': session.protocolEpochSeconds,
+      'protocol_epoch_id': session.protocolEpochId,
+      'clock_offset_ms': session.clockOffsetMs,
+      'clock_drift_ppm': session.clockDriftPpm,
+      'clock_tolerance_ms': session.clockToleranceMs,
+      'gateway_enabled': session.gatewayEnabled,
+      'ack_enabled': session.ackEnabled,
+      'protocol_active': session.protocolActive,
+      'expected_hop_in': session.expectedHopIn,
+      'hop_out': session.hopOut,
+      'node_layer': session.nodeLayer,
+      'allowed_advertisers_json': session.allowedAdvertisersJson,
+      'rx_burst_gap_ms': session.rxBurstGapMs,
     };
   }
 
@@ -178,6 +216,9 @@ class ExperimentExportService {
       'result': trial.result,
       'failure_reason': trial.failureReason,
       'notes': trial.notes,
+      'observation_ended_at': trial.observationEndedAt,
+      'finalized_at': trial.finalizedAt,
+      'command_id': trial.commandId,
     };
   }
 
@@ -203,6 +244,10 @@ class ExperimentExportService {
       'rssi': event.rssi,
       'payload_hash': event.payloadHash,
       'detail_json': event.detailJson,
+      'message_key': event.messageKey,
+      'state_identity': event.stateIdentity,
+      'observation_id': event.observationId,
+      'burst_id': event.burstId,
     };
   }
 
@@ -211,15 +256,5 @@ class ExperimentExportService {
     final raw = value.toString();
     final escaped = raw.replaceAll('"', '""');
     return '"$escaped"';
-  }
-
-  Object? _detailValue(String? detailJson, String key) {
-    if (detailJson == null || detailJson.isEmpty) return null;
-    try {
-      final decoded = jsonDecode(detailJson);
-      return decoded is Map<String, dynamic> ? decoded[key] : null;
-    } catch (_) {
-      return null;
-    }
   }
 }

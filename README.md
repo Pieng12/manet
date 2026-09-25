@@ -157,10 +157,11 @@ Respons ACK server:
 }
 ```
 
-ACK valid disimpan sebagai tombstone persisten terbaru per `sender_crc` dan
+ACK valid disimpan sebagai tombstone persisten per logical message key
+`sender_crc + protocol_timestamp` dan
 disebarkan kembali lewat BLE sebagai persistent anti-message. ACK tidak memakai
 hard hop limit atau TTL 2 menit, tetap diprioritaskan di queue, dikompaksi agar
-hanya ACK terbaru per sender yang aktif, dan menghentikan SOS saat
+ACK duplikat untuk key yang sama tidak menambah queue, dan ACK menghentikan SOS saat
 `ack_timestamp >= sos_timestamp`. Saat startup, tombstone dipakai untuk
 membangun ulang ACK queue yang hilang. ACK dengan status selain `CANCELLED` atau
 `RESOLVED` ditolak.

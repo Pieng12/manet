@@ -319,7 +319,8 @@ Skema saat ini mencakup:
 - `sos_messages`: pesan lokal/relay, status sync, hop, metadata legacy, sender
   CRC, dan relay metadata.
 - `relay_queue`: queue persisten untuk packet SOS dan ACK.
-- `ack_tombstones`: ACK terbaru per sender untuk menahan relay SOS lama.
+- `ack_tombstones`: ACK per `sender_crc + protocol_timestamp` untuk menahan
+  hanya logical SOS yang sesuai; ACK lama tidak menekan SOS baru.
 - `processed_packets`: dedup packet SOS/ACK.
 - `gateway_acks`: ACK dari gateway dan metadata relay.
 - `experiment_sessions`: konfigurasi dan waktu session eksperimen.
