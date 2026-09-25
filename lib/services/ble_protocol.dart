@@ -2,6 +2,7 @@ import 'dart:typed_data';
 
 import 'package:pkmproject/config/mesh_config.dart';
 import 'package:pkmproject/models/sos_message.dart';
+import 'package:pkmproject/models/message_identity.dart';
 import 'package:pkmproject/utils/hash_utils.dart';
 import 'package:pkmproject/utils/protocol_timestamp.dart';
 
@@ -38,6 +39,16 @@ class BlePacket {
 
   String get identity => packetIdentity(this);
 
+  MessageKey get messageKey =>
+      MessageKey(senderCrc: senderCrc, protocolTimestampMs: timestampMs);
+
+  StateIdentity get stateIdentity => StateIdentity(
+    messageKey: messageKey,
+    statusIndex: status.index,
+    isAck: isAck,
+    fromServer: fromServer,
+  );
+
   static String packetIdentity(BlePacket packet) {
     final type = packet.isAck ? 'ACK' : 'SOS';
     return '$type:${packet.senderCrc}:${canonicalProtocolTimestamp(packet.timestampMs)}:${packet.status.index}';
@@ -51,9 +62,9 @@ class BlePacket {
     _writeHeader(buffer);
     final senderCrc = message.senderCrc ?? crc32(message.senderId);
     buffer.setUint32(2, senderCrc & 0xFFFFFFFF, Endian.big);
-    _writeTimestamp(buffer, canonicalProtocolTimestamp(message.updatedAt));
-    _writeCoordinate(buffer, 9, message.latitude, -90.0, 10000.0);
-    _writeCoordinate(buffer, 12, message.longitude, -180.0, 10000.0);
+    _writeTimestamp(buffer, message.protocolTimestampMs);
+    _writeSignedCoordinate(buffer, 9, message.latitude, 10000.0);
+    _writeSignedCoordinate(buffer, 12, message.longitude, 10000.0);
     buffer.setUint8(15, message.status.index);
     buffer.setUint8(
       16,
@@ -127,8 +138,8 @@ class BlePacket {
       );
     }
 
-    final latitude = _readCoordinate(buffer, 9, -90.0, 10000.0);
-    final longitude = _readCoordinate(buffer, 12, -180.0, 10000.0);
+    final latitude = _readSignedCoordinate(buffer, 9, 10000.0);
+    final longitude = _readSignedCoordinate(buffer, 12, 10000.0);
     if (!_isCoordinateInRange(latitude, -90.0, 90.0) ||
         !_isCoordinateInRange(longitude, -180.0, 180.0)) {
       return null;
@@ -181,8 +192,17 @@ class BlePacket {
   }
 
   static void _writeTimestamp(ByteData buffer, int timestampMs) {
-    final secondsSinceBase = (timestampMs ~/ 1000) - SOSMessage.kBaseTimestamp;
-    final compact = secondsSinceBase % timestampModulo;
+    final secondsSinceBase =
+        (canonicalProtocolTimestamp(timestampMs) ~/ 1000) -
+        MeshConfig.protocolEpochSeconds;
+    if (secondsSinceBase < 0 || secondsSinceBase >= timestampModulo) {
+      throw ArgumentError.value(
+        timestampMs,
+        'timestampMs',
+        'outside configured 24-bit protocol epoch',
+      );
+    }
+    final compact = secondsSinceBase;
     buffer.setUint8(6, (compact >> 16) & 0xFF);
     buffer.setUint8(7, (compact >> 8) & 0xFF);
     buffer.setUint8(8, compact & 0xFF);
@@ -194,52 +214,35 @@ class BlePacket {
         (buffer.getUint8(7) << 8) |
         buffer.getUint8(8);
 
-    final referenceSeconds =
-        ((referenceTime ?? DateTime.now()).millisecondsSinceEpoch ~/ 1000) -
-        SOSMessage.kBaseTimestamp;
-    final baseWindow =
-        (referenceSeconds / timestampModulo).round() * timestampModulo;
-
-    var best = baseWindow + compact;
-    for (final candidate in <int>[
-      baseWindow - timestampModulo + compact,
-      baseWindow + compact,
-      baseWindow + timestampModulo + compact,
-    ]) {
-      if ((candidate - referenceSeconds).abs() <
-          (best - referenceSeconds).abs()) {
-        best = candidate;
-      }
-    }
-
-    return canonicalProtocolTimestamp(
-      (SOSMessage.kBaseTimestamp + best) * 1000,
-    );
+    return (MeshConfig.protocolEpochSeconds + compact) * 1000;
   }
 
-  static void _writeCoordinate(
+  static void _writeSignedCoordinate(
     ByteData buffer,
     int offset,
     double value,
-    double base,
     double scale,
   ) {
-    final encoded = ((value - base) * scale).round().clamp(0, 0xFFFFFF);
+    final signed = (value * scale).round();
+    if (signed < -0x800000 || signed > 0x7FFFFF) {
+      throw ArgumentError.value(value, 'coordinate', 'outside signed 24-bit');
+    }
+    final encoded = signed & 0xFFFFFF;
     buffer.setUint8(offset, (encoded >> 16) & 0xFF);
     buffer.setUint8(offset + 1, (encoded >> 8) & 0xFF);
     buffer.setUint8(offset + 2, encoded & 0xFF);
   }
 
-  static double _readCoordinate(
+  static double _readSignedCoordinate(
     ByteData buffer,
     int offset,
-    double base,
     double scale,
   ) {
     final encoded =
         (buffer.getUint8(offset) << 16) |
         (buffer.getUint8(offset + 1) << 8) |
         buffer.getUint8(offset + 2);
-    return (encoded / scale) + base;
+    final signed = (encoded & 0x800000) == 0 ? encoded : encoded - 0x1000000;
+    return signed / scale;
   }
 }

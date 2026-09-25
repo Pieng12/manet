@@ -4,8 +4,8 @@ import 'package:pkmproject/utils/sos_status_priority.dart';
 
 int compareSosState(SOSMessage a, SOSMessage b) {
   final timestampCompare = canonicalProtocolTimestamp(
-    a.updatedAt,
-  ).compareTo(canonicalProtocolTimestamp(b.updatedAt));
+    a.protocolTimestampMs,
+  ).compareTo(canonicalProtocolTimestamp(b.protocolTimestampMs));
   if (timestampCompare != 0) return timestampCompare;
 
   final statusCompare = sosStatusPriority(

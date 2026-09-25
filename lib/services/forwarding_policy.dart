@@ -80,10 +80,10 @@ class ForwardingPolicy {
     SOSMessage? message,
   ) {
     if (message == null) return null;
-    if (message.updatedAt > packet.timestampMs) {
+    if (message.protocolTimestampMs > packet.timestampMs) {
       return ForwardingDecisionReason.dropStale;
     }
-    if (message.updatedAt < packet.timestampMs) return null;
+    if (message.protocolTimestampMs < packet.timestampMs) return null;
     if (message.status != packet.status) {
       return sosStatusPriority(packet.status) <=
               sosStatusPriority(message.status)

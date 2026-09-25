@@ -113,11 +113,15 @@ void main() {
       await basicQueue.markRelayed(third!, nowMs: now + 2);
 
       final beforeInterval =
-          now + MeshConfig.basicFloodingInterval.inMilliseconds - 1;
+          now +
+          MeshConfig.sosAdvertiseBurstDuration.inMilliseconds +
+          MeshConfig.basicFloodingInterval.inMilliseconds -
+          1;
       expect(await basicQueue.nextEligible(beforeInterval), isNull);
 
       final afterInterval =
           now +
+          MeshConfig.sosAdvertiseBurstDuration.inMilliseconds +
           MeshConfig.basicFloodingInterval.inMilliseconds +
           MeshConfig.relayJitterMax.inMilliseconds +
           1;
@@ -179,6 +183,7 @@ void main() {
         queued.nextEligibleAt,
         greaterThanOrEqualTo(
           now +
+              MeshConfig.sosAdvertiseBurstDuration.inMilliseconds +
               MeshConfig.basicFloodingInterval.inMilliseconds +
               MeshConfig.relayJitterMin.inMilliseconds,
         ),
@@ -187,6 +192,7 @@ void main() {
         queued.nextEligibleAt,
         lessThanOrEqualTo(
           now +
+              MeshConfig.sosAdvertiseBurstDuration.inMilliseconds +
               MeshConfig.basicFloodingInterval.inMilliseconds +
               MeshConfig.relayJitterMax.inMilliseconds,
         ),
@@ -323,7 +329,7 @@ void main() {
     expect(await queue.queueSize(), 1);
   });
 
-  test('new ACK replaces older ACK for same sender', () async {
+  test('ACK queue is keyed by sender and protocol timestamp', () async {
     final oldPayload = BlePacket.packAck(senderCrc: 12345, ackTimestampMs: now);
     final newPayload = BlePacket.packAck(
       senderCrc: 12345,
@@ -342,15 +348,22 @@ void main() {
     final rows = await db.query('relay_queue', where: "packet_type = 'ack'");
     final tombstone = await db.query('ack_tombstones');
 
-    expect(rows, hasLength(1));
-    expect(rows.single['message_id'], 'ack-12345');
+    expect(rows, hasLength(2));
+    final newest = rows.last;
+    expect(
+      newest['message_id'],
+      RelayQueueService.ackMessageId(
+        senderCrc: 12345,
+        ackTimestampMs: now + 1000,
+        statusIndex: SOSMessageStatus.resolved.index,
+      ),
+    );
     final packet = BlePacket.unpack(
-      base64Decode(rows.single['payload_base64'] as String),
+      base64Decode(newest['payload_base64'] as String),
       referenceTime: DateTime.fromMillisecondsSinceEpoch(now + 1000),
     );
     expect(packet!.timestampMs, now + 1000);
-    expect(tombstone, hasLength(1));
-    expect(tombstone.single['ack_timestamp_ms'], now + 1000);
+    expect(tombstone, hasLength(2));
   });
 
   test('ACK with ACTIVE status is rejected', () async {
@@ -370,7 +383,7 @@ void main() {
     expect(await db.query('ack_tombstones'), isEmpty);
   });
 
-  test('queue ACK remains bounded per sender', () async {
+  test('queue ACK remains bounded per logical message key', () async {
     for (var i = 0; i < 20; i++) {
       final payload = BlePacket.packAck(
         senderCrc: 54321,
@@ -383,8 +396,8 @@ void main() {
     }
 
     final rows = await db.query('relay_queue', where: "packet_type = 'ack'");
-    expect(rows, hasLength(1));
-    expect(rows.single['message_id'], 'ack-54321');
+    expect(rows, hasLength(20));
+    expect(rows.map((row) => row['message_id']).toSet(), hasLength(20));
   });
 
   test('old ACK item remains in persistent queue', () async {
@@ -671,7 +684,7 @@ void main() {
     },
   );
 
-  test('ACK tombstone suppresses older SOS but not newer SOS', () async {
+  test('ACK tombstone suppresses only its exact logical SOS key', () async {
     await DatabaseHelper.upsertAckTombstoneInDb(
       db,
       senderCrc: 12345,
@@ -683,7 +696,7 @@ void main() {
       await DatabaseHelper.isSuppressedByAckTombstoneInDb(
         db,
         senderCrc: 12345,
-        sosTimestampMs: now - 1,
+        sosTimestampMs: now,
       ),
       true,
     );
@@ -691,7 +704,7 @@ void main() {
       await DatabaseHelper.isSuppressedByAckTombstoneInDb(
         db,
         senderCrc: 12345,
-        sosTimestampMs: now + 1,
+        sosTimestampMs: now + 1000,
       ),
       false,
     );
@@ -740,7 +753,14 @@ void main() {
       final restored = await queue.recoverAckQueueFromTombstones(nowMs: now);
 
       expect(restored, 1);
-      final item = await queue.getItem('ack-24680', 'ack');
+      final item = await queue.getItem(
+        RelayQueueService.ackMessageId(
+          senderCrc: 24680,
+          ackTimestampMs: now,
+          statusIndex: SOSMessageStatus.resolved.index,
+        ),
+        'ack',
+      );
       expect(item, isNotNull);
       expect(item!.payloadBase64, isNotNull);
       final packet = BlePacket.unpack(
@@ -767,37 +787,51 @@ void main() {
     );
 
     expect(inserted, greaterThan(0));
-    expect(await queue.getItem('ack-13579', 'ack'), isNotNull);
+    expect(
+      await queue.getItem(
+        RelayQueueService.ackMessageId(
+          senderCrc: 13579,
+          ackTimestampMs: now,
+          statusIndex: SOSMessageStatus.resolved.index,
+        ),
+        'ack',
+      ),
+      isNotNull,
+    );
     expect(await queue.queueSize(), 1);
   });
 
-  test('SOS and ACK in the same second are not wrongly suppressed', () async {
-    await DatabaseHelper.upsertAckTombstoneInDb(
-      db,
-      senderCrc: 11223,
-      ackTimestampMs: now,
-      status: SOSMessageStatus.resolved,
-    );
-    final sameSecondSos = now + 500;
-
-    expect(
-      await DatabaseHelper.isSuppressedByAckTombstoneInDb(
+  test(
+    'same-key ACK suppresses SOS and a second new SOS is rejected',
+    () async {
+      await DatabaseHelper.upsertAckTombstoneInDb(
         db,
         senderCrc: 11223,
-        sosTimestampMs: sameSecondSos,
-      ),
-      false,
-    );
+        ackTimestampMs: now,
+        status: SOSMessageStatus.resolved,
+      );
+      final sameSecondSos = now + 500;
 
-    final sos = message(
-      'same-second-new',
-      senderCrc: 11223,
-      updatedAt: sameSecondSos,
-    );
-    await DatabaseHelper.ensureMonotonicStateTimestampInDb(db, sos);
+      expect(
+        await DatabaseHelper.isSuppressedByAckTombstoneInDb(
+          db,
+          senderCrc: 11223,
+          sosTimestampMs: sameSecondSos,
+        ),
+        true,
+      );
 
-    expect(sos.updatedAt, now + 1000);
-  });
+      final sos = message(
+        'same-second-new',
+        senderCrc: 11223,
+        updatedAt: sameSecondSos,
+      );
+      expect(
+        () => DatabaseHelper.ensureMonotonicStateTimestampInDb(db, sos),
+        throwsStateError,
+      );
+    },
+  );
 
   test(
     'new ACK resets queue relay metrics and becomes immediately eligible',
@@ -810,11 +844,15 @@ void main() {
         messageId: 'ack-99887-old',
         payloadBase64: base64Encode(oldPayload),
       );
-      final oldItem = (await queue.getItem('ack-99887', 'ack'))!;
+      final oldId = RelayQueueService.ackMessageId(
+        senderCrc: 99887,
+        ackTimestampMs: now,
+        statusIndex: SOSMessageStatus.resolved.index,
+      );
+      final oldItem = (await queue.getItem(oldId, 'ack'))!;
       await queue.markAdvertisingStarted(oldItem, nowMs: now);
       await queue.markAdvertisingSucceeded(oldItem, nowMs: now);
 
-      final before = DateTime.now().millisecondsSinceEpoch;
       final newPayload = BlePacket.packAck(
         senderCrc: 99887,
         ackTimestampMs: now + 1000,
@@ -822,13 +860,18 @@ void main() {
       await queue.enqueueAck(
         messageId: 'ack-99887-new',
         payloadBase64: base64Encode(newPayload),
+        nextEligibleAt: now + 1000,
       );
-      final after = DateTime.now().millisecondsSinceEpoch;
 
-      final item = (await queue.getItem('ack-99887', 'ack'))!;
+      final newId = RelayQueueService.ackMessageId(
+        senderCrc: 99887,
+        ackTimestampMs: now + 1000,
+        statusIndex: SOSMessageStatus.resolved.index,
+      );
+      final item = (await queue.getItem(newId, 'ack'))!;
       expect(item.relayCount, 0);
       expect(item.lastRelayedAt, 0);
-      expect(item.nextEligibleAt, inInclusiveRange(before, after));
+      expect(item.nextEligibleAt, now + 1000);
       expect(item.queueState, RelayQueueService.stateQueued);
     },
   );
@@ -1375,7 +1418,17 @@ void main() {
       expect(storedSos.localState, 'acked');
       expect(storedSos.ackReceivedAt, canonicalProtocolTimestamp(now + 123));
       expect(await queue.getItem(sos.id, 'sos'), isNull);
-      expect(await queue.getItem('ack-7001', 'ack'), isNotNull);
+      expect(
+        await queue.getItem(
+          RelayQueueService.ackMessageId(
+            senderCrc: 7001,
+            ackTimestampMs: now + 123,
+            statusIndex: SOSMessageStatus.resolved.index,
+          ),
+          'ack',
+        ),
+        isNotNull,
+      );
       expect(
         tombstone['ack_timestamp_ms'],
         canonicalProtocolTimestamp(now + 123),
@@ -1431,7 +1484,17 @@ void main() {
       expect(first, AckApplyResult.inserted);
       expect(duplicate, AckApplyResult.duplicate);
       expect(await db.query('ack_tombstones'), hasLength(1));
-      expect(await queue.getItem('ack-7003', 'ack'), isNotNull);
+      expect(
+        await queue.getItem(
+          RelayQueueService.ackMessageId(
+            senderCrc: 7003,
+            ackTimestampMs: now,
+            statusIndex: SOSMessageStatus.resolved.index,
+          ),
+          'ack',
+        ),
+        isNotNull,
+      );
     },
   );
 
@@ -1442,10 +1505,15 @@ void main() {
       status: SOSMessageStatus.resolved,
       nowMs: now,
     );
-    final item = (await queue.getItem('ack-7004', 'ack'))!;
+    final ack7004 = RelayQueueService.ackMessageId(
+      senderCrc: 7004,
+      ackTimestampMs: now,
+      statusIndex: SOSMessageStatus.resolved.index,
+    );
+    final item = (await queue.getItem(ack7004, 'ack'))!;
     await queue.markAdvertisingStarted(item, nowMs: now);
     await queue.markAdvertisingSucceeded(item, nowMs: now);
-    final before = (await queue.getItem('ack-7004', 'ack'))!;
+    final before = (await queue.getItem(ack7004, 'ack'))!;
 
     final duplicate = await queue.acceptAndQueueAck(
       senderCrc: 7004,
@@ -1453,7 +1521,7 @@ void main() {
       status: SOSMessageStatus.resolved,
       nowMs: now,
     );
-    final after = (await queue.getItem('ack-7004', 'ack'))!;
+    final after = (await queue.getItem(ack7004, 'ack'))!;
 
     expect(duplicate, AckApplyResult.duplicate);
     expect(after.relayCount, before.relayCount);
@@ -1489,12 +1557,17 @@ void main() {
         status: SOSMessageStatus.resolved,
         nowMs: now,
       );
-      final tombstone = (await db.query('ack_tombstones')).single;
+      final tombstones = await db.query(
+        'ack_tombstones',
+        where: 'ack_timestamp_ms = ?',
+        whereArgs: [now],
+      );
+      final tombstone = tombstones.single;
 
       expect(inserted, AckApplyResult.inserted);
       expect(upgraded, AckApplyResult.replacedHigherStatus);
       expect(downgrade, AckApplyResult.rejectedOlder);
-      expect(older, AckApplyResult.rejectedOlder);
+      expect(older, AckApplyResult.inserted);
       expect(tombstone['status'], SOSMessageStatus.resolved.index);
     },
   );
@@ -1622,7 +1695,14 @@ void main() {
       );
 
       final tombstone = (await db.query('ack_tombstones')).single;
-      final item = (await queue.getItem('ack-9001', 'ack'))!;
+      final item = (await queue.getItem(
+        RelayQueueService.ackMessageId(
+          senderCrc: 9001,
+          ackTimestampMs: rawTimestamp,
+          statusIndex: SOSMessageStatus.resolved.index,
+        ),
+        'ack',
+      ))!;
       final packet = BlePacket.unpack(
         base64Decode(item.payloadBase64!),
         referenceTime: DateTime.fromMillisecondsSinceEpoch(rawTimestamp),
@@ -1635,30 +1715,31 @@ void main() {
     },
   );
 
-  test(
-    'local monotonic timestamps advance by second but incoming packet is unchanged',
-    () async {
-      final first = message('mono-first', senderCrc: 9002, updatedAt: now);
-      await insertMessage(first);
-      final second = message(
-        'mono-second',
-        senderCrc: 9002,
-        updatedAt: now + 500,
-      );
-      await DatabaseHelper.ensureMonotonicStateTimestampInDb(db, second);
-      final packet = BlePacket(
-        kind: BlePacketKind.sos,
-        senderCrc: 9002,
-        timestampMs: now + 500,
-        latitude: -6.2,
-        longitude: 106.8,
-        status: SOSMessageStatus.active,
-      );
+  test('new SOS in the same protocol second is explicitly rejected', () async {
+    final first = message('mono-first', senderCrc: 9002, updatedAt: now);
+    await insertMessage(first);
+    final second = message(
+      'mono-second',
+      senderCrc: 9002,
+      updatedAt: now + 500,
+    );
+    final rejection = DatabaseHelper.ensureMonotonicStateTimestampInDb(
+      db,
+      second,
+    );
+    final packet = BlePacket(
+      kind: BlePacketKind.sos,
+      senderCrc: 9002,
+      timestampMs: now + 500,
+      latitude: -6.2,
+      longitude: 106.8,
+      status: SOSMessageStatus.active,
+    );
 
-      expect(second.updatedAt, now + 1000);
-      expect(packet.timestampMs, now + 500);
-    },
-  );
+    await expectLater(rejection, throwsStateError);
+    expect(second.protocolTimestampMs, canonicalProtocolTimestamp(now + 500));
+    expect(packet.timestampMs, now + 500);
+  });
 
   test(
     'basic flooding and trickle share the SOS advertising burst duration',

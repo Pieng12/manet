@@ -10,6 +10,15 @@ enum ForwardingMode {
 enum ResqMeshMode { offline, gateway }
 
 class MeshConfig {
+  static const Duration defaultRxBurstGap = Duration(seconds: 5);
+  static const int protocolEpochSeconds = int.fromEnvironment(
+    'RESQMESH_PROTOCOL_EPOCH_SECONDS',
+    defaultValue: 1780272000, // 2026-06-01T00:00:00Z
+  );
+  static const String protocolEpochId = String.fromEnvironment(
+    'RESQMESH_PROTOCOL_EPOCH_ID',
+    defaultValue: 'resqmesh-2026-06-01',
+  );
   static const String resqMeshModeName = String.fromEnvironment(
     'RESQMESH_MODE',
     defaultValue: 'offline',
@@ -20,7 +29,7 @@ class MeshConfig {
 
   static const String apiBaseUrl = String.fromEnvironment(
     'RESQMESH_API_BASE_URL',
-    defaultValue: 'https://resqmesh-backend-production.up.railway.app/api',
+    defaultValue: 'http://10.0.2.2:8080/api',
   );
 
   static const String forwardingModeName = String.fromEnvironment(
@@ -38,11 +47,14 @@ class MeshConfig {
 
   static const int protocolLength = 17;
   static const int manufacturerId = 0xFFFF;
+  // Compatibility metadata only. Neither value is a forwarding cutoff.
   static const int legacyHopMetadata = 5;
   static const int legacyAckHopMetadata = 5;
   static const int maxProtocolHop = 63;
+  static const int hopSaturation = maxProtocolHop;
   static const int relayCountMetricSample = 10;
 
+  // Compatibility metadata only. Active SOS and ACK packets do not expire.
   static const Duration defaultMessageLifetime = Duration(hours: 6);
   static const Duration ackLifetime = Duration(minutes: 2);
   static const Duration ackAdvertiseDuration = Duration(seconds: 10);
@@ -64,4 +76,5 @@ class MeshConfig {
 
   static const bool scanAllAdvertisements = false;
   static const bool connectableAdvertising = false;
+  static const bool scannableAdvertising = false;
 }

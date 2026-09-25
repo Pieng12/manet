@@ -11,6 +11,9 @@ CREATE TABLE sos_messages (
   status INTEGER, 
   created_at INTEGER,
   updated_at INTEGER,
+  protocol_timestamp_ms INTEGER NOT NULL DEFAULT 0,
+  state_updated_at INTEGER NOT NULL DEFAULT 0,
+  trial_id TEXT NULL,
   is_synced INTEGER DEFAULT 0,
   sender_crc INTEGER NULL,
   from_server INTEGER DEFAULT 0,
@@ -28,6 +31,9 @@ CREATE TABLE sos_messages (
 ''';
 
 const Map<String, String> sosMessagesColumnDefinitions = {
+  'protocol_timestamp_ms': 'INTEGER NOT NULL DEFAULT 0',
+  'state_updated_at': 'INTEGER NOT NULL DEFAULT 0',
+  'trial_id': 'TEXT NULL',
   'sender_crc': 'INTEGER NULL',
   'from_server': 'INTEGER DEFAULT 0',
   'hop_count': 'INTEGER NOT NULL DEFAULT 0',
@@ -53,6 +59,7 @@ CREATE TABLE relay_queue (
   last_relayed_at INTEGER NOT NULL DEFAULT 0,
   queue_state TEXT NOT NULL DEFAULT 'queued',
   payload_base64 TEXT NULL,
+  trial_id TEXT NULL,
   UNIQUE(message_id, packet_type)
 );
 ''';
@@ -64,15 +71,18 @@ const Map<String, String> relayQueueColumnDefinitions = {
   'last_relayed_at': 'INTEGER NOT NULL DEFAULT 0',
   'queue_state': "TEXT NOT NULL DEFAULT 'queued'",
   'payload_base64': 'TEXT NULL',
+  'trial_id': 'TEXT NULL',
 };
 
 const String createAckTombstonesTableSql = '''
 CREATE TABLE ack_tombstones (
-  sender_crc INTEGER PRIMARY KEY,
+  sender_crc INTEGER NOT NULL,
   ack_timestamp_ms INTEGER NOT NULL,
   status INTEGER NOT NULL,
   payload_base64 TEXT NULL,
-  updated_at INTEGER NOT NULL
+  updated_at INTEGER NOT NULL,
+  trial_id TEXT NULL,
+  PRIMARY KEY(sender_crc, ack_timestamp_ms)
 );
 ''';
 
@@ -87,6 +97,8 @@ CREATE TABLE trickle_states (
   phase TEXT NOT NULL,
   last_reset_reason TEXT NULL,
   updated_at INTEGER NOT NULL
+  ,monotonic_boot_id TEXT NULL
+  ,trial_id TEXT NULL
 );
 ''';
 
@@ -114,6 +126,7 @@ CREATE TABLE processed_ble_observations (
   processed_at INTEGER NOT NULL,
   source_path TEXT NULL,
   updated_at INTEGER NOT NULL
+  ,trial_id TEXT NULL
 );
 ''';
 
@@ -152,6 +165,29 @@ CREATE TABLE experiment_sessions (
   trickle_imax_doublings INTEGER NULL,
   trickle_k INTEGER NULL,
   sos_advertise_burst_ms INTEGER NULL
+  ,session_code TEXT NULL
+  ,hypothesis TEXT NULL
+  ,observation_window_ms INTEGER NULL
+  ,basic_interval_ms INTEGER NULL
+  ,jitter_min_ms INTEGER NULL
+  ,jitter_max_ms INTEGER NULL
+  ,scan_mode TEXT NULL
+  ,advertise_mode TEXT NULL
+  ,tx_power TEXT NULL
+  ,manufacturer_id INTEGER NULL
+  ,protocol_epoch_seconds INTEGER NULL
+  ,protocol_epoch_id TEXT NULL
+  ,clock_offset_ms REAL NULL
+  ,clock_drift_ppm REAL NULL
+  ,clock_tolerance_ms INTEGER NULL
+  ,gateway_enabled INTEGER NOT NULL DEFAULT 0
+  ,ack_enabled INTEGER NOT NULL DEFAULT 0
+  ,protocol_active INTEGER NOT NULL DEFAULT 1
+  ,expected_hop_in INTEGER NULL
+  ,hop_out INTEGER NULL
+  ,node_layer INTEGER NULL
+  ,allowed_advertisers_json TEXT NULL
+  ,rx_burst_gap_ms INTEGER NULL
 );
 ''';
 
@@ -175,6 +211,29 @@ const Map<String, String> experimentSessionColumnDefinitions = {
   'trickle_imax_doublings': 'INTEGER NULL',
   'trickle_k': 'INTEGER NULL',
   'sos_advertise_burst_ms': 'INTEGER NULL',
+  'session_code': 'TEXT NULL',
+  'hypothesis': 'TEXT NULL',
+  'observation_window_ms': 'INTEGER NULL',
+  'basic_interval_ms': 'INTEGER NULL',
+  'jitter_min_ms': 'INTEGER NULL',
+  'jitter_max_ms': 'INTEGER NULL',
+  'scan_mode': 'TEXT NULL',
+  'advertise_mode': 'TEXT NULL',
+  'tx_power': 'TEXT NULL',
+  'manufacturer_id': 'INTEGER NULL',
+  'protocol_epoch_seconds': 'INTEGER NULL',
+  'protocol_epoch_id': 'TEXT NULL',
+  'clock_offset_ms': 'REAL NULL',
+  'clock_drift_ppm': 'REAL NULL',
+  'clock_tolerance_ms': 'INTEGER NULL',
+  'gateway_enabled': 'INTEGER NOT NULL DEFAULT 0',
+  'ack_enabled': 'INTEGER NOT NULL DEFAULT 0',
+  'protocol_active': 'INTEGER NOT NULL DEFAULT 1',
+  'expected_hop_in': 'INTEGER NULL',
+  'hop_out': 'INTEGER NULL',
+  'node_layer': 'INTEGER NULL',
+  'allowed_advertisers_json': 'TEXT NULL',
+  'rx_burst_gap_ms': 'INTEGER NULL',
 };
 
 const String createExperimentTrialsTableSql = '''
@@ -189,6 +248,26 @@ CREATE TABLE experiment_trials (
   result TEXT NULL,
   failure_reason TEXT NULL,
   notes TEXT NULL
+  ,observation_ended_at INTEGER NULL
+  ,finalized_at INTEGER NULL
+  ,command_id TEXT NULL
+);
+''';
+
+const Map<String, String> experimentTrialColumnDefinitions = {
+  'observation_ended_at': 'INTEGER NULL',
+  'finalized_at': 'INTEGER NULL',
+  'command_id': 'TEXT NULL',
+};
+
+const String createExperimentCommandsTableSql = '''
+CREATE TABLE experiment_commands (
+  command_id TEXT PRIMARY KEY,
+  command_name TEXT NOT NULL,
+  session_id TEXT NULL,
+  trial_id TEXT NULL,
+  result_json TEXT NOT NULL,
+  created_at INTEGER NOT NULL
 );
 ''';
 
@@ -215,6 +294,10 @@ CREATE TABLE experiment_events (
   payload_hash TEXT NULL,
   event_key TEXT NULL,
   detail_json TEXT NULL
+  ,message_key TEXT NULL
+  ,state_identity TEXT NULL
+  ,observation_id TEXT NULL
+  ,burst_id TEXT NULL
 );
 ''';
 
@@ -230,6 +313,10 @@ const Map<String, String> experimentEventColumnDefinitions = {
   'hop_in': 'INTEGER NULL',
   'hop_out': 'INTEGER NULL',
   'event_key': 'TEXT NULL',
+  'message_key': 'TEXT NULL',
+  'state_identity': 'TEXT NULL',
+  'observation_id': 'TEXT NULL',
+  'burst_id': 'TEXT NULL',
 };
 
 const List<String> experimentIndexSql = [
@@ -241,4 +328,8 @@ const List<String> experimentIndexSql = [
       'ON experiment_events(session_id, trial_id, event_timestamp_ms)',
   'CREATE UNIQUE INDEX IF NOT EXISTS idx_experiment_events_event_key '
       'ON experiment_events(event_key)',
+  'CREATE INDEX IF NOT EXISTS idx_ack_tombstones_message_key '
+      'ON ack_tombstones(sender_crc, ack_timestamp_ms)',
+  'CREATE UNIQUE INDEX IF NOT EXISTS idx_experiment_commands_command_id '
+      'ON experiment_commands(command_id)',
 ];

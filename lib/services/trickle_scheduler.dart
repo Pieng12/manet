@@ -2,6 +2,7 @@ import 'dart:math';
 
 import 'package:pkmproject/config/mesh_config.dart';
 import 'package:pkmproject/models/trickle_state.dart';
+import 'package:pkmproject/services/experiment_clock.dart';
 import 'package:sqflite/sqflite.dart';
 
 class TrickleScheduler {
@@ -11,17 +12,20 @@ class TrickleScheduler {
     Duration imin = MeshConfig.trickleImin,
     Duration imax = MeshConfig.trickleImax,
     int redundancyConstant = MeshConfig.trickleRedundancyConstant,
+    ClockSource? clock,
   }) : _db = database,
        _random = random ?? Random(),
        _iminMs = imin.inMilliseconds,
        _imaxMs = imax.inMilliseconds,
-       _redundancyConstant = redundancyConstant;
+       _redundancyConstant = redundancyConstant,
+       _clock = clock ?? ExperimentClock.instance;
 
   final DatabaseExecutor _db;
   final Random _random;
   final int _iminMs;
   final int _imaxMs;
   final int _redundancyConstant;
+  final ClockSource _clock;
 
   int get iminMs => _iminMs;
   int get imaxMs => _imaxMs;
@@ -58,7 +62,17 @@ class TrickleScheduler {
     String reason = 'recover',
   }) async {
     final existing = await stateFor(messageId);
-    if (existing != null) return existing;
+    if (existing != null &&
+        existing.monotonicBootId == _clock.monotonicDomainId) {
+      return existing;
+    }
+    if (existing != null) {
+      return reset(
+        messageId: messageId,
+        nowMs: nowMs,
+        reason: 'monotonic_domain_changed',
+      );
+    }
     return reset(messageId: messageId, nowMs: nowMs, reason: reason);
   }
 
@@ -262,6 +276,7 @@ WHERE message_id = ?
       phase: TricklePhase.waitingTransmit,
       lastResetReason: resetReason,
       updatedAt: nowMs,
+      monotonicBootId: _clock.monotonicDomainId,
     );
   }
 

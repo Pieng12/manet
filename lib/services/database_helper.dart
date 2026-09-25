@@ -33,7 +33,7 @@ class ProcessedBleObservationClaim {
 }
 
 class DatabaseHelper {
-  static const int databaseVersion = 13;
+  static const int databaseVersion = 14;
   static const Duration processedBleObservationRetention = Duration(hours: 24);
   static const Duration processedBleObservationLease = Duration(minutes: 10);
 
@@ -106,6 +106,7 @@ class DatabaseHelper {
         await db.execute(createExperimentSessionsTableSql);
         await db.execute(createExperimentTrialsTableSql);
         await db.execute(createExperimentEventsTableSql);
+        await db.execute(createExperimentCommandsTableSql);
         await db.execute(createProcessedBleObservationsStateIndexSql);
         await ensureExperimentIndexes(db);
         print("[DatabaseHelper] Table created in onCreate");
@@ -132,6 +133,7 @@ class DatabaseHelper {
         await ensureProcessedBleObservationsTable(db);
         await ensureExperimentTables(db);
         await ensureExperimentColumns(db);
+        await ensureResearchSchemaV14(db);
         await db.execute(createProcessedBleObservationsStateIndexSql);
         await ensureExperimentIndexes(db);
       },
@@ -200,6 +202,10 @@ class DatabaseHelper {
       await ensureExperimentTables(db);
       await ensureExperimentColumns(db);
       await ensureExperimentIndexes(db);
+    }
+
+    if (oldVersion < 14) {
+      await ensureResearchSchemaV14(db);
     }
   }
 
@@ -270,12 +276,105 @@ FROM trickle_observations_legacy
     }
   }
 
+  static Future<void> ensureResearchSchemaV14(Database db) async {
+    await ensureSosMessageColumns(db);
+    await ensureRelayQueueColumns(db);
+    await ensureExperimentTables(db);
+    await ensureExperimentColumns(db);
+
+    final commandTables = await db.rawQuery(
+      "SELECT name FROM sqlite_master WHERE type='table' "
+      "AND name='experiment_commands'",
+    );
+    if (commandTables.isEmpty) {
+      await db.execute(createExperimentCommandsTableSql);
+    }
+
+    final trialColumns = await _tableColumnNames(db, 'experiment_trials');
+    for (final entry in experimentTrialColumnDefinitions.entries) {
+      if (trialColumns.contains(entry.key)) continue;
+      await db.execute(
+        'ALTER TABLE experiment_trials ADD COLUMN ${entry.key} ${entry.value}',
+      );
+    }
+
+    await _ensureColumn(
+      db,
+      'processed_ble_observations',
+      'trial_id',
+      'TEXT NULL',
+    );
+    await _ensureColumn(db, 'trickle_states', 'monotonic_boot_id', 'TEXT NULL');
+    await _ensureColumn(db, 'trickle_states', 'trial_id', 'TEXT NULL');
+
+    await _migrateAckTombstonesToMessageKey(db);
+    await db.rawUpdate(
+      'UPDATE sos_messages SET protocol_timestamp_ms = '
+      '(created_at / 1000) * 1000 '
+      'WHERE protocol_timestamp_ms IS NULL OR protocol_timestamp_ms = 0',
+    );
+    await db.rawUpdate(
+      'UPDATE sos_messages SET state_updated_at = updated_at '
+      'WHERE state_updated_at IS NULL OR state_updated_at = 0',
+    );
+    await ensureExperimentIndexes(db);
+  }
+
+  static Future<void> _ensureColumn(
+    Database db,
+    String table,
+    String column,
+    String definition,
+  ) async {
+    final columns = await _tableColumnNames(db, table);
+    if (columns.contains(column)) return;
+    await db.execute('ALTER TABLE $table ADD COLUMN $column $definition');
+  }
+
+  static Future<void> _migrateAckTombstonesToMessageKey(Database db) async {
+    final tables = await db.rawQuery(
+      "SELECT name FROM sqlite_master WHERE type='table' "
+      "AND name='ack_tombstones'",
+    );
+    if (tables.isEmpty) {
+      await db.execute(createAckTombstonesTableSql);
+      return;
+    }
+    final pkColumns = await db.rawQuery('PRAGMA table_info(ack_tombstones)');
+    final senderPk = pkColumns.firstWhere(
+      (row) => row['name'] == 'sender_crc',
+      orElse: () => const <String, Object?>{},
+    )['pk'];
+    final timestampPk = pkColumns.firstWhere(
+      (row) => row['name'] == 'ack_timestamp_ms',
+      orElse: () => const <String, Object?>{},
+    )['pk'];
+    if (senderPk == 1 && timestampPk == 2) {
+      await _ensureColumn(db, 'ack_tombstones', 'trial_id', 'TEXT NULL');
+      return;
+    }
+
+    await db.execute(
+      'ALTER TABLE ack_tombstones RENAME TO ack_tombstones_legacy_v13',
+    );
+    await db.execute(createAckTombstonesTableSql);
+    await db.execute('''
+INSERT OR IGNORE INTO ack_tombstones (
+  sender_crc, ack_timestamp_ms, status, payload_base64, updated_at
+)
+SELECT sender_crc, ack_timestamp_ms, status, payload_base64, updated_at
+FROM ack_tombstones_legacy_v13
+''');
+    await db.execute('DROP TABLE ack_tombstones_legacy_v13');
+  }
+
   Future<ProcessedBleObservationClaim?> claimBleObservation({
     required String? observationId,
     required String packetType,
     required int receivedAtMs,
     required int processedAtMs,
     String? sourcePath,
+    String? trialId,
   }) async {
     final id = observationId?.trim();
     if (id == null || id.isEmpty) return null;
@@ -292,6 +391,7 @@ FROM trickle_observations_legacy
       receivedAtMs: receivedAtMs,
       processedAtMs: processedAtMs,
       sourcePath: sourcePath,
+      trialId: trialId,
     );
   }
 
@@ -302,6 +402,7 @@ FROM trickle_observations_legacy
     required int receivedAtMs,
     required int processedAtMs,
     String? sourcePath,
+    String? trialId,
   }) {
     return db.transaction((txn) async {
       final rows = await txn.query(
@@ -318,6 +419,7 @@ FROM trickle_observations_legacy
           'first_received_at': receivedAtMs,
           'processed_at': processedAtMs,
           'source_path': sourcePath,
+          'trial_id': trialId,
           'updated_at': processedAtMs,
         });
         return ProcessedBleObservationClaim(
@@ -339,15 +441,17 @@ FROM trickle_observations_legacy
           updatedAt <=
               processedAtMs - processedBleObservationLease.inMilliseconds;
       if (state == 'failed_retryable' || staleProcessing) {
+        final updates = <String, Object?>{
+          'packet_type': packetType,
+          'state': 'processing',
+          'processed_at': processedAtMs,
+          'source_path': sourcePath,
+          'updated_at': processedAtMs,
+        };
+        if (trialId != null) updates['trial_id'] = trialId;
         await txn.update(
           'processed_ble_observations',
-          {
-            'packet_type': packetType,
-            'state': 'processing',
-            'processed_at': processedAtMs,
-            'source_path': sourcePath,
-            'updated_at': processedAtMs,
-          },
+          updates,
           where: 'observation_id = ?',
           whereArgs: [observationId],
         );
@@ -441,6 +545,13 @@ FROM trickle_observations_legacy
     if (!tableNames.contains('experiment_events')) {
       await db.execute(createExperimentEventsTableSql);
     }
+    final commandTables = await db.rawQuery(
+      "SELECT name FROM sqlite_master WHERE type='table' "
+      "AND name='experiment_commands'",
+    );
+    if (commandTables.isEmpty) {
+      await db.execute(createExperimentCommandsTableSql);
+    }
   }
 
   static Future<void> ensureExperimentColumns(Database db) async {
@@ -457,6 +568,14 @@ FROM trickle_observations_legacy
       if (eventColumns.contains(entry.key)) continue;
       await db.execute(
         'ALTER TABLE experiment_events ADD COLUMN ${entry.key} ${entry.value}',
+      );
+    }
+
+    final trialColumns = await _tableColumnNames(db, 'experiment_trials');
+    for (final entry in experimentTrialColumnDefinitions.entries) {
+      if (trialColumns.contains(entry.key)) continue;
+      await db.execute(
+        'ALTER TABLE experiment_trials ADD COLUMN ${entry.key} ${entry.value}',
       );
     }
   }
@@ -643,8 +762,8 @@ FROM trickle_observations_legacy
 
     final existing = await db.query(
       'ack_tombstones',
-      where: 'sender_crc = ?',
-      whereArgs: [senderCrc],
+      where: 'sender_crc = ? AND ack_timestamp_ms = ?',
+      whereArgs: [senderCrc, canonicalAckTimestamp],
       limit: 1,
     );
 
@@ -660,9 +779,7 @@ FROM trickle_observations_legacy
               existingStatusIndex < SOSMessageStatus.values.length
           ? SOSMessageStatus.values[existingStatusIndex]
           : SOSMessageStatus.cancelled;
-      if (existingTimestamp > canonicalAckTimestamp) return false;
-      if (existingTimestamp == canonicalAckTimestamp &&
-          sosStatusPriority(existingStatus) > sosStatusPriority(status)) {
+      if (sosStatusPriority(existingStatus) > sosStatusPriority(status)) {
         return false;
       }
       if (payloadToStore == null &&
@@ -696,6 +813,7 @@ FROM trickle_observations_legacy
       columns: ['ack_timestamp_ms'],
       where: 'sender_crc = ?',
       whereArgs: [senderCrc],
+      orderBy: 'ack_timestamp_ms DESC',
       limit: 1,
     );
     if (rows.isEmpty) return null;
@@ -719,11 +837,15 @@ FROM trickle_observations_legacy
     required int senderCrc,
     required int sosTimestampMs,
   }) async {
-    final ackTimestamp = await latestAckTimestampForSenderCrcInDb(
-      db,
-      senderCrc,
+    final canonicalSosTimestamp = canonicalProtocolTimestamp(sosTimestampMs);
+    final rows = await db.query(
+      'ack_tombstones',
+      columns: const ['sender_crc'],
+      where: 'sender_crc = ? AND ack_timestamp_ms = ?',
+      whereArgs: [senderCrc, canonicalSosTimestamp],
+      limit: 1,
     );
-    return ackTimestamp != null && ackTimestamp >= sosTimestampMs;
+    return rows.isNotEmpty;
   }
 
   Future<void> ensureMonotonicStateTimestamp(SOSMessage message) async {
@@ -735,25 +857,36 @@ FROM trickle_observations_legacy
     DatabaseExecutor db,
     SOSMessage message,
   ) async {
-    final latestTimestamp = await _latestTimestampForSenderInDb(db, message);
-    if (latestTimestamp == null) return;
-
-    final canonicalUpdatedAt = canonicalProtocolTimestamp(message.updatedAt);
-    if (canonicalUpdatedAt ~/ 1000 > latestTimestamp ~/ 1000) {
-      message.updatedAt = canonicalUpdatedAt;
-      if (message.createdAt > message.updatedAt) {
-        message.createdAt = message.updatedAt;
-      }
+    final existingRows = message.senderCrc != null
+        ? await db.query(
+            'sos_messages',
+            columns: const ['id', 'protocol_timestamp_ms', 'created_at'],
+            where: 'sender_id = ? OR sender_crc = ?',
+            whereArgs: [message.senderId, message.senderCrc],
+          )
+        : await db.query(
+            'sos_messages',
+            columns: const ['id', 'protocol_timestamp_ms', 'created_at'],
+            where: 'sender_id = ?',
+            whereArgs: [message.senderId],
+          );
+    final sameLogicalMessage = existingRows.where(
+      (row) => row['id'] == message.id,
+    );
+    if (sameLogicalMessage.isNotEmpty) {
+      final row = sameLogicalMessage.first;
+      message.protocolTimestampMs = canonicalProtocolTimestamp(
+        row['protocol_timestamp_ms'] as int? ?? row['created_at'] as int,
+      );
       return;
     }
 
-    final originalUpdatedAt = message.updatedAt;
-    message.updatedAt = nextMonotonicProtocolTimestamp(
-      candidateMs: message.updatedAt,
-      previousMs: latestTimestamp,
-    );
-    if (message.createdAt == originalUpdatedAt) {
-      message.createdAt = message.updatedAt;
+    final latestTimestamp = await _latestTimestampForSenderInDb(db, message);
+    if (latestTimestamp != null &&
+        message.protocolTimestampMs <= latestTimestamp) {
+      throw StateError(
+        'NEW_SOS_PROTOCOL_SECOND_CONFLICT: a new SOS must use a later protocol second',
+      );
     }
   }
 
@@ -765,23 +898,24 @@ FROM trickle_observations_legacy
     final existingRows = message.senderCrc != null
         ? await db.query(
             'sos_messages',
-            columns: ['updated_at'],
+            columns: ['protocol_timestamp_ms', 'created_at'],
             where: 'sender_id = ? OR sender_crc = ?',
             whereArgs: [message.senderId, message.senderCrc],
-            orderBy: 'updated_at DESC',
+            orderBy: 'protocol_timestamp_ms DESC',
             limit: 1,
           )
         : await db.query(
             'sos_messages',
-            columns: ['updated_at'],
+            columns: ['protocol_timestamp_ms', 'created_at'],
             where: 'sender_id = ?',
             whereArgs: [message.senderId],
-            orderBy: 'updated_at DESC',
+            orderBy: 'protocol_timestamp_ms DESC',
             limit: 1,
           );
     if (existingRows.isNotEmpty) {
       latest = canonicalProtocolTimestamp(
-        existingRows.first['updated_at'] as int,
+        existingRows.first['protocol_timestamp_ms'] as int? ??
+            existingRows.first['created_at'] as int,
       );
     }
 

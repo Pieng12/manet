@@ -8,6 +8,7 @@ class RelayQueueItem {
   final int lastRelayedAt;
   final String queueState;
   final String? payloadBase64;
+  final String? trialId;
 
   const RelayQueueItem({
     this.id,
@@ -19,6 +20,7 @@ class RelayQueueItem {
     this.lastRelayedAt = 0,
     this.queueState = 'queued',
     this.payloadBase64,
+    this.trialId,
   });
 
   bool get isAck => packetType == 'ack';
@@ -35,6 +37,7 @@ class RelayQueueItem {
       'last_relayed_at': lastRelayedAt,
       'queue_state': queueState,
       'payload_base64': payloadBase64,
+      'trial_id': trialId,
     };
   }
 
@@ -49,6 +52,7 @@ class RelayQueueItem {
       lastRelayedAt: map['last_relayed_at'] as int? ?? 0,
       queueState: map['queue_state'] as String? ?? 'queued',
       payloadBase64: map['payload_base64'] as String?,
+      trialId: map['trial_id'] as String?,
     );
   }
 }

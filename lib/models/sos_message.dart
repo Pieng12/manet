@@ -1,11 +1,13 @@
 // pkmproject/lib/models/sos_message.dart
 
 import 'package:pkmproject/config/mesh_config.dart';
+import 'package:pkmproject/models/message_identity.dart';
+import 'package:pkmproject/utils/protocol_timestamp.dart';
 
 enum SOSMessageStatus { cancelled, active, resolved }
 
 class SOSMessage {
-  static const int kBaseTimestamp = 1704067200; // 2024-01-01 00:00:00 UTC
+  static const int kBaseTimestamp = MeshConfig.protocolEpochSeconds;
 
   String id; // UUID, corresponds to local_message_id on server
   String senderId; // Corresponds to sender_device_id on server
@@ -18,7 +20,8 @@ class SOSMessage {
   SOSMessageStatus status;
   int
   createdAt; // Epoch milliseconds (local creation time / server's occurred_at)
-  int updatedAt; // Epoch milliseconds (local update time / server's updated_at)
+  int protocolTimestampMs; // Immutable identity timestamp for one logical SOS.
+  int stateUpdatedAt; // Local/server state-change wall time.
   int isSynced; // 0 = Not synced, 1 = Synced
   int hopCount;
   int maxHop;
@@ -30,6 +33,7 @@ class SOSMessage {
   int? ackReceivedAt;
   int? syncedAt;
   String localState;
+  String? trialId;
 
   SOSMessage({
     required this.id,
@@ -42,9 +46,11 @@ class SOSMessage {
     required this.longitude,
     this.status = SOSMessageStatus.active,
     required this.createdAt,
-    required this.updatedAt,
+    required int updatedAt,
+    int? protocolTimestampMs,
+    int? stateUpdatedAt,
     this.isSynced = 0,
-    this.hopCount = 0,
+    this.hopCount = 1,
     this.maxHop = MeshConfig.legacyHopMetadata,
     int? expiresAt,
     int? firstSeenAt,
@@ -54,10 +60,31 @@ class SOSMessage {
     this.ackReceivedAt,
     this.syncedAt,
     this.localState = 'pending',
-  }) : expiresAt =
+    this.trialId,
+  }) : protocolTimestampMs = canonicalProtocolTimestamp(
+         protocolTimestampMs ?? createdAt,
+       ),
+       stateUpdatedAt = stateUpdatedAt ?? updatedAt,
+       expiresAt =
            expiresAt ??
            createdAt + MeshConfig.defaultMessageLifetime.inMilliseconds,
        firstSeenAt = firstSeenAt ?? createdAt;
+
+  int get updatedAt => stateUpdatedAt;
+
+  set updatedAt(int value) => stateUpdatedAt = value;
+
+  MessageKey get messageKey => MessageKey(
+    senderCrc: senderCrc ?? 0,
+    protocolTimestampMs: protocolTimestampMs,
+  );
+
+  StateIdentity get stateIdentity => StateIdentity(
+    messageKey: messageKey,
+    statusIndex: status.index,
+    isAck: false,
+    fromServer: fromServer,
+  );
 
   bool isExpiredAt(int nowMs) => localState == 'expired';
 
@@ -74,7 +101,9 @@ class SOSMessage {
       'longitude': longitude,
       'status': status.index, // Store enum as integer
       'created_at': createdAt,
-      'updated_at': updatedAt,
+      'updated_at': stateUpdatedAt,
+      'protocol_timestamp_ms': protocolTimestampMs,
+      'state_updated_at': stateUpdatedAt,
       'is_synced': isSynced,
       'sender_crc': senderCrc,
       'from_server': fromServer ? 1 : 0,
@@ -88,6 +117,7 @@ class SOSMessage {
       'ack_received_at': ackReceivedAt,
       'synced_at': syncedAt,
       'local_state': localState,
+      'trial_id': trialId,
     };
   }
 
@@ -107,6 +137,8 @@ class SOSMessage {
           .values[map['status']], // Convert integer back to enum
       createdAt: createdAt,
       updatedAt: map['updated_at'],
+      protocolTimestampMs: map['protocol_timestamp_ms'] ?? createdAt,
+      stateUpdatedAt: map['state_updated_at'] ?? map['updated_at'],
       isSynced: map['is_synced'],
       hopCount: map['hop_count'] ?? 0,
       maxHop: map['max_hop'] ?? MeshConfig.legacyHopMetadata,
@@ -120,6 +152,7 @@ class SOSMessage {
       ackReceivedAt: map['ack_received_at'],
       syncedAt: map['synced_at'],
       localState: map['local_state'] ?? 'pending',
+      trialId: map['trial_id'] as String?,
     );
   }
 
@@ -135,9 +168,12 @@ class SOSMessage {
       'status': status.name, // Use the enum name as string
       'createdAt': createdAt,
       'updatedAt': updatedAt,
+      'protocolTimestampMs': protocolTimestampMs,
+      'stateUpdatedAt': stateUpdatedAt,
       'hopCount': hopCount,
       'maxHop': maxHop,
       'expiresAt': expiresAt,
+      'trialId': trialId,
     };
   }
 
@@ -155,9 +191,8 @@ class SOSMessage {
 
   // Convert a SOSMessage object into a Map object suitable for API upload
   Map<String, dynamic> toApiJson() {
-    // Note: The occurred_at and timestamp fields are using `updatedAt` to reflect the latest state
-    // of the message (e.g., when it was cancelled or replaced).
-    final String apiTimestamp = _formatTimestamp(updatedAt);
+    final String occurredAt = _formatTimestamp(protocolTimestampMs);
+    final String stateTimestamp = _formatTimestamp(stateUpdatedAt);
 
     return {
       'local_message_id': id,
@@ -167,13 +202,13 @@ class SOSMessage {
       'latitude': latitude,
       'longitude': longitude,
       'status': status.name.toUpperCase(),
-      'occurred_at': apiTimestamp,
-      'updated_at': apiTimestamp,
+      'occurred_at': occurredAt,
+      'updated_at': stateTimestamp,
       'device_id': senderId,
       'sender_crc': senderCrc,
       'from_server': fromServer,
       'battery_level': 100.0,
-      'timestamp': apiTimestamp,
+      'timestamp': occurredAt,
     };
   }
 
@@ -199,6 +234,9 @@ class SOSMessage {
       ),
       createdAt: DateTime.parse(json['occurred_at']).millisecondsSinceEpoch,
       updatedAt: DateTime.parse(json['updated_at']).millisecondsSinceEpoch,
+      protocolTimestampMs: DateTime.parse(
+        json['occurred_at'],
+      ).millisecondsSinceEpoch,
       isSynced: 1, // Data from server is always synced
       syncedAt: DateTime.now().millisecondsSinceEpoch,
       localState: 'synced',

@@ -8,6 +8,7 @@ import 'package:pkmproject/models/sos_message.dart';
 import 'package:pkmproject/models/trickle_state.dart';
 import 'package:pkmproject/services/ble_protocol.dart';
 import 'package:pkmproject/services/database_helper.dart';
+import 'package:pkmproject/services/experiment_clock.dart';
 import 'package:pkmproject/services/trickle_scheduler.dart';
 import 'package:pkmproject/utils/protocol_timestamp.dart';
 import 'package:pkmproject/utils/sos_state_ordering.dart';
@@ -67,16 +68,38 @@ class RelayQueueService {
     DatabaseHelper? databaseHelper,
     Random? random,
     ForwardingMode? mode,
+    ClockSource? clock,
   }) : _database = database,
        _databaseHelper = databaseHelper ?? DatabaseHelper(),
        _random = random ?? Random(),
-       _mode = mode ?? MeshConfig.forwardingMode;
+       _modeOverride = mode,
+       _clock = clock ?? ExperimentClock.instance;
 
   final Database? _database;
   final DatabaseHelper _databaseHelper;
   final Random _random;
-  final ForwardingMode _mode;
+  final ForwardingMode? _modeOverride;
+  final ClockSource _clock;
   int _consecutiveAckSlots = 0;
+
+  static ForwardingMode? _sessionMode;
+
+  ForwardingMode get mode =>
+      _modeOverride ?? _sessionMode ?? MeshConfig.forwardingMode;
+
+  static void configureSessionMode(ForwardingMode? mode) {
+    _sessionMode = mode;
+  }
+
+  static ForwardingMode modeFromPersistedValue(String value) {
+    return switch (value.toLowerCase()) {
+      'trickle' => ForwardingMode.trickle,
+      'basic' || 'basic_flooding' => ForwardingMode.basicFlooding,
+      _ => throw ArgumentError('Unknown forwarding mode: $value'),
+    };
+  }
+
+  ClockSource get clock => _clock;
 
   static const String stateQueued = 'queued';
   static const String stateAdvertising = 'advertising';
@@ -108,7 +131,7 @@ class RelayQueueService {
     required int ackTimestampMs,
     required int statusIndex,
   }) {
-    return 'ack-$senderCrc';
+    return 'ack-$senderCrc-${canonicalProtocolTimestamp(ackTimestampMs)}';
   }
 
   static int priorityForSosStatus(SOSMessageStatus status) {
@@ -131,11 +154,14 @@ class RelayQueueService {
     required SOSMessageStatus status,
     int hopCount = 0,
     int? nowMs,
+    int? schedulerNowMs,
     String? processedObservationId,
+    String? trialId,
     bool failAfterTombstoneForTest = false,
   }) async {
     final db = await _db;
     final now = nowMs ?? DateTime.now().millisecondsSinceEpoch;
+    final schedulerNow = schedulerNowMs ?? _clock.monotonicTimeMs();
     final canonicalAckTimestamp = canonicalProtocolTimestamp(ackTimestampMs);
 
     if (!isValidAckStatus(status)) return AckApplyResult.rejectedInvalid;
@@ -147,10 +173,23 @@ class RelayQueueService {
     }
 
     return db.transaction((txn) async {
+      var effectiveTrialId = trialId;
+      if (effectiveTrialId == null) {
+        final matchingSos = await txn.query(
+          'sos_messages',
+          columns: const ['trial_id'],
+          where: 'sender_crc = ? AND protocol_timestamp_ms = ?',
+          whereArgs: [senderCrc, canonicalAckTimestamp],
+          limit: 1,
+        );
+        effectiveTrialId = matchingSos.isEmpty
+            ? null
+            : matchingSos.first['trial_id'] as String?;
+      }
       final existingTombstone = await txn.query(
         'ack_tombstones',
-        where: 'sender_crc = ?',
-        whereArgs: [senderCrc],
+        where: 'sender_crc = ? AND ack_timestamp_ms = ?',
+        whereArgs: [senderCrc, canonicalAckTimestamp],
         limit: 1,
       );
       final result = _classifyAck(
@@ -183,6 +222,7 @@ class RelayQueueService {
           'status': status.index,
           'payload_base64': payloadBase64,
           'updated_at': now,
+          'trial_id': effectiveTrialId,
         }, conflictAlgorithm: ConflictAlgorithm.replace);
       }
 
@@ -195,7 +235,11 @@ class RelayQueueService {
         senderCrc: senderCrc,
         ackTimestampMs: canonicalAckTimestamp,
       );
-      final trickleScheduler = TrickleScheduler(database: txn, random: _random);
+      final trickleScheduler = TrickleScheduler(
+        database: txn,
+        random: _random,
+        clock: _clock,
+      );
       for (final messageId in ackedMessageIds) {
         await txn.delete(
           'relay_queue',
@@ -210,11 +254,7 @@ class RelayQueueService {
         ackTimestampMs: canonicalAckTimestamp,
         statusIndex: status.index,
       );
-      await _compactAckQueueInExecutor(
-        txn,
-        senderCrc: senderCrc,
-        compactMessageId: compactMessageId,
-      );
+      await _compactAckQueueInExecutor(txn, compactMessageId: compactMessageId);
 
       final existingQueue = await txn.query(
         'relay_queue',
@@ -237,9 +277,10 @@ class RelayQueueService {
           messageId: compactMessageId,
           packetType: 'ack',
           priority: 100,
-          nextEligibleAt: now,
+          nextEligibleAt: schedulerNow,
           queueState: stateQueued,
           payloadBase64: payloadBase64,
+          trialId: effectiveTrialId,
         ),
         resetMetrics: result.shouldRelay,
       );
@@ -257,12 +298,14 @@ class RelayQueueService {
     int priority = 0,
     required int nextEligibleAt,
     bool failAfterStoreForTest = false,
+    bool queueForRelay = true,
   }) async {
     final result = await storeAndQueueSosWithResult(
       message: message,
       priority: priority,
       nextEligibleAt: nextEligibleAt,
       failAfterStoreForTest: failAfterStoreForTest,
+      queueForRelay: queueForRelay,
     );
     return result.stored;
   }
@@ -273,6 +316,7 @@ class RelayQueueService {
     required int nextEligibleAt,
     String? processedObservationId,
     bool failAfterStoreForTest = false,
+    bool queueForRelay = true,
   }) async {
     final db = await _db;
     return db.transaction((txn) async {
@@ -291,7 +335,11 @@ class RelayQueueService {
       }
 
       final existingRows = await _messageRowsForSenderInExecutor(txn, message);
-      final trickleScheduler = TrickleScheduler(database: txn, random: _random);
+      final trickleScheduler = TrickleScheduler(
+        database: txn,
+        random: _random,
+        clock: _clock,
+      );
       for (final row in existingRows) {
         final existingId = row['id'] as String?;
         if (existingId == null || existingId == message.id) continue;
@@ -317,9 +365,18 @@ class RelayQueueService {
         throw StateError('Simulated SOS transaction failure');
       }
 
+      if (!queueForRelay) {
+        await _completeProcessedObservationInExecutor(
+          txn,
+          processedObservationId,
+          nextEligibleAt,
+        );
+        return const SosQueueStoreResult(stored: true);
+      }
+
       var sosNextEligibleAt = nextEligibleAt;
       _TrickleSosPreparation? tricklePreparation;
-      if (_mode == ForwardingMode.trickle) {
+      if (mode == ForwardingMode.trickle) {
         tricklePreparation = await _prepareTrickleForStoredSos(
           trickleScheduler,
           message: message,
@@ -339,6 +396,7 @@ class RelayQueueService {
           relayCount: message.relayCount,
           lastRelayedAt: message.lastRelayedAt,
           queueState: stateQueued,
+          trialId: message.trialId,
         ),
         resetMetrics: latestExisting != null,
       );
@@ -372,6 +430,7 @@ class RelayQueueService {
         relayCount: message.relayCount,
         lastRelayedAt: message.lastRelayedAt,
         queueState: stateQueued,
+        trialId: message.trialId,
       ),
     );
   }
@@ -399,13 +458,14 @@ class RelayQueueService {
       status: packet.status,
       hopCount: packet.hopCount,
       nowMs: nextEligibleAt,
+      schedulerNowMs: nextEligibleAt,
     );
     return result.rejected ? 0 : 1;
   }
 
   Future<int> recoverAckQueueFromTombstones({int? nowMs}) async {
     final db = await _db;
-    final now = nowMs ?? DateTime.now().millisecondsSinceEpoch;
+    final now = nowMs ?? _clock.monotonicTimeMs();
     return db.transaction((txn) async {
       final tombstones = await txn.query('ack_tombstones');
       var restored = 0;
@@ -436,7 +496,6 @@ class RelayQueueService {
         );
         await _compactAckQueueInExecutor(
           txn,
-          senderCrc: senderCrc,
           compactMessageId: compactMessageId,
         );
 
@@ -468,6 +527,7 @@ class RelayQueueService {
             nextEligibleAt: now,
             queueState: stateQueued,
             payloadBase64: payloadBase64,
+            trialId: tombstone['trial_id'] as String?,
           ),
           resetMetrics: existing.isEmpty,
         );
@@ -479,7 +539,7 @@ class RelayQueueService {
 
   Future<int> recoverSosQueueFromMessages({int? nowMs}) async {
     final db = await _db;
-    final now = nowMs ?? DateTime.now().millisecondsSinceEpoch;
+    final now = nowMs ?? _clock.monotonicTimeMs();
     return db.transaction((txn) async {
       final rows = await txn.query(
         'sos_messages',
@@ -499,9 +559,13 @@ class RelayQueueService {
       }
 
       var restored = 0;
-      final trickleScheduler = TrickleScheduler(database: txn, random: _random);
+      final trickleScheduler = TrickleScheduler(
+        database: txn,
+        random: _random,
+        clock: _clock,
+      );
       for (final message in latestBySender.values) {
-        final nextEligibleAt = _mode == ForwardingMode.trickle
+        final nextEligibleAt = mode == ForwardingMode.trickle
             ? (await trickleScheduler.ensureState(
                 messageId: message.id,
                 nowMs: now,
@@ -518,6 +582,7 @@ class RelayQueueService {
             relayCount: message.relayCount,
             lastRelayedAt: message.lastRelayedAt,
             queueState: stateQueued,
+            trialId: message.trialId,
           ),
         );
         restored++;
@@ -628,7 +693,9 @@ class RelayQueueService {
       final nextRelayCount = current.relayCount + 1;
       final nextEligibleAt =
           nextEligibleAtOverride ??
-          (item.isAck ? nextAckEligibleAt(nowMs) : nextSosEligibleAt(nowMs));
+          (item.isAck
+              ? nextAckEligibleAt(nowMs + slotDuration.inMilliseconds)
+              : nextSosEligibleAt(nowMs + slotDuration.inMilliseconds));
 
       await txn.update(
         'relay_queue',
@@ -715,11 +782,12 @@ WHERE id = ?
     required String observerKey,
     required int nowMs,
   }) async {
-    if (_mode != ForwardingMode.trickle) return false;
+    if (mode != ForwardingMode.trickle) return false;
     final db = await _db;
     return TrickleScheduler(
       database: db,
       random: _random,
+      clock: _clock,
     ).recordConsistentObservation(
       messageId: messageId,
       observationId: observationId,
@@ -745,12 +813,16 @@ WHERE id = ?
       );
 
       var trickleRecorded = false;
-      if (_mode == ForwardingMode.trickle) {
+      if (mode == ForwardingMode.trickle) {
         final effectiveObservationId = observationId?.trim().isNotEmpty == true
             ? observationId!.trim()
             : '$messageId|$observerKey|$nowMs';
-        trickleRecorded = await TrickleScheduler(database: txn, random: _random)
-            .recordConsistentObservation(
+        trickleRecorded =
+            await TrickleScheduler(
+              database: txn,
+              random: _random,
+              clock: _clock,
+            ).recordConsistentObservation(
               messageId: messageId,
               observationId: effectiveObservationId,
               observerKey: observerKey,
@@ -783,7 +855,7 @@ WHERE id = ?
 
   Future<TrickleState?> trickleStateFor(String messageId) async {
     final db = await _db;
-    return TrickleScheduler(database: db).stateFor(messageId);
+    return TrickleScheduler(database: db, clock: _clock).stateFor(messageId);
   }
 
   Future<List<TrickleState>> allTrickleStates() async {
@@ -800,6 +872,7 @@ WHERE id = ?
     final decision = await TrickleScheduler(
       database: db,
       random: _random,
+      clock: _clock,
     ).handleQueueEvent(messageId: item.messageId, nowMs: nowMs);
     if (!decision.shouldAdvertise) {
       await db.update(
@@ -817,7 +890,7 @@ WHERE id = ?
 
   Future<int> removeMessage(String messageId) async {
     final db = await _db;
-    await TrickleScheduler(database: db).deleteState(messageId);
+    await TrickleScheduler(database: db, clock: _clock).deleteState(messageId);
     return db.delete(
       'relay_queue',
       where: 'message_id = ?',
@@ -828,7 +901,10 @@ WHERE id = ?
   Future<int> removeItem(RelayQueueItem item) async {
     final db = await _db;
     if (item.isSos) {
-      await TrickleScheduler(database: db).deleteState(item.messageId);
+      await TrickleScheduler(
+        database: db,
+        clock: _clock,
+      ).deleteState(item.messageId);
     }
     return db.delete(
       'relay_queue',
@@ -953,15 +1029,15 @@ WHERE id = ?
 
   Future<void> _compactAckQueueInExecutor(
     DatabaseExecutor db, {
-    required int senderCrc,
     required String compactMessageId,
   }) async {
+    final prefix = '$compactMessageId-';
     await db.delete(
       'relay_queue',
       where:
           "packet_type = 'ack' AND message_id != ? AND "
           "(message_id = ? OR message_id LIKE ?)",
-      whereArgs: [compactMessageId, 'ack-$senderCrc', 'ack-$senderCrc-%'],
+      whereArgs: [compactMessageId, compactMessageId, '$prefix%'],
     );
   }
 
@@ -1001,17 +1077,22 @@ WHERE id = ?
   }) async {
     final rows = await db.query(
       'sos_messages',
-      columns: ['id', 'updated_at'],
+      columns: ['id', 'protocol_timestamp_ms', 'created_at'],
       where:
           'sender_crc = ? AND ack_received_at IS NULL '
-          'AND local_state NOT IN (?, ?)',
-      whereArgs: [senderCrc, 'acked', 'synced'],
+          'AND local_state NOT IN (?, ?) '
+          'AND protocol_timestamp_ms = ?',
+      whereArgs: [
+        senderCrc,
+        'acked',
+        'synced',
+        canonicalProtocolTimestamp(ackTimestampMs),
+      ],
     );
     final ackedIds = <String>[];
     for (final row in rows) {
       final id = row['id'] as String?;
-      final updatedAt = canonicalProtocolTimestamp(row['updated_at'] as int);
-      if (id == null || updatedAt > ackTimestampMs) continue;
+      if (id == null) continue;
       await db.update(
         'sos_messages',
         {

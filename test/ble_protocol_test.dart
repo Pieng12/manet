@@ -62,7 +62,7 @@ void main() {
     expect(packet!.senderCrc, 12345);
   });
 
-  test('origin SOS advertises hop 0 and first relay advertises hop 1', () {
+  test('origin SOS advertises hop 1 and first relay advertises hop 2', () {
     final updatedAt = reference.millisecondsSinceEpoch;
     final origin = SOSMessage(
       id: 'origin-1',
@@ -80,7 +80,7 @@ void main() {
     final incoming = BlePacket.unpack(originPayload, referenceTime: reference);
 
     expect(incoming, isNotNull);
-    expect(incoming!.hopCount, 0);
+    expect(incoming!.hopCount, 1);
 
     final relayed = BleRelayService.messageFromSosPacket(
       incoming,
@@ -92,9 +92,78 @@ void main() {
       referenceTime: reference,
     );
 
-    expect(relayed.hopCount, 1);
+    expect(relayed.hopCount, 2);
     expect(relayPacket, isNotNull);
-    expect(relayPacket!.hopCount, 1);
+    expect(relayPacket!.hopCount, 2);
+  });
+
+  test('signed 24-bit coordinate golden vectors match proposal', () {
+    SOSMessage message(double latitude, double longitude) => SOSMessage(
+      id: 'golden-$latitude-$longitude',
+      senderId: 'golden',
+      senderCrc: 0x01020304,
+      content: 'SOS',
+      latitude: latitude,
+      longitude: longitude,
+      createdAt: reference.millisecondsSinceEpoch,
+      updatedAt: reference.millisecondsSinceEpoch,
+    );
+
+    final negative = BlePacket.packSos(message(-6.2, 106.8));
+    expect(negative.sublist(0, 9), [
+      0x52,
+      0x4D,
+      0x01,
+      0x02,
+      0x03,
+      0x04,
+      0x09,
+      0xE3,
+      0x40,
+    ]);
+    expect(negative.sublist(9, 15), [0xFF, 0x0D, 0xD0, 0x10, 0x4B, 0xE0]);
+
+    final positive = BlePacket.packSos(message(3.5952, 98.6722));
+    expect(positive.sublist(9, 15), [0x00, 0x8C, 0x70, 0x0F, 0x0E, 0x62]);
+
+    final zero = BlePacket.packSos(message(0, 0));
+    expect(zero.sublist(9, 15), List<int>.filled(6, 0));
+
+    final bounds = BlePacket.packSos(message(-90, 180));
+    expect(bounds.sublist(9, 15), [0xF2, 0x44, 0x60, 0x1B, 0x77, 0x40]);
+
+    final ack = BlePacket.packAck(
+      senderCrc: 0x01020304,
+      ackTimestampMs: reference.millisecondsSinceEpoch,
+    );
+    expect(ack.sublist(9, 15), List<int>.filled(6, 0));
+  });
+
+  test('message key remains immutable across status and ACK', () {
+    final message = SOSMessage(
+      id: 'immutable-key',
+      senderId: 'device-a',
+      senderCrc: 42,
+      content: 'SOS',
+      latitude: 0,
+      longitude: 0,
+      createdAt: reference.millisecondsSinceEpoch,
+      updatedAt: reference.millisecondsSinceEpoch,
+    );
+    final active = BlePacket.unpack(BlePacket.packSos(message))!;
+    message.status = SOSMessageStatus.cancelled;
+    message.updatedAt += 5000;
+    final cancelled = BlePacket.unpack(BlePacket.packSos(message))!;
+    final ack = BlePacket.unpack(
+      BlePacket.packAck(
+        senderCrc: 42,
+        ackTimestampMs: message.protocolTimestampMs,
+      ),
+    )!;
+
+    expect(active.messageKey, cancelled.messageKey);
+    expect(active.messageKey, ack.messageKey);
+    expect(cancelled.timestampMs, active.timestampMs);
   });
 
   test('SOS at hop 4 is relayed as hop 5', () {
@@ -483,4 +552,74 @@ CREATE TABLE sos_messages (
     );
     expect(experimentTables, hasLength(3));
   });
+
+  test(
+    'schema 13 to 14 migration preserves SOS and legacy ACK tombstone',
+    () async {
+      sqfliteFfiInit();
+      final db = await databaseFactoryFfi.openDatabase(inMemoryDatabasePath);
+      addTearDown(db.close);
+
+      for (final sql in [
+        createSosMessagesTableSql,
+        createRelayQueueTableSql,
+        createTrickleStatesTableSql,
+        createTrickleObservationsTableSql,
+        createProcessedBleObservationsTableSql,
+        createExperimentSessionsTableSql,
+        createExperimentTrialsTableSql,
+        createExperimentEventsTableSql,
+      ]) {
+        await db.execute(sql);
+      }
+      await db.execute('''
+CREATE TABLE ack_tombstones (
+  sender_crc INTEGER PRIMARY KEY,
+  ack_timestamp_ms INTEGER NOT NULL,
+  status INTEGER NOT NULL,
+  payload_base64 TEXT NULL,
+  updated_at INTEGER NOT NULL
+)
+''');
+      final timestamp = reference.millisecondsSinceEpoch;
+      await db.insert('sos_messages', {
+        'id': 'preserved-sos',
+        'sender_id': 'source',
+        'content': 'SOS',
+        'latitude': 3.5,
+        'longitude': 98.6,
+        'status': SOSMessageStatus.active.index,
+        'created_at': timestamp,
+        'updated_at': timestamp,
+        'protocol_timestamp_ms': timestamp,
+        'state_updated_at': timestamp,
+      });
+      await db.insert('ack_tombstones', {
+        'sender_crc': 123,
+        'ack_timestamp_ms': timestamp,
+        'status': SOSMessageStatus.resolved.index,
+        'payload_base64': 'payload',
+        'updated_at': timestamp,
+      });
+
+      await DatabaseHelper.migrateDatabase(db, 13, 14);
+
+      expect(await db.query('sos_messages'), hasLength(1));
+      final tombstones = await db.query('ack_tombstones');
+      expect(tombstones, hasLength(1));
+      expect(tombstones.single['sender_crc'], 123);
+      expect(tombstones.single['ack_timestamp_ms'], timestamp);
+      final columns = await db.rawQuery('PRAGMA table_info(ack_tombstones)');
+      expect(
+        columns.where((column) => column['name'] == 'sender_crc').single['pk'],
+        1,
+      );
+      expect(
+        columns
+            .where((column) => column['name'] == 'ack_timestamp_ms')
+            .single['pk'],
+        2,
+      );
+    },
+  );
 }

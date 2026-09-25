@@ -13,6 +13,7 @@ class TrickleState {
   final String phase;
   final String? lastResetReason;
   final int updatedAt;
+  final String? monotonicBootId;
 
   const TrickleState({
     required this.messageId,
@@ -24,6 +25,7 @@ class TrickleState {
     required this.phase,
     this.lastResetReason,
     required this.updatedAt,
+    this.monotonicBootId,
   });
 
   Map<String, Object?> toDbMap() {
@@ -37,6 +39,7 @@ class TrickleState {
       'phase': phase,
       'last_reset_reason': lastResetReason,
       'updated_at': updatedAt,
+      'monotonic_boot_id': monotonicBootId,
     };
   }
 
@@ -51,6 +54,7 @@ class TrickleState {
       phase: map['phase'] as String? ?? TricklePhase.waitingTransmit,
       lastResetReason: map['last_reset_reason'] as String?,
       updatedAt: map['updated_at'] as int? ?? 0,
+      monotonicBootId: map['monotonic_boot_id'] as String?,
     );
   }
 
@@ -63,6 +67,7 @@ class TrickleState {
     String? phase,
     String? lastResetReason,
     int? updatedAt,
+    String? monotonicBootId,
   }) {
     return TrickleState(
       messageId: messageId,
@@ -74,6 +79,7 @@ class TrickleState {
       phase: phase ?? this.phase,
       lastResetReason: lastResetReason ?? this.lastResetReason,
       updatedAt: updatedAt ?? this.updatedAt,
+      monotonicBootId: monotonicBootId ?? this.monotonicBootId,
     );
   }
 }
