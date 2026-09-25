@@ -32,6 +32,15 @@ migrate_working_dir/
 .pub/
 /build/
 /coverage/
+/android/build/
+
+# Local diagnostics and command captures
+/*_log.txt
+/*_dump.txt
+/package_dump.txt
+/jobs.txt
+/perm_*.txt
+/nulecho
 
 # Symbolication related
 app.*.symbols
