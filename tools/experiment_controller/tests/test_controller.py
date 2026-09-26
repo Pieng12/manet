@@ -5,7 +5,12 @@ import unittest
 from pathlib import Path
 
 from resqmesh_controller import PROTOCOL_EPOCH_ID, PROTOCOL_VERSION
-from resqmesh_controller.config import ConfigError, validate_config
+from resqmesh_controller.config import (
+    ConfigError,
+    research_fingerprint,
+    smoke_matches_config,
+    validate_config,
+)
 from resqmesh_controller.controller import (
     BatchIncompleteError,
     ExperimentController,
@@ -23,7 +28,9 @@ def physical_config() -> dict:
             encoding="utf-8"
         )
     )
-    value["observation_window_seconds"] = 0
+    value["android_build_id"] = "0123456789ab"
+    value["firmware_build_id"] = "0123456789ab"
+    value["observation_window_seconds"] = 1
     value["quiet_period_seconds"] = 0
     value["trial_order"] = "blocked"
     return value
@@ -70,6 +77,7 @@ class FakeNode(NodeTransport):
         self.active = False
         self.expected_hop = 0
         self.hop_out = 0
+        self.reported_build_id: str | None = None
 
     def command(self, name: str, arguments: dict) -> dict:
         self.commands.append((name, dict(arguments)))
@@ -101,8 +109,10 @@ class FakeNode(NodeTransport):
                 "payload_length": 17,
                 "manufacturer_id": 0xFFFF,
                 "protocol_version": PROTOCOL_VERSION,
-                "android_build_id": self.config["android_build_id"],
-                "firmware_build_id": self.config["firmware_build_id"],
+                "android_build_id": self.reported_build_id
+                or self.config["android_build_id"],
+                "firmware_build_id": self.reported_build_id
+                or self.config["firmware_build_id"],
                 "session_id": self.session_id or None,
                 "trial_id": self.trial_id or None,
                 "mode": self.mode or None,
@@ -165,6 +175,55 @@ def fake_nodes(config: dict, provider=None) -> list[FakeNode]:
 
 
 class ControllerTest(unittest.TestCase):
+    def test_placeholder_build_ids_are_rejected(self) -> None:
+        value = physical_config()
+        value["android_build_id"] = "unknown"
+        value["firmware_build_id"] = "esp32c3-dev"
+        with self.assertRaises(ConfigError) as raised:
+            validate_config(value)
+        self.assertIn("Git commit SHA", str(raised.exception))
+
+    def test_matching_commit_build_ids_are_accepted_and_mismatch_is_rejected(self) -> None:
+        value = physical_config()
+        validate_config(value)
+        value["firmware_build_id"] = "abcdef012345"
+        with self.assertRaises(ConfigError) as raised:
+            validate_config(value)
+        self.assertIn("same commit", str(raised.exception))
+
+    def test_readiness_rejects_device_with_different_build_id(self) -> None:
+        value = physical_config()
+        nodes = fake_nodes(value)
+        nodes[0].reported_build_id = "abcdef012345"
+        with tempfile.TemporaryDirectory() as temporary:
+            controller = ExperimentController(value, nodes, Path(temporary), sleep=lambda _: None)
+            with self.assertRaisesRegex(Exception, "build identity"):
+                controller.readiness()
+
+    def test_research_fingerprint_tracks_research_inputs_not_trial_target(self) -> None:
+        value = physical_config()
+        original = research_fingerprint(value)
+        target_changed = copy.deepcopy(value)
+        target_changed["valid_trials_per_condition"] = 99
+        target_changed["max_attempts_per_condition"] = 120
+        target_changed["trial_order"] = "randomized"
+        self.assertEqual(original, research_fingerprint(target_changed))
+
+        for mutation in ("build", "topology", "window"):
+            changed = copy.deepcopy(value)
+            if mutation == "build":
+                changed["android_build_id"] = "abcdef012345"
+                changed["firmware_build_id"] = "abcdef012345"
+            elif mutation == "topology":
+                changed["nodes"][1]["topology"]["H2"]["hop_out"] = 9
+            else:
+                changed["observation_window_seconds"] += 1
+            self.assertNotEqual(original, research_fingerprint(changed), mutation)
+
+        report = {"passed": True, "config_fingerprint": original}
+        self.assertTrue(smoke_matches_config(report, value))
+        self.assertFalse(smoke_matches_config(report, changed))
+
     def test_default_matrix_contains_90_trials(self) -> None:
         value = physical_config()
         self.assertEqual(90, len(build_plan(value)))
@@ -293,6 +352,18 @@ class ControllerTest(unittest.TestCase):
             self.assertTrue(report["passed"])
             self.assertEqual(6, len(report["conditions"]))
             self.assertTrue((Path(temporary) / "smoke_report.csv").exists())
+
+    def test_manifest_trial_record_contains_reconstruction_inputs(self) -> None:
+        value = physical_config()
+        with tempfile.TemporaryDirectory() as temporary:
+            controller = ExperimentController(value, fake_nodes(value), Path(temporary), sleep=lambda _: None)
+            result = controller.run_trial(build_plan(value)[0])
+            self.assertEqual(controller.manifest["session_id"], result["session_id"])
+            self.assertEqual("android-source", result["source_node_id"])
+            self.assertEqual(["esp-destination"], result["destination_node_ids"])
+            self.assertEqual(1000, result["observation_window_ms"])
+            self.assertEqual(value["clock_tolerance_ms"], result["clock_tolerance_ms"])
+            self.assertEqual("100:200", result["message_key"])
 
 
 if __name__ == "__main__":

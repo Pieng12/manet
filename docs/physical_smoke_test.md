@@ -32,7 +32,8 @@ bukan jarak. Seluruh ESP memakai firmware yang sama.
 
    ```powershell
    flutter pub get
-   flutter build apk --debug --dart-define=RESQMESH_BUILD_ID=local-research
+   $BuildId = (git rev-parse --short=12 HEAD).Trim()
+   flutter build apk --debug --dart-define=RESQMESH_BUILD_ID=$BuildId
    ```
 
 3. Instal APK.
@@ -67,6 +68,10 @@ bukan jarak. Seluruh ESP memakai firmware yang sama.
     ```powershell
     Copy-Item tools/experiment_controller/config.example.json experiment.local.json
     ```
+
+    Ganti kedua placeholder build ID dengan nilai `$BuildId` yang sama. Nilai
+    tersebut harus sama dengan `android_build_id` dan `firmware_build_id` pada
+    respons readiness.
 
 11. Jalankan discovery dan pastikan port Bluetooth serial tidak dipilih.
 

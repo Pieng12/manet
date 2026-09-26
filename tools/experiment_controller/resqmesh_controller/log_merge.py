@@ -27,23 +27,25 @@ def read_json_events(paths: Iterable[Path]) -> list[dict[str, Any]]:
 
 def event_identity(event: dict[str, Any]) -> tuple[Any, ...]:
     node = event.get("node_id", event.get("device_id"))
-    if event.get("event_key"):
-        return node, "event_key", event["event_key"]
-    if event.get("observation_id") and event.get("event_type") in {
-        "BLE_PACKET_RECEIVED",
-        "ACK_RECEIVED",
-    }:
-        return node, event["event_type"], event["observation_id"]
-    if event.get("burst_id") and event.get("event_type"):
-        return node, event["event_type"], event["burst_id"]
-    return (
-        node,
+    scope = (
+        event.get("session_id"),
         event.get("trial_id"),
+        node,
         event.get("event_type"),
-        event.get("message_key"),
-        event.get("timestamp_ms"),
-        event.get("monotonic_ms", event.get("elapsed_realtime_ms")),
     )
+    if event.get("event_key"):
+        return (*scope, "event_key", event["event_key"])
+    if event.get("observation_id"):
+        return (*scope, "observation_id", event["observation_id"])
+    if event.get("burst_id"):
+        return (*scope, "burst_id", event["burst_id"])
+    canonical_payload = json.dumps(
+        event,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return (*scope, "canonical_payload", canonical_payload)
 
 
 def deduplicate(events: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -92,6 +94,13 @@ def _timestamp(event: dict[str, Any]) -> int | None:
     return int(round(float(value) + float(offset)))
 
 
+def _hop(event: dict[str, Any]) -> int | None:
+    try:
+        return int(event.get("hop_in", event.get("hop_count", -1)))
+    except (TypeError, ValueError):
+        return None
+
+
 def summarize_trial(
     trial_id: str,
     events: list[dict[str, Any]],
@@ -99,30 +108,51 @@ def summarize_trial(
 ) -> dict[str, Any]:
     record = manifest_record or {}
     session_id = record.get("session_id")
-    events = [
+    events = deduplicate(
         event
         for event in events
         if event.get("trial_id") == trial_id
         and (session_id is None or event.get("session_id") == session_id)
-    ]
+    )
     evidence = record.get("evidence", {})
-    source_node = evidence.get("source_node_id", record.get("source_node_id"))
-    destinations = set(evidence.get("destination_node_ids", record.get("destination_node_ids", [])))
-    expected_hop = evidence.get("expected_hop_in", record.get("expected_hop_in"))
-    expected_message_key = evidence.get("message_key", record.get("message_key"))
-    result = record.get("result")
-    if result is None:
-        delivered = any(
-            event.get("event_type") == "DESTINATION_FIRST_VALID_RECEIVE"
-            and (not destinations or event.get("node_id", event.get("device_id")) in destinations)
-            and (expected_message_key is None or event.get("message_key") == expected_message_key)
-            and (
-                expected_hop is None
-                or int(event.get("hop_in", event.get("hop_count", -1)) or -1) == int(expected_hop)
-            )
-            for event in events
-        )
-        result = "SUCCESS" if delivered else "FAILED_DELIVERY"
+    source_node = record.get("source_node_id", evidence.get("source_node_id"))
+    destinations = set(record.get("destination_node_ids", evidence.get("destination_node_ids", [])))
+    expected_hop = record.get("expected_hop_in", evidence.get("expected_hop_in"))
+    expected_message_key = record.get("message_key", evidence.get("message_key"))
+    invalid_reasons = {str(item) for item in record.get("invalid_reasons", [])}
+    for key in (
+        "source_node_id",
+        "destination_node_ids",
+        "expected_hop_in",
+        "message_key",
+    ):
+        if key in record and key in evidence and record[key] != evidence[key]:
+            invalid_reasons.add("CONTROLLER_LOG_EVIDENCE_MISMATCH")
+
+    try:
+        observation_window_ms = int(record["observation_window_ms"])
+    except (KeyError, TypeError, ValueError):
+        observation_window_ms = 0
+    try:
+        clock_tolerance_ms = int(record["clock_tolerance_ms"])
+    except (KeyError, TypeError, ValueError):
+        clock_tolerance_ms = -1
+    if observation_window_ms <= 0:
+        invalid_reasons.add("OBSERVATION_WINDOW_INVALID")
+    if clock_tolerance_ms < 0:
+        invalid_reasons.add("CLOCK_TOLERANCE_INVALID")
+    if not source_node:
+        invalid_reasons.add("SOURCE_NODE_MISSING")
+    if not destinations:
+        invalid_reasons.add("DESTINATION_NODE_MISSING")
+    if not expected_message_key:
+        invalid_reasons.add("MESSAGE_KEY_MISSING")
+    try:
+        expected_hop_value = int(expected_hop)
+    except (TypeError, ValueError):
+        expected_hop_value = -1
+        invalid_reasons.add("EXPECTED_HOP_INVALID")
+
     accepted = sum(event.get("event_type") == "BLE_PACKET_ACCEPTED" for event in events)
     duplicates = sum(event.get("event_type") == "BLE_PACKET_DUPLICATE" for event in events)
     denominator = accepted + duplicates
@@ -133,42 +163,72 @@ def summarize_trial(
         and event.get("packet_type", "sos") == "sos"
         and event.get("burst_id") not in (None, "")
     }
-    sources: dict[str, int] = {}
-    latencies: list[int] = []
-    for event in events:
-        key = event.get("message_key")
-        timestamp = _timestamp(event)
-        if not key or timestamp is None:
-            continue
-        node_id = event.get("node_id", event.get("device_id"))
-        if (
-            event.get("event_type") == "SOURCE_FIRST_ADVERTISE_STARTED"
-            and (source_node is None or node_id == source_node)
-        ):
-            sources.setdefault(key, timestamp)
-        elif (
-            event.get("event_type") == "DESTINATION_FIRST_VALID_RECEIVE"
-            and (not destinations or node_id in destinations)
-            and (expected_hop is None or int(event.get("hop_in", -1) or -1) == int(expected_hop))
-        ):
-            if key in sources and timestamp >= sources[key]:
-                latency = timestamp - sources[key]
-                maximum = int(record.get("observation_window_ms", 0) or 0) + 5000
-                if maximum <= 5000 or latency <= maximum:
-                    latencies.append(latency)
-    invalid_reasons = record.get("invalid_reasons", [])
+    source_events = [
+        event
+        for event in events
+        if event.get("event_type") == "SOURCE_FIRST_ADVERTISE_STARTED"
+        and event.get("node_id", event.get("device_id")) == source_node
+        and event.get("message_key") == expected_message_key
+    ]
+    destination_events = [
+        event
+        for event in events
+        if event.get("event_type") == "DESTINATION_FIRST_VALID_RECEIVE"
+        and event.get("node_id", event.get("device_id")) in destinations
+        and event.get("message_key") == expected_message_key
+        and _hop(event) == expected_hop_value
+    ]
+    if not source_events:
+        invalid_reasons.add("SOURCE_EVENT_MISMATCH")
+    if any(event.get("clock_sync_valid") is not True for event in source_events):
+        invalid_reasons.add("CLOCK_SYNC_INVALID")
+    if any(event.get("clock_sync_valid") is not True for event in destination_events):
+        invalid_reasons.add("CLOCK_SYNC_INVALID")
+
+    source_times = [timestamp for event in source_events if (timestamp := _timestamp(event)) is not None]
+    destination_times = [
+        timestamp
+        for event in destination_events
+        if (timestamp := _timestamp(event)) is not None
+    ]
+    latency_ms: int | None = None
+    if source_times and destination_times:
+        latency_ms = min(destination_times) - min(source_times)
+        if latency_ms < 0:
+            invalid_reasons.add("E2E_LATENCY_NEGATIVE")
+            latency_ms = None
+        elif latency_ms > observation_window_ms + clock_tolerance_ms:
+            invalid_reasons.add("E2E_LATENCY_OUT_OF_RANGE")
+            latency_ms = None
+
+    controller_result = record.get("result")
+    if controller_result == "SUCCESS" and not destination_events:
+        invalid_reasons.add("DESTINATION_EVENT_MISMATCH")
+    if controller_result == "SUCCESS" and latency_ms is None:
+        invalid_reasons.add("CONTROLLER_LOG_EVIDENCE_MISMATCH")
+    if controller_result == "FAILED_DELIVERY" and destination_events:
+        invalid_reasons.add("CONTROLLER_LOG_EVIDENCE_MISMATCH")
+    if "e2e_latency_ms" in evidence and evidence.get("e2e_latency_ms") != latency_ms:
+        invalid_reasons.add("CONTROLLER_LOG_EVIDENCE_MISMATCH")
+
+    if invalid_reasons:
+        result = "INVALID"
+    elif controller_result in {"SUCCESS", "FAILED_DELIVERY"}:
+        result = controller_result
+    else:
+        result = "SUCCESS" if destination_events else "FAILED_DELIVERY"
     return {
         "trial_id": trial_id,
         "mode": record.get("mode", next((event.get("mode") for event in events if event.get("mode")), None)),
         "hypothesis": record.get("hypothesis", next((event.get("hypothesis") for event in events if event.get("hypothesis")), None)),
         "result": result,
         "valid": result in {"SUCCESS", "FAILED_DELIVERY"},
-        "invalid_reasons": ";".join(str(item) for item in invalid_reasons),
+        "invalid_reasons": ";".join(sorted(invalid_reasons)),
         "accepted": accepted,
         "duplicates": duplicates,
         "ldr": duplicates / denominator if denominator else None,
         "transmission_bursts": len(burst_starts),
-        "e2e_latency_ms": min(latencies) if latencies else None,
+        "e2e_latency_ms": latency_ms,
     }
 
 

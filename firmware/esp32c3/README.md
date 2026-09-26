@@ -59,10 +59,11 @@ keluar sebagai JSON dengan `kind=event`; respons command memakai
 ignored, interval/suppression Trickle, burst requested/started/ended/failed,
 relay started, dan destination first receive.
 
-`firmware_build_id` pada readiness berasal dari binary dan tidak berubah saat
-`configure_session`. Field `build_id` command hanya menjadi `session_label`;
-Android dan ESP32 tidak perlu memiliki binary build ID yang sama, tetapi versi
-protokol, payload, manufacturer ID, epoch, mode, dan topology wajib cocok.
+`firmware_build_id` pada readiness berasal dari SHA commit pendek yang
+disuntikkan otomatis oleh `build_id.py` saat PlatformIO membangun binary dan
+tidak berubah saat `configure_session`. Field `build_id` command hanya menjadi
+`session_label`. Untuk eksperimen penelitian, APK dan firmware harus dibangun
+dari commit yang sama dan readiness harus melaporkan build ID yang sama persis.
 
 NVS menyimpan konfigurasi dan packet aktif. Restart memulihkan packet dan
 mereset interval Trickle ke `Imin`, sesuai perubahan domain monotonic.

@@ -348,6 +348,8 @@ class ExperimentController:
             if self._node_topology(node, spec.hypothesis)["role"] == "DESTINATION"
         }
         expected_hop = int(spec.hypothesis[1:])
+        if message_key in (None, ""):
+            invalid.add("MESSAGE_KEY_MISSING")
         source_starts = [
             event
             for event in events
@@ -383,7 +385,11 @@ class ExperimentController:
             ]
             if source_times and destination_times:
                 latency_ms = min(destination_times) - min(source_times)
-                maximum = int(float(self.config["observation_window_seconds"]) * 1000) + 5000
+                observation_window_ms = int(
+                    float(self.config["observation_window_seconds"]) * 1000
+                )
+                clock_tolerance_ms = int(self.config["clock_tolerance_ms"])
+                maximum = observation_window_ms + clock_tolerance_ms
                 if latency_ms < 0 or latency_ms > maximum:
                     invalid.add("E2E_LATENCY_OUT_OF_RANGE")
                     latency_ms = None
@@ -410,12 +416,32 @@ class ExperimentController:
             )
             self._save_manifest()
             return previous
+        source_ids = [
+            node.node_id
+            for node in self.nodes
+            if self._node_topology(node, spec.hypothesis)["role"] == "SOURCE"
+            and self._node_topology(node, spec.hypothesis).get("active", True)
+        ]
+        destination_ids = [
+            node.node_id
+            for node in self.nodes
+            if self._node_topology(node, spec.hypothesis)["role"] == "DESTINATION"
+            and self._node_topology(node, spec.hypothesis).get("active", True)
+        ]
         record: dict[str, Any] = {
             "trial_id": spec.trial_id,
+            "session_id": self.manifest["session_id"],
             "terminal": False,
             "mode": spec.mode,
             "hypothesis": spec.hypothesis,
             "attempt": spec.number,
+            "source_node_id": source_ids[0],
+            "destination_node_ids": sorted(destination_ids),
+            "expected_hop_in": int(spec.hypothesis[1:]),
+            "observation_window_ms": int(
+                float(self.config["observation_window_seconds"]) * 1000
+            ),
+            "clock_tolerance_ms": int(self.config["clock_tolerance_ms"]),
             "started_at_ms": time.time_ns() // 1_000_000,
             "config_fingerprint": self.config_fingerprint,
         }
@@ -439,12 +465,7 @@ class ExperimentController:
                 if result.get("ok") is not True:
                     raise DeviceError(f"start failed: {node.node_id}: {result}")
             self.readiness(spec, require_active_trial=True)
-            sources = [
-                node
-                for node in self.nodes
-                if self._node_topology(node, spec.hypothesis)["role"] == "SOURCE"
-                and self._node_topology(node, spec.hypothesis).get("active", True)
-            ]
+            sources = [node for node in self.nodes if node.node_id == source_ids[0]]
             trigger = sources[0].command(
                 "trigger_sos",
                 {
@@ -457,6 +478,8 @@ class ExperimentController:
             )
             if trigger.get("ok") is not True:
                 raise DeviceError(f"trigger failed: {trigger}")
+            record["message_key"] = trigger.get("message_key")
+            self._save_manifest()
             self.sleep(float(self.config["observation_window_seconds"]))
             for node in self.nodes:
                 if node.transport == "adb":

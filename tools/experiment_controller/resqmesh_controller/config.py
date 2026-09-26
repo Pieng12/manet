@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from typing import Any
 
 
@@ -16,6 +17,16 @@ PHYSICAL_NODE_IDS = {
     "esp-r2b",
     "esp-destination",
 }
+BUILD_ID_PATTERN = re.compile(r"^[0-9a-fA-F]{12,40}$")
+PLACEHOLDER_BUILD_IDS = {
+    "",
+    "unknown",
+    "dev",
+    "development",
+    "esp32c3-dev",
+    "placeholder",
+    "<git_sha_12>",
+}
 
 
 class ConfigError(ValueError):
@@ -24,6 +35,14 @@ class ConfigError(ValueError):
 
 def _active(topology: dict[str, Any]) -> bool:
     return topology.get("active", topology.get("role") != "OBSERVER") is True
+
+
+def _valid_research_build_id(value: Any) -> bool:
+    build_id = str(value or "").strip()
+    return (
+        build_id.lower() not in PLACEHOLDER_BUILD_IDS
+        and BUILD_ID_PATTERN.fullmatch(build_id) is not None
+    )
 
 
 def validate_config(config: dict[str, Any]) -> None:
@@ -141,6 +160,32 @@ def validate_config(config: dict[str, Any]) -> None:
     if config.get("gateway_enabled") is True or config.get("ack_enabled") is True:
         errors.append("gateway and ACK must be disabled for the main experiment")
 
+    android_build_id = config.get("android_build_id")
+    firmware_build_id = config.get("firmware_build_id")
+    if not _valid_research_build_id(android_build_id):
+        errors.append("android_build_id must be a Git commit SHA of at least 12 hex characters")
+    if not _valid_research_build_id(firmware_build_id):
+        errors.append("firmware_build_id must be a Git commit SHA of at least 12 hex characters")
+    if (
+        _valid_research_build_id(android_build_id)
+        and _valid_research_build_id(firmware_build_id)
+        and android_build_id != firmware_build_id
+    ):
+        errors.append("android_build_id and firmware_build_id must identify the same commit")
+
+    try:
+        observation_window = float(config.get("observation_window_seconds", 0))
+    except (TypeError, ValueError):
+        observation_window = 0
+    if observation_window <= 0:
+        errors.append("observation_window_seconds must be positive")
+    try:
+        clock_tolerance = int(config.get("clock_tolerance_ms", -1))
+    except (TypeError, ValueError):
+        clock_tolerance = -1
+    if clock_tolerance < 0:
+        errors.append("clock_tolerance_ms must be zero or positive")
+
     if errors:
         raise ConfigError("; ".join(errors))
 
@@ -153,6 +198,21 @@ def research_fingerprint(config: dict[str, Any]) -> str:
         "modes": config.get("modes", list(MODES)),
         "hypotheses": config.get("hypotheses", list(HYPOTHESES)),
         "nodes": config.get("nodes", []),
+        "observation_window_seconds": config.get("observation_window_seconds"),
+        "quiet_period_seconds": config.get("quiet_period_seconds"),
+        "clock_tolerance_ms": config.get("clock_tolerance_ms"),
+        "gateway_enabled": config.get("gateway_enabled", False),
+        "ack_enabled": config.get("ack_enabled", False),
+        "latitude": config.get("latitude"),
+        "longitude": config.get("longitude"),
+        "rx_burst_gap_ms": config.get("rx_burst_gap_ms"),
     }
     encoded = json.dumps(relevant, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()
+
+
+def smoke_matches_config(smoke_report: dict[str, Any], config: dict[str, Any]) -> bool:
+    return (
+        smoke_report.get("passed") is True
+        and smoke_report.get("config_fingerprint") == research_fingerprint(config)
+    )

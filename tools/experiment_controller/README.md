@@ -10,10 +10,16 @@ dikirim saat `configure_session`.
 flutter doctor -v
 py -m pip install -r tools/experiment_controller/requirements.txt
 flutter pub get
-flutter build apk --debug --dart-define=RESQMESH_BUILD_ID=local-research
+$BuildId = (git rev-parse --short=12 HEAD).Trim()
+flutter build apk --debug --dart-define=RESQMESH_BUILD_ID=$BuildId
 adb install -r build/app/outputs/flutter-apk/app-debug.apk
 Copy-Item tools/experiment_controller/config.example.json experiment.local.json
 ```
+
+Isi `android_build_id` dan `firmware_build_id` pada `experiment.local.json`
+dengan nilai `$BuildId` yang sama. Placeholder, nilai generik, SHA berbeda,
+atau SHA kurang dari 12 karakter ditolak. PlatformIO menyuntikkan SHA pendek
+dari commit aktif ke firmware secara otomatis saat build.
 
 Aktifkan Bluetooth dan izin scan/advertise pada Android. Flash firmware yang
 sama ke R1A, R1B, R2A, R2B, dan Destination. Native USB ESP32-C3 memakai

@@ -275,6 +275,8 @@ flutter build apk --release --dart-define=RESQMESH_MODE=offline --dart-define=RE
 Firmware dan controller:
 
 ```powershell
+$BuildId = (git rev-parse --short=12 HEAD).Trim()
+flutter build apk --debug --dart-define=RESQMESH_BUILD_ID=$BuildId
 cd firmware/esp32c3
 py -m platformio test -e native
 py -m platformio run -e esp32c3
@@ -282,6 +284,11 @@ cd ../..
 py -m pip install -r tools/experiment_controller/requirements.txt
 py tools/experiment_controller/run.py readiness --config experiment.local.json
 ```
+
+Build penelitian wajib memakai `$BuildId` yang sama pada
+`android_build_id` dan `firmware_build_id` di `experiment.local.json`.
+PlatformIO menyuntikkan SHA tersebut ke firmware secara otomatis; placeholder
+atau build ID berbeda ditolak sebelum trial.
 
 Lihat [firmware ESP32-C3](firmware/esp32c3/README.md),
 [controller eksperimen](tools/experiment_controller/README.md), dan

@@ -9,7 +9,7 @@
 #include "Protocol.h"
 
 #ifndef RESQMESH_FIRMWARE_BUILD_ID
-#define RESQMESH_FIRMWARE_BUILD_ID "esp32c3-dev"
+#error "RESQMESH_FIRMWARE_BUILD_ID must be injected by the PlatformIO build"
 #endif
 
 using namespace resqmesh;
@@ -107,7 +107,8 @@ uint64_t wallTimeMs() {
 
 void emit(const char* eventType, const Packet* packet = nullptr,
           const char* reason = nullptr, int rssi = 0,
-          const String& observationId = String()) {
+          const String& observationId = String(),
+          const String& burstId = String()) {
   JsonDocument document;
   document["kind"] = "event";
   document["event_type"] = eventType;
@@ -122,7 +123,7 @@ void emit(const char* eventType, const Packet* packet = nullptr,
   if (wallClockValid) document["clock_offset_ms"] = 0;
   if (reason != nullptr) document["reason"] = reason;
   if (!observationId.isEmpty()) document["observation_id"] = observationId;
-  if (!scheduler.burstId.isEmpty()) document["burst_id"] = scheduler.burstId;
+  if (!burstId.isEmpty()) document["burst_id"] = burstId;
   if (rssi != 0) document["rssi"] = rssi;
   if (packet != nullptr) {
     document["sender_crc"] = packet->senderCrc;
@@ -319,14 +320,17 @@ class ScanCallbacks : public NimBLEAdvertisedDeviceCallbacks {
 
 void startBurst() {
   if (!scheduler.hasPacket || advertising == nullptr) return;
-  std::array<uint8_t, kPayloadLength> payload{};
-  if (!encode(scheduler.packet, payload)) {
-    emit("ADVERTISE_BURST_FAILED", &scheduler.packet, "ENCODE_FAILED");
-    return;
-  }
   scheduler.burstId = config.nodeId + "-" + String(millis()) + "-" +
                       String(++burstSequence);
-  emit("ADVERTISE_BURST_REQUESTED", &scheduler.packet);
+  std::array<uint8_t, kPayloadLength> payload{};
+  if (!encode(scheduler.packet, payload)) {
+    emit("ADVERTISE_BURST_FAILED", &scheduler.packet, "ENCODE_FAILED", 0,
+         String(), scheduler.burstId);
+    scheduler.burstId = "";
+    return;
+  }
+  emit("ADVERTISE_BURST_REQUESTED", &scheduler.packet, nullptr, 0, String(),
+       scheduler.burstId);
 
   std::string manufacturer;
   manufacturer.reserve(kPayloadLength + 2);
@@ -341,24 +345,29 @@ void startBurst() {
   advertising->setAdvertisementData(data);
   advertising->setAdvertisementType(BLE_HCI_ADV_TYPE_ADV_NONCONN_IND);
   if (!advertising->start()) {
-    emit("ADVERTISE_BURST_FAILED", &scheduler.packet, "NATIVE_START_FAILED");
+    emit("ADVERTISE_BURST_FAILED", &scheduler.packet, "NATIVE_START_FAILED",
+         0, String(), scheduler.burstId);
     scheduler.burstId = "";
     return;
   }
   scheduler.advertising = true;
   scheduler.burstEndsAt = millis() + kBurstMs;
-  emit("ADVERTISE_BURST_STARTED", &scheduler.packet);
+  emit("ADVERTISE_BURST_STARTED", &scheduler.packet, nullptr, 0, String(),
+       scheduler.burstId);
   if (!scheduler.firstAdvertiseStarted && config.role == Role::Source) {
-    emit("SOURCE_FIRST_ADVERTISE_STARTED", &scheduler.packet);
+    emit("SOURCE_FIRST_ADVERTISE_STARTED", &scheduler.packet, nullptr, 0,
+         String(), scheduler.burstId);
   }
   scheduler.firstAdvertiseStarted = true;
-  emit("BLE_RELAY_STARTED", &scheduler.packet);
+  emit("BLE_RELAY_STARTED", &scheduler.packet, nullptr, 0, String(),
+       scheduler.burstId);
 }
 
 void finishBurst() {
   advertising->stop();
   scheduler.advertising = false;
-  emit("ADVERTISE_BURST_ENDED", &scheduler.packet);
+  emit("ADVERTISE_BURST_ENDED", &scheduler.packet, nullptr, 0, String(),
+       scheduler.burstId);
   const uint32_t now = millis();
   if (config.mode == Mode::Basic) {
     scheduler.transmitAt = now + kBasicIntervalMs + random(300, 1501);

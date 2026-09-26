@@ -6,7 +6,7 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from .config import ConfigError, research_fingerprint, validate_config
+from .config import ConfigError, smoke_matches_config, validate_config
 from .controller import BatchIncompleteError, ExperimentController
 from .devices import (
     AdbNode,
@@ -107,7 +107,7 @@ def main() -> int:
             print(json.dumps({"ok": False, "error": "smoke_report.json is required before batch"}, indent=2))
             return 3
         smoke = json.loads(smoke_path.read_text(encoding="utf-8"))
-        if smoke.get("passed") is not True or smoke.get("config_fingerprint") != research_fingerprint(config):
+        if not smoke_matches_config(smoke, config):
             print(json.dumps({"ok": False, "error": "smoke report failed or does not match build/config/topology"}, indent=2))
             return 3
     try:
