@@ -8,6 +8,10 @@
 
 #include "Protocol.h"
 
+#ifndef RESQMESH_FIRMWARE_BUILD_ID
+#define RESQMESH_FIRMWARE_BUILD_ID "esp32c3-dev"
+#endif
+
 using namespace resqmesh;
 
 namespace {
@@ -24,7 +28,7 @@ enum class Mode { Basic, Trickle };
 
 struct NodeConfig {
   String nodeId = "esp32-unconfigured";
-  String buildId = "esp32c3-dev";
+  String sessionLabel;
   String sessionId;
   String trialId;
   String hypothesis;
@@ -32,6 +36,7 @@ struct NodeConfig {
   Mode mode = Mode::Trickle;
   uint8_t nodeLayer = 0;
   uint8_t expectedHopIn = 0;
+  uint8_t hopOut = 0;
   bool protocolActive = false;
 };
 
@@ -160,7 +165,7 @@ Mode parseMode(const String& value) {
 
 void persistConfig() {
   preferences.putString("node", config.nodeId);
-  preferences.putString("build", config.buildId);
+  preferences.putString("label", config.sessionLabel);
   preferences.putString("session", config.sessionId);
   preferences.putString("trial", config.trialId);
   preferences.putString("hyp", config.hypothesis);
@@ -168,6 +173,7 @@ void persistConfig() {
   preferences.putString("mode", modeName(config.mode));
   preferences.putUChar("layer", config.nodeLayer);
   preferences.putUChar("hopin", config.expectedHopIn);
+  preferences.putUChar("hopout", config.hopOut);
   preferences.putBool("active", config.protocolActive);
 }
 
@@ -214,7 +220,9 @@ void scheduleNewState(const char* reason) {
 void storeForRelay(const Packet& incoming, const char* reason) {
   scheduler.packet = incoming;
   if (config.role == Role::Relay) {
-    scheduler.packet.hop = saturatedRelayHop(incoming.hop);
+    scheduler.packet.hop =
+        config.hopOut > 0 ? min(config.hopOut, kMaxHop)
+                          : saturatedRelayHop(incoming.hop);
   }
   scheduler.hasPacket = true;
   persistPacket();
@@ -231,7 +239,9 @@ void storeForRelay(const Packet& incoming, const char* reason) {
 
 void recordConsistent(const Packet& incoming, const String& observationId) {
   emit("BLE_PACKET_DUPLICATE", &incoming, "CONSISTENT", 0, observationId);
-  if (config.mode == Mode::Trickle) {
+  if (shouldCountTrickleConsistency(
+          config.mode == Mode::Trickle, config.role == Role::Relay, true, true,
+          incoming.hop, config.expectedHopIn)) {
     scheduler.consistencyCount++;
     emit("TRICKLE_CONSISTENT_HEARD", &incoming);
   }
@@ -271,16 +281,21 @@ void processPacket(const Packet& incoming, int rssi,
     emit("TOPOLOGY_IGNORED", &incoming, "UNEXPECTED_HOP", rssi, observation);
     return;
   }
-  if (sameState) {
-    recordConsistent(incoming, observation);
-    return;
-  }
   if (parallel) {
+    if (sameState) {
+      recordConsistent(incoming, observation);
+      return;
+    }
     if (config.mode == Mode::Trickle) {
       scheduler.intervalMs = kIminMs;
       chooseTrickleTransmit(now, "PARALLEL_RELAY_INCONSISTENT");
       emit("TRICKLE_INCONSISTENT_HEARD", &incoming);
     }
+    return;
+  }
+  if (sameState) {
+    emit("BLE_PACKET_DUPLICATE", &incoming, "UPSTREAM_REPEAT", 0,
+         observation);
     return;
   }
   storeForRelay(incoming, sameMessage ? "NEW_STATE" : "NEW_MESSAGE");
@@ -388,12 +403,23 @@ void emitReadiness(const String& commandId) {
   document["command_id"] = commandId;
   document["ok"] = true;
   document["node_id"] = config.nodeId;
-  document["build_id"] = config.buildId;
+  document["build_id"] = RESQMESH_FIRMWARE_BUILD_ID;
+  document["firmware_build_id"] = RESQMESH_FIRMWARE_BUILD_ID;
+  document["session_label"] = config.sessionLabel;
   document["session_id"] = config.sessionId;
   document["trial_id"] = config.trialId;
   document["role"] = roleName(config.role);
   document["mode"] = modeName(config.mode);
   document["protocol_active"] = config.protocolActive;
+  document["expected_hop_in"] = config.expectedHopIn;
+  document["hop_out"] = config.hopOut;
+  document["protocol_version"] = kProtocolVersion;
+  document["bluetooth"] = true;
+  document["scanner"] = true;
+  document["advertising"] = scheduler.advertising;
+  document["packet_pending"] = scheduler.hasPacket;
+  document["queue_size"] = scheduler.hasPacket ? 1 : 0;
+  document["quiet_period_complete"] = due(millis(), quietUntil);
   document["clock_valid"] = wallClockValid;
   document["epoch_id"] = kEpochId;
   document["epoch_start_seconds"] = kEpochSeconds;
@@ -435,18 +461,36 @@ void handleCommand(const String& line) {
   if (command == "configure_session") {
     const String epochId = document["protocol_epoch_id"] | "";
     const uint32_t epochSeconds = document["protocol_epoch_seconds"] | 0;
+    const String protocolVersion = document["protocol_version"] | "";
     if (epochId != kEpochId || epochSeconds != kEpochSeconds) {
       respond(command, commandId, false, "PROTOCOL_EPOCH_MISMATCH");
       return;
     }
+    if (protocolVersion != kProtocolVersion) {
+      respond(command, commandId, false, "PROTOCOL_VERSION_MISMATCH");
+      return;
+    }
+    const String requestedRole = document["role"] | "";
+    const String requestedMode = document["mode"] | "";
+    if (requestedRole != "SOURCE" && requestedRole != "RELAY" &&
+        requestedRole != "DESTINATION" && requestedRole != "OBSERVER") {
+      respond(command, commandId, false, "INVALID_ROLE");
+      return;
+    }
+    if (requestedMode != "trickle" && requestedMode != "basic" &&
+        requestedMode != "basic_flooding") {
+      respond(command, commandId, false, "INVALID_MODE");
+      return;
+    }
     config.nodeId = String(document["node_id"] | "esp32-unconfigured");
-    config.buildId = String(document["build_id"] | "unknown");
+    config.sessionLabel = String(document["build_id"] | "");
     config.sessionId = String(document["session_id"] | "");
     config.hypothesis = String(document["hypothesis"] | "");
-    config.role = parseRole(String(document["role"] | "OBSERVER"));
-    config.mode = parseMode(String(document["mode"] | "trickle"));
+    config.role = parseRole(requestedRole);
+    config.mode = parseMode(requestedMode);
     config.nodeLayer = document["node_layer"] | 0;
     config.expectedHopIn = document["expected_hop_in"] | 0;
+    config.hopOut = document["hop_out"] | 0;
     config.protocolActive = document["protocol_active"] | true;
     persistConfig();
     respond(command, commandId, true);
@@ -495,9 +539,9 @@ void handleCommand(const String& line) {
   if (command == "reset_trial") {
     clearProtocolState();
     quietUntil = millis() + kQuietPeriodMs;
+    emit("TRIAL_RESET");
     config.trialId = "";
     persistConfig();
-    emit("TRIAL_RESET");
     respond(command, commandId, true);
     return;
   }
@@ -506,7 +550,7 @@ void handleCommand(const String& line) {
 
 void loadPersistentState() {
   config.nodeId = preferences.getString("node", config.nodeId);
-  config.buildId = preferences.getString("build", config.buildId);
+  config.sessionLabel = preferences.getString("label", "");
   config.sessionId = preferences.getString("session", "");
   config.trialId = preferences.getString("trial", "");
   config.hypothesis = preferences.getString("hyp", "");
@@ -514,6 +558,7 @@ void loadPersistentState() {
   config.mode = parseMode(preferences.getString("mode", "trickle"));
   config.nodeLayer = preferences.getUChar("layer", 0);
   config.expectedHopIn = preferences.getUChar("hopin", 0);
+  config.hopOut = preferences.getUChar("hopout", 0);
   config.protocolActive = preferences.getBool("active", false);
   if (preferences.getBytesLength("packet") == kPayloadLength) {
     std::array<uint8_t, kPayloadLength> bytes{};

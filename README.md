@@ -116,6 +116,10 @@ sama. Observasi ini menambah logical duplicate dan `c` Trickle tanpa mengganti
 hop/state lokal, membuat queue baru, atau meneruskan jalur baru. Paket layer
 lain tetap `TOPOLOGY_IGNORED`. Pada Basic, logical duplicate tetap dihitung
 untuk LDR tetapi tidak mengaktifkan suppression.
+Pengulangan upstream pada hop `N` tetap dicatat sebagai logical duplicate,
+tetapi tidak menaikkan consistency counter. Karena itu seluruh relay pada satu
+layer tidak dapat tersuppress hanya karena burst source berulang sebelum salah
+satu relay meneruskan packet.
 
 ```bash
 flutter run --dart-define=RESQMESH_FORWARDING_MODE=trickle
@@ -284,6 +288,14 @@ Lihat [firmware ESP32-C3](firmware/esp32c3/README.md),
 [checklist smoke test fisik](docs/physical_smoke_test.md). Jangan menjalankan
 matrix 90 trial sebelum smoke H1/H2/H3 untuk kedua mode valid.
 
+Testbed utama memakai satu `android-source`, relay `esp-r1a`, `esp-r1b`,
+`esp-r2a`, `esp-r2b`, dan `esp-destination`. Salin template menjadi
+`experiment.local.json`; template memakai placeholder COM dan file lokal itu
+diabaikan Git. Controller menargetkan 15 trial valid per kondisi, menyimpan
+attempt invalid, dan membuat replacement sampai target atau batas 45 attempt.
+Batch penuh memerlukan smoke report lulus untuk fingerprint
+build/config/topology yang sama.
+
 ## Cara Memulai Sesi Eksperimen
 
 Jalankan aplikasi dalam mode yang ingin diuji. Mode forwarding tidak dipilih
@@ -291,7 +303,7 @@ manual di Research Monitor; nilainya selalu berasal dari
 `RESQMESH_FORWARDING_MODE`. Session penelitian menyimpan konfigurasi forwarding
 aktual, metadata perangkat, timeout trial workflow, dan timestamp mulai. Trial
 ditutup sebagai success, failed dengan failure reason, atau invalid; denominator
-DSR hanya memakai result eksplisit `SUCCESS` dan `FAILED`.
+DSR hanya memakai result eksplisit `SUCCESS` dan `FAILED_DELIVERY`.
 
 Panduan lengkap ada di
 [`docs/experiment_protocol.md`](docs/experiment_protocol.md).
@@ -318,6 +330,11 @@ tidak seragam antar vendor, payload tidak terenkripsi, CRC32 hanya identifier
 ringkas, dan compatibility harus dibuktikan dengan perangkat fisik.
 
 Daftar lengkap ada di [`docs/known_limitations.md`](docs/known_limitations.md).
+
+Status perangkat saat ini: command readiness native USB telah dibuktikan oleh
+pengguna (`DEVICE SERIAL VERIFIED`). Enam kondisi smoke belum dijalankan
+(`DEVICE SMOKE TEST NOT RUN`) dan H1-H3 fisik belum dibuktikan
+(`PHYSICAL MULTI-HOP NOT RUN`).
 
 ## Privasi dan Keamanan
 

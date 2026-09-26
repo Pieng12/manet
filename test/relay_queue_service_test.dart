@@ -604,6 +604,34 @@ void main() {
     },
   );
 
+  test('upstream repeat is a duplicate but not Trickle consistency', () async {
+    final trickle = RelayQueueService(
+      database: db,
+      random: Random(9),
+      mode: ForwardingMode.trickle,
+    );
+    final sos = message('upstream-repeat', senderCrc: 4410);
+    await trickle.storeAndQueueSos(message: sos, nextEligibleAt: now);
+
+    final recorded = await trickle.recordLogicalDuplicateObservation(
+      messageId: sos.id,
+      observationId: 'source-burst-repeat',
+      observerKey: 'source',
+      nowMs: now + 1,
+      countAsTrickleConsistency: false,
+    );
+    final state = await trickle.trickleStateFor(sos.id);
+    final stored = (await db.query(
+      'sos_messages',
+      where: 'id = ?',
+      whereArgs: [sos.id],
+    )).single;
+
+    expect(recorded.trickleRecorded, isFalse);
+    expect(state!.consistencyCount, 0);
+    expect(stored['duplicate_count'], 1);
+  });
+
   test('trickle observation id controls idempotent c increments', () async {
     final trickle = RelayQueueService(
       database: db,

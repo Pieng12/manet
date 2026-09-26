@@ -35,6 +35,8 @@ migrate_working_dir/
 /android/build/
 **/.pio/
 **/__pycache__/
+/experiment.local.json
+/experiment_output/
 
 # Local diagnostics and command captures
 /*_log.txt

@@ -225,3 +225,21 @@ Untuk P7, native-only cases seperti processed exact duplicate dan permission
 blocked worker perlu dibuktikan melalui logcat, diagnostics
 `nativeInboxPermissionBlockedAt`, dan native inbox metadata karena Dart/SQLite
 experiment logger tidak selalu berjalan pada saat permission belum tersedia.
+
+## Physical Testbed Controller
+
+Eksperimen utama memakai satu Android source dan lima ESP32-C3. Setiap event
+yang masuk metrik wajib cocok pada `session_id`, `trial_id`, node konfigurasi,
+message key, dan hop. Event tanpa trial atau event trial lama dipisahkan sebagai
+diagnostic. Command response dicocokkan menggunakan `command_id` dan tidak
+dicampur dengan event reader serial.
+
+Target setiap kondisi adalah 15 trial valid. `SUCCESS` dan
+`FAILED_DELIVERY` masuk penyebut DSR; `INVALID` disimpan untuk audit lalu
+diganti attempt baru sampai target atau batas 45 attempt. Urutan `blocked` atau
+`randomized` beserta seed disimpan di manifest dan dipakai kembali saat resume.
+
+Batch harus didahului smoke Trickle H1-H3 dan Basic H1-H3. Smoke menghasilkan
+`smoke_report.json`/`.csv`, sedangkan merger menghasilkan `events.json`,
+`events.csv`, `trial_summary.csv`, `aggregate_by_mode_hop.csv`,
+`invalid_trials.csv`, dan `attempt_summary.csv`.

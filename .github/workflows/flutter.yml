@@ -16,6 +16,7 @@ jobs:
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
+          flutter-version: "3.41.4"
           channel: stable
           cache: true
 
@@ -58,3 +59,22 @@ jobs:
       - name: Build ESP32-C3 firmware
         working-directory: firmware/esp32c3
         run: python -m platformio run -e esp32c3
+
+      - name: Package research build artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p research-artifacts
+          cp build/app/outputs/flutter-apk/app-debug.apk research-artifacts/resqmesh-debug.apk
+          cp firmware/esp32c3/.pio/build/esp32c3/firmware.bin research-artifacts/firmware.bin
+          cp firmware/esp32c3/.pio/build/esp32c3/bootloader.bin research-artifacts/bootloader.bin
+          cp firmware/esp32c3/.pio/build/esp32c3/partitions.bin research-artifacts/partitions.bin
+          sha256sum research-artifacts/*.bin research-artifacts/*.apk > research-artifacts/SHA256SUMS.txt
+          printf '{"commit":"%s","protocol_version":"resqmesh-ble17-v1","payload_length":17,"manufacturer_id":"0xFFFF"}\n' "$GITHUB_SHA" > research-artifacts/metadata.json
+
+      - name: Upload research build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: resqmesh-research-${{ github.sha }}
+          path: research-artifacts
+          if-no-files-found: error

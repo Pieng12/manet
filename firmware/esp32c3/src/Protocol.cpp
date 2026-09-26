@@ -58,6 +58,15 @@ uint8_t saturatedRelayHop(uint8_t hopIn) {
   return hopIn >= kMaxHop ? kMaxHop : static_cast<uint8_t>(hopIn + 1);
 }
 
+bool shouldCountTrickleConsistency(bool trickleMode, bool relayRole,
+                                   bool sameMessage, bool sameState,
+                                   uint8_t incomingHop,
+                                   uint8_t expectedHopIn) {
+  const uint8_t parallelHop = saturatedRelayHop(expectedHopIn);
+  return trickleMode && relayRole && sameMessage && sameState &&
+         incomingHop == parallelHop && incomingHop != expectedHopIn;
+}
+
 bool encode(const Packet& packet, std::array<uint8_t, kPayloadLength>& output) {
   if (!epochValid(packet.timestampSeconds)) return false;
   if (static_cast<uint8_t>(packet.status) >

@@ -1,5 +1,7 @@
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
+
 import 'package:pkmproject/config/mesh_config.dart';
 import 'package:pkmproject/models/experiment_event.dart';
 import 'package:pkmproject/models/message_identity.dart';
@@ -292,11 +294,26 @@ class ExperimentLogger {
       burstId: burstId,
     );
     final db = await _db;
-    await db.insert(
+    final inserted = await db.insert(
       'experiment_events',
       event.toDbMap(),
       conflictAlgorithm: eventKey == null ? null : ConflictAlgorithm.ignore,
     );
+    if (inserted > 0 && session.sessionKind == 'RESEARCH' && trial != null) {
+      final logEvent = <String, dynamic>{
+        'kind': 'event',
+        ...event.toDbMap(),
+        'node_id': session.deviceId,
+        'device_id': session.deviceId,
+        'mode': session.forwardingMode,
+        'role': session.nodeRole,
+        'hypothesis': session.hypothesis,
+        'clock_sync_valid': session.clockOffsetMs != null,
+        'clock_offset_ms': session.clockOffsetMs,
+      };
+      if (detail != null) logEvent['detail'] = detail;
+      debugPrint('RESQMESH_EVENT ${jsonEncode(logEvent)}');
+    }
   }
 
   Future<int> eventCount({String? sessionId, String? trialId}) async {

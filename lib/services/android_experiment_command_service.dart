@@ -431,6 +431,13 @@ class AndroidExperimentCommandService {
     final epoch = ProtocolEpochReadiness.at(_clock.wallTimeMs());
     return {
       'ok': true,
+      'node_id': session?.deviceId,
+      'android_build_id': MeshConfig.buildId,
+      'build_id': MeshConfig.buildId,
+      'protocol_version': MeshConfig.protocolVersion,
+      'payload_length': MeshConfig.protocolLength,
+      'manufacturer_id': MeshConfig.manufacturerId,
+      'clock_valid': epoch.isValid,
       'bluetooth': capabilities['bluetoothEnabled'],
       'permissions': {
         'scan': capabilities['scanPermission'],
@@ -438,10 +445,20 @@ class AndroidExperimentCommandService {
       },
       'scanner': capabilities['nativeScanActive'],
       'advertiser': capabilities['nativeAdvertisingActive'],
+      'advertising': capabilities['nativeAdvertisingActive'],
       'mode': session?.forwardingMode,
       'session_id': session?.sessionId,
       'trial_id': trial?.trialId,
+      'role': session?.nodeRole,
+      'protocol_active': session?.protocolActive,
+      'expected_hop_in': session?.expectedHopIn,
+      'hop_out': session?.hopOut,
+      'gateway_enabled': session?.gatewayEnabled ?? false,
+      'ack_enabled': session?.ackEnabled ?? false,
       'queue_size': queueCount,
+      'packet_pending': queueCount > 0,
+      'quiet_period_complete':
+          queueCount == 0 && capabilities['nativeAdvertisingActive'] != true,
       'last_error': capabilities['lastErrorCode'],
       'protocol_epoch': epoch.toJson(),
     };

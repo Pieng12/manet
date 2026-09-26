@@ -802,6 +802,7 @@ WHERE id = ?
     required String observerKey,
     required int nowMs,
     int? completedAtMs,
+    bool countAsTrickleConsistency = true,
   }) async {
     final db = await _db;
     return db.transaction((txn) async {
@@ -813,7 +814,7 @@ WHERE id = ?
       );
 
       var trickleRecorded = false;
-      if (mode == ForwardingMode.trickle) {
+      if (mode == ForwardingMode.trickle && countAsTrickleConsistency) {
         final effectiveObservationId = observationId?.trim().isNotEmpty == true
             ? observationId!.trim()
             : '$messageId|$observerKey|$nowMs';

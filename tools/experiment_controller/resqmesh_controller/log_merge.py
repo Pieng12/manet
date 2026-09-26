@@ -86,7 +86,9 @@ def _timestamp(event: dict[str, Any]) -> int | None:
     value = event.get("event_timestamp_ms", event.get("timestamp_ms"))
     if value is None:
         return None
-    offset = event.get("clock_offset_ms", 0) if event.get("clock_sync_valid") is True else 0
+    if event.get("clock_sync_valid") is not True:
+        return None
+    offset = event.get("clock_offset_ms", 0)
     return int(round(float(value) + float(offset)))
 
 
@@ -96,9 +98,31 @@ def summarize_trial(
     manifest_record: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     record = manifest_record or {}
+    session_id = record.get("session_id")
+    events = [
+        event
+        for event in events
+        if event.get("trial_id") == trial_id
+        and (session_id is None or event.get("session_id") == session_id)
+    ]
+    evidence = record.get("evidence", {})
+    source_node = evidence.get("source_node_id", record.get("source_node_id"))
+    destinations = set(evidence.get("destination_node_ids", record.get("destination_node_ids", [])))
+    expected_hop = evidence.get("expected_hop_in", record.get("expected_hop_in"))
+    expected_message_key = evidence.get("message_key", record.get("message_key"))
     result = record.get("result")
     if result is None:
-        result = "SUCCESS" if any(event.get("event_type") == "DESTINATION_FIRST_VALID_RECEIVE" for event in events) else "FAILED_DELIVERY"
+        delivered = any(
+            event.get("event_type") == "DESTINATION_FIRST_VALID_RECEIVE"
+            and (not destinations or event.get("node_id", event.get("device_id")) in destinations)
+            and (expected_message_key is None or event.get("message_key") == expected_message_key)
+            and (
+                expected_hop is None
+                or int(event.get("hop_in", event.get("hop_count", -1)) or -1) == int(expected_hop)
+            )
+            for event in events
+        )
+        result = "SUCCESS" if delivered else "FAILED_DELIVERY"
     accepted = sum(event.get("event_type") == "BLE_PACKET_ACCEPTED" for event in events)
     duplicates = sum(event.get("event_type") == "BLE_PACKET_DUPLICATE" for event in events)
     denominator = accepted + duplicates
@@ -107,6 +131,7 @@ def summarize_trial(
         for event in events
         if event.get("event_type") == "ADVERTISE_BURST_STARTED"
         and event.get("packet_type", "sos") == "sos"
+        and event.get("burst_id") not in (None, "")
     }
     sources: dict[str, int] = {}
     latencies: list[int] = []
@@ -115,15 +140,22 @@ def summarize_trial(
         timestamp = _timestamp(event)
         if not key or timestamp is None:
             continue
-        if event.get("event_type") == "SOURCE_FIRST_ADVERTISE_STARTED":
+        node_id = event.get("node_id", event.get("device_id"))
+        if (
+            event.get("event_type") == "SOURCE_FIRST_ADVERTISE_STARTED"
+            and (source_node is None or node_id == source_node)
+        ):
             sources.setdefault(key, timestamp)
-        elif event.get("event_type") == "DESTINATION_FIRST_VALID_RECEIVE":
-            detail = event.get("detail", {})
-            sync_valid = event.get("clock_sync_valid") is True or (
-                isinstance(detail, dict) and detail.get("clock_sync_valid") is True
-            )
-            if sync_valid and key in sources and timestamp >= sources[key]:
-                latencies.append(timestamp - sources[key])
+        elif (
+            event.get("event_type") == "DESTINATION_FIRST_VALID_RECEIVE"
+            and (not destinations or node_id in destinations)
+            and (expected_hop is None or int(event.get("hop_in", -1) or -1) == int(expected_hop))
+        ):
+            if key in sources and timestamp >= sources[key]:
+                latency = timestamp - sources[key]
+                maximum = int(record.get("observation_window_ms", 0) or 0) + 5000
+                if maximum <= 5000 or latency <= maximum:
+                    latencies.append(latency)
     invalid_reasons = record.get("invalid_reasons", [])
     return {
         "trial_id": trial_id,
@@ -179,14 +211,22 @@ def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
 
 
 def merge_directory(input_dir: Path, output_dir: Path, manifest_path: Path | None = None) -> dict[str, int]:
-    events = deduplicate(read_json_events(input_dir.rglob("*.jsonl")))
     manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path and manifest_path.exists() else {"trials": {}}
+    events = deduplicate(read_json_events(input_dir.rglob("*.jsonl")))
+    manifest_session = manifest.get("session_id")
+    if manifest_session:
+        events = [event for event in events if event.get("session_id") == manifest_session]
     by_trial: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for event in events:
         if event.get("trial_id"):
             by_trial[str(event["trial_id"])].append(event)
     trial_ids = sorted(set(by_trial) | set(manifest.get("trials", {})))
-    summaries = [summarize_trial(trial_id, by_trial[trial_id], manifest.get("trials", {}).get(trial_id)) for trial_id in trial_ids]
+    summaries = []
+    for trial_id in trial_ids:
+        record = dict(manifest.get("trials", {}).get(trial_id) or {})
+        if manifest_session:
+            record.setdefault("session_id", manifest_session)
+        summaries.append(summarize_trial(trial_id, by_trial[trial_id], record))
     aggregates = aggregate(summaries)
     invalid = [row for row in summaries if not row["valid"]]
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -195,4 +235,17 @@ def merge_directory(input_dir: Path, output_dir: Path, manifest_path: Path | Non
     _write_csv(output_dir / "trial_summary.csv", summaries)
     _write_csv(output_dir / "aggregate_by_mode_hop.csv", aggregates)
     _write_csv(output_dir / "invalid_trials.csv", invalid)
+    attempts = [
+        {
+            "trial_id": trial_id,
+            "mode": record.get("mode"),
+            "hypothesis": record.get("hypothesis"),
+            "attempt": record.get("attempt"),
+            "result": record.get("result"),
+            "terminal": record.get("terminal"),
+            "invalid_reasons": ";".join(record.get("invalid_reasons", [])),
+        }
+        for trial_id, record in sorted(manifest.get("trials", {}).items())
+    ]
+    _write_csv(output_dir / "attempt_summary.csv", attempts)
     return {"events": len(events), "trials": len(summaries), "invalid": len(invalid)}

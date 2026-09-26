@@ -9,6 +9,7 @@ namespace resqmesh {
 
 constexpr size_t kPayloadLength = 17;
 constexpr uint16_t kManufacturerId = 0xFFFF;
+constexpr const char* kProtocolVersion = "resqmesh-ble17-v1";
 constexpr uint32_t kEpochSeconds = 1780272000UL;
 constexpr const char* kEpochId = "resqmesh-2026-06-01";
 constexpr uint32_t kTimestampModulo = 1UL << 24;
@@ -31,6 +32,10 @@ struct Packet {
 bool epochValid(uint64_t epochSeconds);
 uint64_t epochEndSeconds();
 uint8_t saturatedRelayHop(uint8_t hopIn);
+bool shouldCountTrickleConsistency(bool trickleMode, bool relayRole,
+                                   bool sameMessage, bool sameState,
+                                   uint8_t incomingHop,
+                                   uint8_t expectedHopIn);
 bool encode(const Packet& packet, std::array<uint8_t, kPayloadLength>& output);
 bool decode(const uint8_t* payload, size_t length, Packet& output);
 bool extractApplicationPayload(

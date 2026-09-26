@@ -859,6 +859,8 @@ class BleRelayService {
               observerKey: observerKey,
             ),
             nowMs: _clock.monotonicTimeMs(),
+            countAsTrickleConsistency:
+                topologyDecision.countAsTrickleConsistency,
             completedAtMs: now,
           );
       await _runPostCommitEffect(
@@ -937,6 +939,10 @@ class BleRelayService {
                 observerKey: observerKey,
               ),
               nowMs: _clock.monotonicTimeMs(),
+              countAsTrickleConsistency:
+                  researchSession == null ||
+                  researchSession.sessionKind != 'RESEARCH' ||
+                  topologyDecision.countAsTrickleConsistency,
               completedAtMs: now,
             );
         await _runPostCommitEffect(

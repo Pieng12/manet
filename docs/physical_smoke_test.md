@@ -1,77 +1,124 @@
-# Physical Smoke Test Checklist
+# Physical Testbed Windows
 
-Dokumen ini adalah gerbang sebelum batch 90 trial. Unit test dan build tidak
-menggantikan bukti perangkat fisik.
+Dokumen ini adalah gerbang pengujian satu Android dan lima ESP32-C3. Unit test
+dan CI tidak menggantikan bukti radio fisik.
 
-## A. Pemeriksaan Perangkat
+## Topology
 
-1. Jalankan `adb devices` dan pastikan Android berstatus `device`.
-2. Jalankan `py tools/experiment_controller/run.py discover` dan cocokkan semua
-   port COM ESP32 dengan konfigurasi.
-3. Flash firmware yang sama ke seluruh ESP32-C3 lalu konfigurasi node melalui
-   controller, bukan dengan mengubah source.
-4. Aktifkan Bluetooth, izin scan/advertise, notifikasi, location legacy bila
-   diperlukan, dan nonaktifkan battery optimization untuk sesi validasi.
-5. Jalankan readiness. Semua node harus melaporkan build ID, epoch ID
-   `resqmesh-2026-06-01`, epoch valid, mode, role, session, dan clock valid.
-6. Jangan mulai trial jika ada mismatch atau queue lama belum kosong.
+| Node | H1 | H2 | H3 |
+|---|---|---|---|
+| android-source | Source hop 1 | Source hop 1 | Source hop 1 |
+| esp-r1a | Nonaktif | Relay 1 ke 2 | Relay 1 ke 2 |
+| esp-r1b | Nonaktif | Relay 1 ke 2 | Relay 1 ke 2 |
+| esp-r2a | Nonaktif | Nonaktif | Relay 2 ke 3 |
+| esp-r2b | Nonaktif | Nonaktif | Relay 2 ke 3 |
+| esp-destination | Destination hop 1 | Destination hop 2 | Destination hop 3 |
 
-## B. Interoperabilitas Satu Hop
+Pemisahan memakai role, `protocol_active`, `expected_hop_in`, dan `hop_out`,
+bukan jarak. Seluruh ESP memakai firmware yang sama.
 
-1. Konfigurasikan Android sebagai SOURCE, satu ESP32 sebagai RELAY, dan satu
-   observer/destination.
-2. Picu satu logical SOS saja.
-3. Cocokkan application payload 17 byte setelah company ID `FF FF` dipisahkan.
-4. Verifikasi CRC32 sender, timestamp epoch, signed latitude/longitude, status,
-   `hopIn=1`, dan relay `hopOut=2`.
-5. Verifikasi burst requested, started, ended, serta receive pada node lain.
-6. Advertising requested tanpa callback started bukan TX sukses.
+## Urutan Wajib
 
-## C. Dua Relay Sejajar
+1. Periksa dependency.
 
-1. Tempatkan R1 dan R2 pada layer yang sama dengan `expectedHopIn=1`.
-2. Pastikan keduanya menerima state source yang sama.
-3. Pada mode Trickle, buktikan R1 mengirim hop 2 lebih dahulu, R2 mendengar
-   state identik, `c` R2 menjadi 1, lalu R2 mencatat `TRICKLE_TX_SUPPRESSED`.
-4. Pastikan state/hop/queue R2 tetap ada dan interval berikutnya berlanjut.
-5. Ulangi pada Basic. R2 harus mencatat logical duplicate tetapi tidak memakai
-   counter suppression dan tetap mengikuti interval tetap plus jitter.
-6. Pastikan repeat radio dalam burst yang sama tidak menaikkan `c` dua kali,
-   sedangkan burst fisik berikutnya memiliki observation identity berbeda.
+   ```powershell
+   flutter doctor -v
+   adb version
+   py --version
+   py -m pip install -r tools/experiment_controller/requirements.txt
+   ```
 
-## D. Smoke H1, H2, H3
+2. Build APK.
 
-```powershell
-py tools/experiment_controller/run.py smoke --config experiment.local.json --output experiment_output
-py tools/experiment_controller/run.py merge --input experiment_output/raw --manifest experiment_output/manifest.json --output experiment_output/merged
-```
+   ```powershell
+   flutter pub get
+   flutter build apk --debug --dart-define=RESQMESH_BUILD_ID=local-research
+   ```
 
-Periksa satu trial per mode dan hop. Validasi hop input/output, destination first
-valid receive, sinkronisasi clock E2E, DSR, LDR, dan overhead network-wide.
-Batch 15 trial per kondisi baru boleh dimulai setelah keenam trial smoke valid.
+3. Instal APK.
 
-## Troubleshooting Windows
+   ```powershell
+   adb devices -l
+   adb install -r build/app/outputs/flutter-apk/app-debug.apk
+   ```
 
-- `adb` tidak ditemukan: tambahkan Android SDK `platform-tools` ke `PATH`.
-- Android `unauthorized`: cabut/pasang USB, terima dialog RSA, lalu ulangi
-  `adb kill-server` dan `adb start-server`.
-- COM tidak muncul: pasang driver USB-UART board, gunakan kabel data, periksa
-  Device Manager, dan tutup serial monitor lain.
-- `Access is denied` pada COM: hanya satu proses boleh membuka port.
-- ESP reset saat monitor dibuka: tunggu event `SERVICE_STARTED`, lalu ulangi
-  readiness; state packet dipulihkan dari NVS.
-- BLE scan kosong: periksa Bluetooth, location legacy, izin Nearby Devices,
-  manufacturer ID `0xFFFF`, dan jarak antarperangkat.
-- Advertising gagal: pastikan perangkat mendukung peripheral advertising dan
-  tidak ada aplikasi lain yang memegang advertiser.
-- Android berhenti di background: keluarkan dari battery optimization, periksa
-  foreground service notification, Doze, dan log `SCHEDULER_BLOCKED`.
-- Epoch invalid: jangan mengubah satu komponen saja. Perbarui Android, firmware,
-  controller, dokumentasi, dan test secara serentak.
+4. Aktifkan Bluetooth, Nearby Devices scan/advertise, notifikasi, dan izin
+   lokasi legacy jika Android memerlukannya.
+5. Flash satu ESP32-C3 melalui native USB `303A:1001`.
 
-## Status yang Boleh Dilaporkan
+   ```powershell
+   cd firmware\esp32c3
+   py -m platformio run -e esp32c3 -t upload --upload-port COM_YANG_BENAR
+   cd ..\..
+   ```
 
-- `CODE VERIFIED`: test source lulus.
-- `BUILD VERIFIED`: APK, native Android, dan firmware berhasil dibangun.
-- `DEVICE SMOKE TEST NOT RUN`: belum ada bukti perangkat.
-- `PHYSICAL MULTI-HOP NOT RUN`: belum ada bukti H1/H2/H3 fisik.
+6. Uji command readiness serial satu baris. Respons tidak bergantung pada event
+   `SERVICE_STARTED` atau serial monitor yang terus terbuka.
+
+   ```json
+   {"command":"readiness","command_id":"test-1"}
+   ```
+
+7. Flash empat ESP32-C3 lain dengan firmware yang sama.
+8. Beri label fisik R1A, R1B, R2A, R2B, dan Destination.
+9. Catat COM terbaru; nomor dapat berubah setelah upload.
+10. Buat konfigurasi lokal.
+
+    ```powershell
+    Copy-Item tools/experiment_controller/config.example.json experiment.local.json
+    ```
+
+11. Jalankan discovery dan pastikan port Bluetooth serial tidak dipilih.
+
+    ```powershell
+    py tools/experiment_controller/run.py discover
+    ```
+
+12. Jalankan readiness.
+
+    ```powershell
+    py tools/experiment_controller/run.py readiness --config experiment.local.json
+    ```
+
+13. Jalankan smoke tepat enam kondisi.
+
+    ```powershell
+    py tools/experiment_controller/run.py smoke --config experiment.local.json --output experiment_output
+    ```
+
+14. Periksa `experiment_output/smoke_report.json` dan `.csv`. H2/H3 Trickle
+    harus memiliki consistency relay sejajar dan minimal satu suppression;
+    Basic tidak boleh memiliki suppression Trickle. Requested burst tanpa
+    started callback tidak dihitung.
+15. Jalankan batch hanya setelah smoke lulus.
+
+    ```powershell
+    py tools/experiment_controller/run.py run --config experiment.local.json --output experiment_output
+    ```
+
+16. Merge log dan pastikan setiap kombinasi memiliki 15 trial valid.
+
+    ```powershell
+    py tools/experiment_controller/run.py merge --input experiment_output/raw --manifest experiment_output/manifest.json --output experiment_output/merged
+    Import-Csv experiment_output/merged/aggregate_by_mode_hop.csv | Format-Table
+    ```
+
+## Kriteria Smoke
+
+- Semua node ready, clock dan epoch valid, queue/packet lama kosong.
+- Source menghasilkan `SOURCE_FIRST_ADVERTISE_STARTED`.
+- Destination menerima message key yang sama pada hop kondisi.
+- E2E latency sinkron dan masuk akal.
+- Reset, queue kosong, dan quiet period terverifikasi.
+- `smoke_report.json` memiliki `passed=true` untuk enam kondisi.
+
+Jika smoke gagal, controller keluar nonzero dan menyebut evidence yang hilang.
+Batch menolak report yang gagal atau fingerprint-nya berbeda.
+
+## Status
+
+- `CODE VERIFIED`: ditentukan setelah seluruh test source lulus.
+- `BUILD VERIFIED`: ditentukan setelah APK, native Android, dan firmware build.
+- `DEVICE SERIAL VERIFIED`: pengguna telah membuktikan readiness native USB.
+- `DEVICE SMOKE TEST NOT RUN`: masih berlaku sampai enam kondisi dijalankan.
+- `PHYSICAL MULTI-HOP NOT RUN`: masih berlaku sampai H1-H3 dibuktikan fisik.
