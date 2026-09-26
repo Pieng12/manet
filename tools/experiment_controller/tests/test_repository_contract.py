@@ -81,6 +81,11 @@ class RepositoryContractTest(unittest.TestCase):
         self.assertIn("NimBLEScan* scanner = nullptr;", firmware)
         self.assertIn("if (!pauseScanner())", firmware)
         self.assertIn("resumeScanner();", firmware)
+        self.assertIn(
+            "advertising->setAdvertisementType(BLE_GAP_CONN_MODE_NON);",
+            firmware,
+        )
+        self.assertNotIn("BLE_HCI_ADV_TYPE_ADV_NONCONN_IND", firmware)
 
 
 if __name__ == "__main__":

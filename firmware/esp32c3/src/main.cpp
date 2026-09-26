@@ -360,7 +360,7 @@ void startBurst() {
   }
   advertising->stop();
   advertising->setAdvertisementData(data);
-  advertising->setAdvertisementType(BLE_HCI_ADV_TYPE_ADV_NONCONN_IND);
+  advertising->setAdvertisementType(BLE_GAP_CONN_MODE_NON);
   if (!advertising->start()) {
     resumeScanner();
     scheduler.transmitAt = millis() + kNativeStartRetryMs;

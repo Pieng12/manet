@@ -128,6 +128,12 @@ void main() {
       isFalse,
     );
     expect(
+      BleAdvertiserService.shouldLogSourceFirstAdvertise(
+        message('research-trial-1'),
+      ),
+      isTrue,
+    );
+    expect(
       BleAdvertiserService.shouldLogSourceFirstAdvertise(message('normal')),
       isFalse,
     );

@@ -72,7 +72,9 @@ class BleAdvertiserService {
   String? get currentAdvertisedMessageId => _currentAdvertisedMessageId;
 
   static bool shouldLogSourceFirstAdvertise(SOSMessage message) =>
-      message.trialId?.trim().isNotEmpty == true && message.hopCount == 1;
+      message.hopCount == 1 &&
+      (message.trialId?.trim().isNotEmpty == true ||
+          message.id.startsWith('research-'));
 
   void claimSchedulerOwnership() {
     _isSchedulerOwner = true;
