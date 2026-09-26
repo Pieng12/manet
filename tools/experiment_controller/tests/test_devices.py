@@ -1,6 +1,7 @@
+import sys
 import unittest
 
-from resqmesh_controller.devices import SerialNode
+from resqmesh_controller.devices import SerialNode, _run
 
 
 class FakeConnection:
@@ -15,6 +16,17 @@ class FakeConnection:
 
 
 class DeviceTransportTest(unittest.TestCase):
+    def test_subprocess_output_replaces_non_utf8_bytes(self) -> None:
+        output = _run(
+            [
+                sys.executable,
+                "-c",
+                "import sys; sys.stdout.buffer.write(bytes([0x8f]))",
+            ]
+        )
+
+        self.assertEqual("\ufffd", output)
+
     def test_serial_command_response_and_event_are_not_mixed(self) -> None:
         node = SerialNode("esp-r1a", "RELAY", "COM_TEST")
         connection = FakeConnection()
