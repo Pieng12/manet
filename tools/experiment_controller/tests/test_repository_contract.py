@@ -78,6 +78,9 @@ class RepositoryContractTest(unittest.TestCase):
             firmware.index("Serial.setRxBufferSize(kSerialRxBufferBytes);"),
             firmware.index("Serial.begin(115200);"),
         )
+        self.assertIn("NimBLEScan* scanner = nullptr;", firmware)
+        self.assertIn("if (!pauseScanner())", firmware)
+        self.assertIn("resumeScanner();", firmware)
 
 
 if __name__ == "__main__":

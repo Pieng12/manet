@@ -71,6 +71,9 @@ class BleAdvertiserService {
   RelaySchedulerState get schedulerState => _schedulerState;
   String? get currentAdvertisedMessageId => _currentAdvertisedMessageId;
 
+  static bool shouldLogSourceFirstAdvertise(SOSMessage message) =>
+      message.trialId?.trim().isNotEmpty == true && message.hopCount == 1;
+
   void claimSchedulerOwnership() {
     _isSchedulerOwner = true;
   }
@@ -722,8 +725,7 @@ class BleAdvertiserService {
           burstId: burstId,
           detail: {'target_duration_ms': burstDuration.inMilliseconds},
         );
-        final session = await _experimentLogger.currentSession();
-        if (session?.nodeRole?.toUpperCase() == 'SOURCE') {
+        if (shouldLogSourceFirstAdvertise(message)) {
           await _experimentLogger.logEvent(
             eventType: ExperimentEventTypes.sourceFirstAdvertiseStarted,
             deviceId: 'unknown',

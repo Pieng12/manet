@@ -22,6 +22,7 @@ constexpr uint32_t kIminMs = 8000;
 constexpr uint32_t kImaxMs = 256000;
 constexpr uint32_t kDefaultRxBurstGapMs = 1000;
 constexpr uint32_t kQuietPeriodMs = 2000;
+constexpr uint32_t kNativeStartRetryMs = 1000;
 constexpr size_t kSerialRxBufferBytes = 2048;
 
 enum class Role { Source, Relay, Destination, Observer };
@@ -61,6 +62,7 @@ Preferences preferences;
 NodeConfig config;
 SchedulerState scheduler;
 NimBLEAdvertising* advertising = nullptr;
+NimBLEScan* scanner = nullptr;
 uint64_t wallOffsetMs = 0;
 bool wallClockValid = false;
 uint32_t burstSequence = 0;
@@ -191,8 +193,19 @@ void persistPacket() {
   }
 }
 
+bool pauseScanner() {
+  return scanner == nullptr || !scanner->isScanning() || scanner->stop();
+}
+
+void resumeScanner() {
+  if (scanner != nullptr && !scanner->isScanning()) {
+    scanner->start(0, nullptr, false);
+  }
+}
+
 void clearProtocolState() {
   if (scheduler.advertising && advertising != nullptr) advertising->stop();
+  resumeScanner();
   scheduler = SchedulerState();
   preferences.remove("packet");
   observationTracker.clear();
@@ -338,10 +351,19 @@ void startBurst() {
   NimBLEAdvertisementData data;
   data.setFlags(0x04);
   data.setManufacturerData(manufacturer);
+  if (!pauseScanner()) {
+    scheduler.transmitAt = millis() + kNativeStartRetryMs;
+    emit("ADVERTISE_BURST_FAILED", &scheduler.packet, "SCAN_STOP_FAILED", 0,
+         String(), scheduler.burstId);
+    scheduler.burstId = "";
+    return;
+  }
   advertising->stop();
   advertising->setAdvertisementData(data);
   advertising->setAdvertisementType(BLE_HCI_ADV_TYPE_ADV_NONCONN_IND);
   if (!advertising->start()) {
+    resumeScanner();
+    scheduler.transmitAt = millis() + kNativeStartRetryMs;
     emit("ADVERTISE_BURST_FAILED", &scheduler.packet, "NATIVE_START_FAILED",
          0, String(), scheduler.burstId);
     scheduler.burstId = "";
@@ -362,6 +384,7 @@ void startBurst() {
 
 void finishBurst() {
   advertising->stop();
+  resumeScanner();
   scheduler.advertising = false;
   emit("ADVERTISE_BURST_ENDED", &scheduler.packet, nullptr, 0, String(),
        scheduler.burstId);
@@ -598,12 +621,12 @@ void setup() {
   NimBLEDevice::setPower(ESP_PWR_LVL_P9);
   advertising = NimBLEDevice::getAdvertising();
   advertising->setScanResponse(false);
-  NimBLEScan* scan = NimBLEDevice::getScan();
-  scan->setAdvertisedDeviceCallbacks(new ScanCallbacks(), true);
-  scan->setActiveScan(false);
-  scan->setInterval(97);
-  scan->setWindow(67);
-  scan->start(0, nullptr, false);
+  scanner = NimBLEDevice::getScan();
+  scanner->setAdvertisedDeviceCallbacks(new ScanCallbacks(), true);
+  scanner->setActiveScan(false);
+  scanner->setInterval(97);
+  scanner->setWindow(67);
+  scanner->start(0, nullptr, false);
   loadPersistentState();
   emit("SERVICE_STARTED");
 }

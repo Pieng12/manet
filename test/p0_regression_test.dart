@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pkmproject/config/mesh_config.dart';
 import 'package:pkmproject/models/sos_message.dart';
+import 'package:pkmproject/services/ble_advertiser_service.dart';
 import 'package:pkmproject/services/experiment_logger.dart';
 import 'package:pkmproject/sync_service.dart';
 
@@ -17,6 +18,8 @@ void main() {
     String localState = 'pending',
     int? expiresAt,
     int offsetMs = 0,
+    int hopCount = 1,
+    String? trialId,
   }) {
     final timestamp = now + offsetMs;
     return SOSMessage(
@@ -33,6 +36,8 @@ void main() {
       fromServer: fromServer,
       ackReceivedAt: ackReceivedAt,
       localState: localState,
+      hopCount: hopCount,
+      trialId: trialId,
       expiresAt:
           expiresAt ?? now + MeshConfig.defaultMessageLifetime.inMilliseconds,
     );
@@ -107,5 +112,24 @@ void main() {
     expect(ExperimentEventTypes.bleAdvertiseFailed, 'BLE_ADVERTISE_FAILED');
     expect(ExperimentEventTypes.bleRelayStarted, 'BLE_RELAY_STARTED');
     expect(ExperimentEventTypes.messageExpired, 'MESSAGE_EXPIRED');
+  });
+
+  test('source-first event is limited to local research hop one', () {
+    expect(
+      BleAdvertiserService.shouldLogSourceFirstAdvertise(
+        message('source', trialId: 'trial-1'),
+      ),
+      isTrue,
+    );
+    expect(
+      BleAdvertiserService.shouldLogSourceFirstAdvertise(
+        message('relay', trialId: 'trial-1', hopCount: 2),
+      ),
+      isFalse,
+    );
+    expect(
+      BleAdvertiserService.shouldLogSourceFirstAdvertise(message('normal')),
+      isFalse,
+    );
   });
 }
