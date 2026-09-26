@@ -127,6 +127,9 @@ class ExperimentController:
                     raise
                 time.sleep(0.02 * (attempt + 1))
 
+    def _command_id(self, prefix: str, *parts: str) -> str:
+        return "-".join((prefix, self.manifest["session_id"], *parts))
+
     def _node_topology(self, node: NodeTransport, hypothesis: str) -> dict[str, Any]:
         configured = next(item for item in self.config["nodes"] if item["node_id"] == node.node_id)
         return {**configured, **configured["topology"][hypothesis]}
@@ -226,12 +229,14 @@ class ExperimentController:
         results: dict[str, dict[str, Any]] = {}
         failures: list[str] = []
         for node in self.nodes:
-            command_id = f"ready-{spec.trial_id if spec else 'preflight'}-{node.node_id}"
+            command_id = self._command_id(
+                "ready", spec.trial_id if spec else "preflight", node.node_id
+            )
             if node.transport == "serial":
                 node.command(
                     "clock_sync",
                     {
-                        "command_id": f"preflight-clock-{node.node_id}",
+                        "command_id": self._command_id("preflight-clock", node.node_id),
                         "wall_time_ms": time.time_ns() // 1_000_000,
                     },
                 )
@@ -254,7 +259,7 @@ class ExperimentController:
         for node in self.nodes:
             topology = self._node_topology(node, spec.hypothesis)
             arguments = {
-                "command_id": f"cfg-{spec.trial_id}-{node.node_id}",
+                "command_id": self._command_id("cfg", spec.trial_id, node.node_id),
                 "session_id": self.manifest["session_id"],
                 "session_code": f"{spec.mode}-{spec.hypothesis}",
                 "node_id": node.node_id,
@@ -291,7 +296,10 @@ class ExperimentController:
                 continue
             result = node.command(
                 "clock_sync",
-                {"command_id": f"clock-{spec.trial_id}-{node.node_id}", "wall_time_ms": wall_ms},
+                {
+                    "command_id": self._command_id("clock", spec.trial_id, node.node_id),
+                    "wall_time_ms": wall_ms,
+                },
             )
             if result.get("ok") is not True:
                 raise DeviceError(f"clock sync failed: {node.node_id}: {result}")
@@ -464,7 +472,7 @@ class ExperimentController:
                 result = node.command(
                     "start_trial",
                     {
-                        "command_id": f"start-{spec.trial_id}-{node.node_id}",
+                        "command_id": self._command_id("start", spec.trial_id, node.node_id),
                         "session_id": self.manifest["session_id"],
                         "trial_id": spec.trial_id,
                         "trial_code": spec.trial_id,
@@ -477,7 +485,7 @@ class ExperimentController:
             trigger = sources[0].command(
                 "trigger_sos",
                 {
-                    "command_id": f"trigger-{spec.trial_id}",
+                    "command_id": self._command_id("trigger", spec.trial_id),
                     "trial_id": spec.trial_id,
                     "node_id": sources[0].node_id,
                     "latitude": self.config.get("latitude", 3.5952),
@@ -493,7 +501,10 @@ class ExperimentController:
                 if node.transport == "adb":
                     node.command(
                         "end_observation_window",
-                        {"command_id": f"window-{spec.trial_id}-{node.node_id}", "trial_id": spec.trial_id},
+                        {
+                            "command_id": self._command_id("window", spec.trial_id, node.node_id),
+                            "trial_id": spec.trial_id,
+                        },
                     )
             events = self._collect_trial_events(spec)
             result_name, invalid_reasons, evidence = self._evaluate_events(
@@ -513,7 +524,7 @@ class ExperimentController:
                 node.command(
                     "finalize_trial",
                     {
-                        "command_id": f"finalize-{spec.trial_id}-{node.node_id}",
+                        "command_id": self._command_id("finalize", spec.trial_id, node.node_id),
                         "trial_id": spec.trial_id,
                         "result": result_name,
                         "reason": ";".join(invalid_reasons),
@@ -522,7 +533,7 @@ class ExperimentController:
                 record.setdefault("exports", {})[node.node_id] = node.command(
                     "export_trial",
                     {
-                        "command_id": f"export-{spec.trial_id}-{node.node_id}",
+                        "command_id": self._command_id("export", spec.trial_id, node.node_id),
                         "session_id": self.manifest["session_id"],
                         "trial_id": spec.trial_id,
                     },
@@ -541,7 +552,10 @@ class ExperimentController:
                 try:
                     response = node.command(
                         "reset_trial",
-                        {"command_id": f"reset-{spec.trial_id}-{node.node_id}", "trial_id": spec.trial_id},
+                        {
+                            "command_id": self._command_id("reset", spec.trial_id, node.node_id),
+                            "trial_id": spec.trial_id,
+                        },
                     )
                     if response.get("ok") is not True:
                         reset_errors.append(f"{node.node_id}: {response}")

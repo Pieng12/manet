@@ -73,6 +73,11 @@ class RepositoryContractTest(unittest.TestCase):
         self.assertNotIn("lastObservationKey", firmware)
         self.assertNotIn("lastObservationAt", firmware)
         self.assertIn("ObservationTracker observationTracker", firmware)
+        self.assertIn("constexpr size_t kSerialRxBufferBytes = 2048;", firmware)
+        self.assertLess(
+            firmware.index("Serial.setRxBufferSize(kSerialRxBufferBytes);"),
+            firmware.index("Serial.begin(115200);"),
+        )
 
 
 if __name__ == "__main__":

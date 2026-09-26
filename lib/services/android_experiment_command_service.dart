@@ -66,7 +66,12 @@ class AndroidExperimentCommandService {
   ) async {
     final normalized = command.trim().toLowerCase();
     if (normalized == 'get_status' || normalized == 'readiness') {
-      return _status();
+      final result = await _status();
+      result['command'] = normalized;
+      if (arguments.containsKey('command_id')) {
+        result['command_id'] = arguments['command_id'];
+      }
+      return result;
     }
     final commandId = _requiredString(arguments, 'command_id');
     final db = await _db;

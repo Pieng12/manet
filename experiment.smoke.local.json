@@ -1,0 +1,90 @@
+{
+  "testbed_profile": "android_plus_five_esp32",
+  "session_id": "resqmesh-smoke-20260926-06",
+  "session_label": "physical-smoke-01",
+  "android_build_id": "7418db595574",
+  "firmware_build_id": "7418db595574",
+  "protocol_version": "resqmesh-ble17-v1",
+  "modes": ["trickle", "basic_flooding"],
+  "hypotheses": ["H1", "H2", "H3"],
+  "valid_trials_per_condition": 15,
+  "max_attempts_per_condition": 45,
+  "trial_order": "randomized",
+  "random_seed": 231402095,
+  "observation_window_seconds": 60,
+  "quiet_period_seconds": 5,
+  "clock_tolerance_ms": 100,
+  "rx_burst_gap_ms": 1000,
+  "latitude": 3.5952,
+  "longitude": 98.6722,
+  "gateway_enabled": false,
+  "ack_enabled": false,
+  "nodes": [
+    {
+      "node_id": "android-source",
+      "transport": "adb",
+      "serial": "fbde50b6",
+      "role": "SOURCE",
+      "topology": {
+        "H1": {"role": "SOURCE", "active": true, "node_layer": 0, "expected_hop_in": 0},
+        "H2": {"role": "SOURCE", "active": true, "node_layer": 0, "expected_hop_in": 0},
+        "H3": {"role": "SOURCE", "active": true, "node_layer": 0, "expected_hop_in": 0}
+      }
+    },
+    {
+      "node_id": "esp-r1a",
+      "transport": "serial",
+      "port": "COM8",
+      "role": "RELAY",
+      "topology": {
+        "H1": {"role": "OBSERVER", "active": false},
+        "H2": {"role": "RELAY", "active": true, "node_layer": 1, "expected_hop_in": 1, "hop_out": 2},
+        "H3": {"role": "RELAY", "active": true, "node_layer": 1, "expected_hop_in": 1, "hop_out": 2}
+      }
+    },
+    {
+      "node_id": "esp-r1b",
+      "transport": "serial",
+      "port": "COM9",
+      "role": "RELAY",
+      "topology": {
+        "H1": {"role": "OBSERVER", "active": false},
+        "H2": {"role": "RELAY", "active": true, "node_layer": 1, "expected_hop_in": 1, "hop_out": 2},
+        "H3": {"role": "RELAY", "active": true, "node_layer": 1, "expected_hop_in": 1, "hop_out": 2}
+      }
+    },
+    {
+      "node_id": "esp-r2a",
+      "transport": "serial",
+      "port": "COM10",
+      "role": "RELAY",
+      "topology": {
+        "H1": {"role": "OBSERVER", "active": false},
+        "H2": {"role": "OBSERVER", "active": false},
+        "H3": {"role": "RELAY", "active": true, "node_layer": 2, "expected_hop_in": 2, "hop_out": 3}
+      }
+    },
+    {
+      "node_id": "esp-r2b",
+      "transport": "serial",
+      "port": "COM11",
+      "role": "RELAY",
+      "topology": {
+        "H1": {"role": "OBSERVER", "active": false},
+        "H2": {"role": "OBSERVER", "active": false},
+        "H3": {"role": "RELAY", "active": true, "node_layer": 2, "expected_hop_in": 2, "hop_out": 3}
+      }
+    },
+    {
+      "node_id": "esp-destination",
+      "transport": "serial",
+      "port": "COM12",
+      "role": "DESTINATION",
+      "topology": {
+        "H1": {"role": "DESTINATION", "active": true, "node_layer": 1, "expected_hop_in": 1},
+        "H2": {"role": "DESTINATION", "active": true, "node_layer": 2, "expected_hop_in": 2},
+        "H3": {"role": "DESTINATION", "active": true, "node_layer": 3, "expected_hop_in": 3}
+      }
+    }
+  ]
+}

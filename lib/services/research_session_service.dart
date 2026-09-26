@@ -135,7 +135,22 @@ class ResearchSessionService {
         rxBurstGapMs:
             rxBurstGapMs ?? MeshConfig.defaultRxBurstGap.inMilliseconds,
       );
-      await txn.insert('experiment_sessions', session.toDbMap());
+      final existingSession = await txn.query(
+        'experiment_sessions',
+        where: 'session_id = ?',
+        whereArgs: [session.sessionId],
+        limit: 1,
+      );
+      if (existingSession.isEmpty) {
+        await txn.insert('experiment_sessions', session.toDbMap());
+      } else {
+        await txn.update(
+          'experiment_sessions',
+          session.toDbMap(),
+          where: 'session_id = ?',
+          whereArgs: [session.sessionId],
+        );
+      }
       return session;
     });
   }

@@ -22,6 +22,7 @@ constexpr uint32_t kIminMs = 8000;
 constexpr uint32_t kImaxMs = 256000;
 constexpr uint32_t kDefaultRxBurstGapMs = 1000;
 constexpr uint32_t kQuietPeriodMs = 2000;
+constexpr size_t kSerialRxBufferBytes = 2048;
 
 enum class Role { Source, Relay, Destination, Observer };
 enum class Mode { Basic, Trickle };
@@ -588,6 +589,7 @@ void loadPersistentState() {
 }  // namespace
 
 void setup() {
+  Serial.setRxBufferSize(kSerialRxBufferBytes);
   Serial.begin(115200);
   delay(300);
   randomSeed(esp_random());
