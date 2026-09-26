@@ -70,6 +70,50 @@ void test_only_parallel_relay_counts_trickle_consistency() {
       shouldCountTrickleConsistency(true, false, true, true, 2, 1));
 }
 
+void test_observations_use_per_advertiser_inactivity_gap() {
+  ObservationTracker tracker(1000);
+  const auto firstA = tracker.observe("receiver", "A", "state", 100);
+  const auto repeatA = tracker.observe("receiver", "A", "state", 500);
+  const auto firstB = tracker.observe("receiver", "B", "state", 600);
+  const auto interleavedA = tracker.observe("receiver", "A", "state", 1200);
+  const auto nextA = tracker.observe("receiver", "A", "state", 2200);
+
+  TEST_ASSERT_TRUE(firstA.isNew);
+  TEST_ASSERT_FALSE(repeatA.isNew);
+  TEST_ASSERT_EQUAL_STRING(firstA.observationId.c_str(),
+                           repeatA.observationId.c_str());
+  TEST_ASSERT_TRUE(firstB.isNew);
+  TEST_ASSERT_FALSE(interleavedA.isNew);
+  TEST_ASSERT_EQUAL_STRING(firstA.observationId.c_str(),
+                           interleavedA.observationId.c_str());
+  TEST_ASSERT_TRUE(nextA.isNew);
+  TEST_ASSERT_NOT_EQUAL(0,
+                        firstA.observationId.compare(nextA.observationId));
+}
+
+void test_observation_tracker_is_bounded_and_evicts_oldest() {
+  ObservationTracker tracker(1000);
+  for (size_t index = 0; index < kObservationTrackerCapacity; index++) {
+    const auto decision = tracker.observe(
+        "receiver", "advertiser-" + std::to_string(index), "state",
+        static_cast<uint32_t>(100 + index));
+    TEST_ASSERT_TRUE(decision.isNew);
+  }
+  TEST_ASSERT_EQUAL_UINT32(kObservationTrackerCapacity,
+                           tracker.activeEntryCount());
+
+  const auto overflow =
+      tracker.observe("receiver", "overflow", "state", 10000);
+  TEST_ASSERT_TRUE(overflow.isNew);
+  TEST_ASSERT_EQUAL_UINT32(kObservationTrackerCapacity,
+                           tracker.activeEntryCount());
+  const auto evicted =
+      tracker.observe("receiver", "advertiser-0", "state", 10001);
+  TEST_ASSERT_TRUE(evicted.isNew);
+  TEST_ASSERT_EQUAL_UINT32(kObservationTrackerCapacity,
+                           tracker.activeEntryCount());
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_round_trip_signed_coordinates_and_hop);
@@ -77,5 +121,7 @@ int main(int, char**) {
   RUN_TEST(test_company_id_is_removed_from_manufacturer_data);
   RUN_TEST(test_research_protocol_contract_is_stable);
   RUN_TEST(test_only_parallel_relay_counts_trickle_consistency);
+  RUN_TEST(test_observations_use_per_advertiser_inactivity_gap);
+  RUN_TEST(test_observation_tracker_is_bounded_and_evicts_oldest);
   return UNITY_END();
 }

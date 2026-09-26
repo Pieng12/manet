@@ -37,6 +37,11 @@ data class NativeBleInboxStoreMutation(
 )
 
 object NativeBleInbox {
+    private data class ObservationWindow(
+        val observationId: String,
+        val burstStartedAt: Long
+    )
+
     private const val TAG = "NativeBleInbox"
     private const val PREFS = "resqmesh_native_ble_inbox"
     private const val KEY_ITEMS = "items_json"
@@ -65,21 +70,23 @@ object NativeBleInbox {
             receivedElapsedRealtimeMs,
             rxBurstGapMs
         )
-        val burstStartedAt = burstStartedAt(
-            receivedElapsedRealtimeMs,
-            receivedAt,
-            rxBurstGapMs
-        )
-        val observationId = observationId(payloadHash, observerKey, burstStartedAt)
         val metadata = protocolMetadata(payload)
         val items = readItems(context)
+        val observation = observationWindow(
+            items,
+            payloadHash,
+            observerKey,
+            receivedAt,
+            receivedElapsedRealtimeMs,
+            rxBurstGapMs
+        )
         val mutation = storeIntoItems(
             items = items,
             payloadBase64 = payloadBase64,
-            observationId = observationId,
+            observationId = observation.observationId,
             payloadHash = payloadHash,
             observerKey = observerKey,
-            burstStartedAt = burstStartedAt,
+            burstStartedAt = observation.burstStartedAt,
             metadata = metadata,
             deviceAddress = deviceAddress,
             rssi = rssi,
@@ -172,18 +179,22 @@ object NativeBleInbox {
             receivedElapsedRealtimeMs,
             rxBurstGapMs
         )
-        val burstStartedAt = burstStartedAt(
-            receivedElapsedRealtimeMs,
+        val items = JSONArray(rawItemsJson)
+        val observation = observationWindow(
+            items,
+            payloadHash,
+            observerKey,
             receivedAt,
+            receivedElapsedRealtimeMs,
             rxBurstGapMs
         )
         return storeIntoItems(
-            items = JSONArray(rawItemsJson),
+            items = items,
             payloadBase64 = payloadBase64,
-            observationId = observationId(payloadHash, observerKey, burstStartedAt),
+            observationId = observation.observationId,
             payloadHash = payloadHash,
             observerKey = observerKey,
-            burstStartedAt = burstStartedAt,
+            burstStartedAt = observation.burstStartedAt,
             metadata = protocolMetadata(payload),
             deviceAddress = deviceAddress,
             rssi = rssi,
@@ -362,6 +373,53 @@ object NativeBleInbox {
             .joinToString("") { "%02x".format(it) }
     }
 
+    private fun observationWindow(
+        items: JSONArray,
+        payloadHash: String,
+        observerKey: String,
+        receivedAt: Long,
+        receivedElapsedRealtimeMs: Long,
+        rxBurstGapMs: Long
+    ): ObservationWindow {
+        val gap = rxBurstGapMs.coerceAtLeast(1L)
+        var matchingItem: JSONObject? = null
+        var shortestInactivity = Long.MAX_VALUE
+        for (i in 0 until items.length()) {
+            val item = items.getJSONObject(i)
+            if (item.optString("exact_payload_hash") != payloadHash ||
+                item.optString("observer_key") != observerKey
+            ) {
+                continue
+            }
+            val previousElapsed = item.optLong("last_seen_elapsed_realtime_ms", 0L)
+            val useElapsed = receivedElapsedRealtimeMs > 0L && previousElapsed > 0L
+            val currentTime = if (useElapsed) receivedElapsedRealtimeMs else receivedAt
+            val previousTime = if (useElapsed) previousElapsed else item.optLong("last_seen_at", 0L)
+            val inactivity = currentTime - previousTime
+            if (previousTime > 0L && inactivity >= 0L && inactivity < shortestInactivity) {
+                shortestInactivity = inactivity
+                matchingItem = item
+            }
+        }
+        if (matchingItem != null && shortestInactivity < gap) {
+            return ObservationWindow(
+                observationId = matchingItem.optString(
+                    "observation_id",
+                    matchingItem.getString("id")
+                ),
+                burstStartedAt = matchingItem.optLong(
+                    "burst_started_elapsed_realtime_ms",
+                    0L
+                )
+            )
+        }
+        val startedAt = burstStartedAt(receivedElapsedRealtimeMs, receivedAt, gap)
+        return ObservationWindow(
+            observationId = observationId(payloadHash, observerKey, startedAt),
+            burstStartedAt = startedAt
+        )
+    }
+
     fun observerKey(
         deviceAddress: String?,
         receivedAt: Long,
@@ -372,7 +430,7 @@ object NativeBleInbox {
         return if (normalized.isNotEmpty() && normalized != "unknown") {
             "ble:$normalized"
         } else {
-            "unknown:${burstStartedAt(receivedElapsedRealtimeMs, receivedAt, rxBurstGapMs)}"
+            "unknown"
         }
     }
 
@@ -382,12 +440,7 @@ object NativeBleInbox {
         rxBurstGapMs: Long = NativeBleConfig.DEFAULT_RX_BURST_GAP_MS
     ): Long {
         val base = if (receivedElapsedRealtimeMs > 0L) receivedElapsedRealtimeMs else receivedAt
-        return if (base > 0L) {
-            val gap = rxBurstGapMs.coerceAtLeast(1L)
-            base / gap * gap
-        } else {
-            0L
-        }
+        return if (base > 0L) base else 0L
     }
 
     private fun u24(b0: Byte, b1: Byte, b2: Byte): Int {

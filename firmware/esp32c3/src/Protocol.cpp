@@ -45,6 +45,79 @@ double decodeCoordinate(const uint8_t* data, size_t offset) {
 
 }  // namespace
 
+ObservationTracker::ObservationTracker(uint32_t inactivityGapMs)
+    : inactivityGapMs_(inactivityGapMs == 0 ? 1 : inactivityGapMs) {}
+
+bool ObservationTracker::configure(uint32_t inactivityGapMs) {
+  if (inactivityGapMs == 0) return false;
+  inactivityGapMs_ = inactivityGapMs;
+  clear();
+  return true;
+}
+
+ObservationDecision ObservationTracker::observe(
+    const std::string& receiver, const std::string& advertiser,
+    const std::string& packetStateIdentity, uint32_t nowMs) {
+  Entry* matching = nullptr;
+  Entry* available = nullptr;
+  Entry* oldest = nullptr;
+  uint32_t oldestAge = 0;
+  for (auto& entry : entries_) {
+    if (entry.used && entry.advertiser == advertiser &&
+        entry.stateIdentity == packetStateIdentity) {
+      matching = &entry;
+      break;
+    }
+    if (!entry.used && available == nullptr) available = &entry;
+    if (entry.used) {
+      const uint32_t age = nowMs - entry.lastPacketAt;
+      if (oldest == nullptr || age > oldestAge) {
+        oldest = &entry;
+        oldestAge = age;
+      }
+    }
+  }
+
+  if (matching != nullptr) {
+    const uint32_t inactivity = nowMs - matching->lastPacketAt;
+    matching->lastPacketAt = nowMs;
+    if (inactivity < inactivityGapMs_) {
+      return {false, matching->currentObservationId};
+    }
+    available = matching;
+  } else if (available == nullptr) {
+    available = oldest;
+  }
+
+  available->used = true;
+  available->advertiser = advertiser;
+  available->stateIdentity = packetStateIdentity;
+  available->lastPacketAt = nowMs;
+  available->observationSequence = ++nextObservationSequence_;
+  available->currentObservationId =
+      receiver + "|" + advertiser + "|" + packetStateIdentity + "|" +
+      std::to_string(available->observationSequence) + "|" +
+      std::to_string(nowMs);
+  return {true, available->currentObservationId};
+}
+
+void ObservationTracker::clear() {
+  for (auto& entry : entries_) entry = Entry{};
+  nextObservationSequence_ = 0;
+}
+
+size_t ObservationTracker::activeEntryCount() const {
+  size_t count = 0;
+  for (const auto& entry : entries_) {
+    if (entry.used) count++;
+  }
+  return count;
+}
+
+uint32_t ObservationTracker::inactivityGapMs() const {
+  return inactivityGapMs_;
+}
+
 bool epochValid(uint64_t epochSeconds) {
   return epochSeconds >= kEpochSeconds &&
          epochSeconds < static_cast<uint64_t>(kEpochSeconds) + kTimestampModulo;

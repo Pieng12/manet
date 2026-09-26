@@ -11,7 +11,7 @@ enum ResqMeshMode { offline, gateway }
 
 class MeshConfig {
   static const String protocolVersion = 'resqmesh-ble17-v1';
-  static const Duration defaultRxBurstGap = Duration(seconds: 5);
+  static const Duration defaultRxBurstGap = Duration(milliseconds: 1000);
   static const int protocolEpochSeconds = int.fromEnvironment(
     'RESQMESH_PROTOCOL_EPOCH_SECONDS',
     defaultValue: 1780272000, // 2026-06-01T00:00:00Z

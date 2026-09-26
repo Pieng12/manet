@@ -14,6 +14,7 @@ constexpr uint32_t kEpochSeconds = 1780272000UL;
 constexpr const char* kEpochId = "resqmesh-2026-06-01";
 constexpr uint32_t kTimestampModulo = 1UL << 24;
 constexpr uint8_t kMaxHop = 63;
+constexpr size_t kObservationTrackerCapacity = 16;
 
 enum class PacketKind : uint8_t { Sos = 0, Ack = 1 };
 enum class Status : uint8_t { Cancelled = 0, Active = 1, Resolved = 2 };
@@ -27,6 +28,42 @@ struct Packet {
   Status status = Status::Active;
   bool fromServer = false;
   uint8_t hop = 0;
+};
+
+struct ObservationDecision {
+  ObservationDecision(bool newObservation, const std::string& id)
+      : isNew(newObservation), observationId(id) {}
+
+  bool isNew;
+  std::string observationId;
+};
+
+class ObservationTracker {
+ public:
+  explicit ObservationTracker(uint32_t inactivityGapMs);
+
+  bool configure(uint32_t inactivityGapMs);
+  ObservationDecision observe(const std::string& receiver,
+                              const std::string& advertiser,
+                              const std::string& stateIdentity,
+                              uint32_t nowMs);
+  void clear();
+  size_t activeEntryCount() const;
+  uint32_t inactivityGapMs() const;
+
+ private:
+  struct Entry {
+    bool used = false;
+    std::string advertiser;
+    std::string stateIdentity;
+    uint32_t lastPacketAt = 0;
+    uint32_t observationSequence = 0;
+    std::string currentObservationId;
+  };
+
+  std::array<Entry, kObservationTrackerCapacity> entries_{};
+  uint32_t inactivityGapMs_;
+  uint32_t nextObservationSequence_ = 0;
 };
 
 bool epochValid(uint64_t epochSeconds);

@@ -20,6 +20,8 @@ Isi `android_build_id` dan `firmware_build_id` pada `experiment.local.json`
 dengan nilai `$BuildId` yang sama. Placeholder, nilai generik, SHA berbeda,
 atau SHA kurang dari 12 karakter ditolak. PlatformIO menyuntikkan SHA pendek
 dari commit aktif ke firmware secara otomatis saat build.
+`rx_burst_gap_ms` wajib positif dan nilai awal `1000` diteruskan ke seluruh
+node, diperiksa saat readiness, serta dicatat pada fingerprint dan manifest.
 
 Aktifkan Bluetooth dan izin scan/advertise pada Android. Flash firmware yang
 sama ke R1A, R1B, R2A, R2B, dan Destination. Native USB ESP32-C3 memakai

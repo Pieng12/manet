@@ -130,6 +130,17 @@ void main() {
     expect(epoch['representable_end'], isNotNull);
     expect(epoch['remaining_days'], greaterThan(0));
     expect(epoch['valid'], isTrue);
+    expect(
+      result['rx_burst_gap_ms'],
+      MeshConfig.defaultRxBurstGap.inMilliseconds,
+    );
+  });
+
+  test('readiness reports configured RX burst inactivity gap', () async {
+    await commands.execute('configure_session', configureArgs());
+    final result = await commands.execute('readiness', const {});
+
+    expect(result['rx_burst_gap_ms'], 2400);
   });
 
   test('start trial fails clearly when protocol epoch is exhausted', () async {

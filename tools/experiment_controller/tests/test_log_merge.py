@@ -73,7 +73,15 @@ class LogMergeTest(unittest.TestCase):
             trial_event("BLE_PACKET_DUPLICATE", observation_id="duplicate-1"),
             trial_event("BLE_PACKET_DUPLICATE", observation_id="duplicate-2"),
         ]
-        summary = summarize_trial("trial-1", events, valid_record())
+        deduplicated = deduplicate(events + [dict(events[-1])])
+        duplicate_events = [
+            event
+            for event in deduplicated
+            if event["event_type"] == "BLE_PACKET_DUPLICATE"
+        ]
+        self.assertEqual(2, len(duplicate_events))
+
+        summary = summarize_trial("trial-1", deduplicated, valid_record())
         self.assertEqual(2, summary["duplicates"])
         self.assertAlmostEqual(2 / 3, summary["ldr"])
 

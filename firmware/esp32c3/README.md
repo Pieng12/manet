@@ -36,6 +36,7 @@ company ID secara eksplisit.
 - Hop relay: `min(hopIn + 1, 63)`
 - Trickle: `Imin=8 s`, `Imax=256 s`, `k=1`, `t` pada `[I/2, I)`
 - Basic: burst 2 s, interval 2 s dari akhir burst, jitter 300-1500 ms
+- RX burst inactivity gap awal: `1000 ms` (dikirim melalui `configure_session`)
 
 Tidak ada nearest-window reconstruction. `start_trial` dan `trigger_sos`
 gagal dengan `PROTOCOL_EPOCH_OUT_OF_RANGE` jika clock berada di luar rentang
@@ -47,7 +48,7 @@ Setiap command dan respons adalah satu objek JSON per baris. Contoh minimum:
 
 ```json
 {"command":"clock_sync","command_id":"clock-1","wall_time_ms":1784000000000}
-{"command":"configure_session","command_id":"cfg-1","node_id":"esp-r1a","build_id":"session-label","session_id":"s1","role":"RELAY","mode":"trickle","hypothesis":"H2","node_layer":1,"expected_hop_in":1,"hop_out":2,"protocol_active":true,"protocol_version":"resqmesh-ble17-v1","protocol_epoch_id":"resqmesh-2026-06-01","protocol_epoch_seconds":1780272000}
+{"command":"configure_session","command_id":"cfg-1","node_id":"esp-r1a","build_id":"session-label","session_id":"s1","role":"RELAY","mode":"trickle","hypothesis":"H2","node_layer":1,"expected_hop_in":1,"hop_out":2,"rx_burst_gap_ms":1000,"protocol_active":true,"protocol_version":"resqmesh-ble17-v1","protocol_epoch_id":"resqmesh-2026-06-01","protocol_epoch_seconds":1780272000}
 {"command":"start_trial","command_id":"start-1","trial_id":"t1"}
 {"command":"readiness","command_id":"ready-1"}
 {"command":"reset_trial","command_id":"reset-1","trial_id":"t1"}

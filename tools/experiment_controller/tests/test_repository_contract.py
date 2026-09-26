@@ -29,6 +29,7 @@ class RepositoryContractTest(unittest.TestCase):
         config["android_build_id"] = "0123456789ab"
         config["firmware_build_id"] = "0123456789ab"
         validate_config(config)
+        self.assertEqual(1000, config["rx_burst_gap_ms"])
         self.assertEqual(PHYSICAL_NODE_IDS, {node["node_id"] for node in config["nodes"]})
         ports = [node["port"] for node in config["nodes"] if node["transport"] == "serial"]
         self.assertEqual(5, len(ports))
@@ -69,6 +70,9 @@ class RepositoryContractTest(unittest.TestCase):
         self.assertIn('if (!burstId.isEmpty()) document["burst_id"]', firmware)
         receive_call = 'emit("BLE_PACKET_RECEIVED", &incoming, nullptr, rssi, observation);'
         self.assertIn(receive_call, firmware)
+        self.assertNotIn("lastObservationKey", firmware)
+        self.assertNotIn("lastObservationAt", firmware)
+        self.assertIn("ObservationTracker observationTracker", firmware)
 
 
 if __name__ == "__main__":

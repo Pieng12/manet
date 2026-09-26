@@ -7,7 +7,7 @@ object NativeBleConfig {
     const val MANUFACTURER_ID = 0xFFFF
     const val SIMULATION_MANUFACTURER_ID = 0x0006
     const val PROTOCOL_LENGTH_BYTES = 17
-    const val DEFAULT_RX_BURST_GAP_MS = 5000L
+    const val DEFAULT_RX_BURST_GAP_MS = 1000L
     private const val PREFS = "resqmesh_research_config"
     private const val KEY_RX_BURST_GAP_MS = "rx_burst_gap_ms"
 

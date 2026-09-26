@@ -78,6 +78,7 @@ class FakeNode(NodeTransport):
         self.expected_hop = 0
         self.hop_out = 0
         self.reported_build_id: str | None = None
+        self.reported_rx_burst_gap_ms: int | None = None
 
     def command(self, name: str, arguments: dict) -> dict:
         self.commands.append((name, dict(arguments)))
@@ -109,6 +110,9 @@ class FakeNode(NodeTransport):
                 "payload_length": 17,
                 "manufacturer_id": 0xFFFF,
                 "protocol_version": PROTOCOL_VERSION,
+                "rx_burst_gap_ms": self.reported_rx_burst_gap_ms
+                if self.reported_rx_burst_gap_ms is not None
+                else self.config["rx_burst_gap_ms"],
                 "android_build_id": self.reported_build_id
                 or self.config["android_build_id"],
                 "firmware_build_id": self.reported_build_id
@@ -199,6 +203,21 @@ class ControllerTest(unittest.TestCase):
             controller = ExperimentController(value, nodes, Path(temporary), sleep=lambda _: None)
             with self.assertRaisesRegex(Exception, "build identity"):
                 controller.readiness()
+
+    def test_readiness_rejects_different_rx_burst_gap(self) -> None:
+        value = physical_config()
+        nodes = fake_nodes(value)
+        nodes[0].reported_rx_burst_gap_ms = value["rx_burst_gap_ms"] + 1
+        with tempfile.TemporaryDirectory() as temporary:
+            controller = ExperimentController(value, nodes, Path(temporary), sleep=lambda _: None)
+            with self.assertRaisesRegex(Exception, "rx_burst_gap_ms"):
+                controller.readiness()
+
+    def test_config_rejects_non_positive_rx_burst_gap(self) -> None:
+        value = physical_config()
+        value["rx_burst_gap_ms"] = 0
+        with self.assertRaisesRegex(ConfigError, "rx_burst_gap_ms"):
+            validate_config(value)
 
     def test_research_fingerprint_tracks_research_inputs_not_trial_target(self) -> None:
         value = physical_config()
@@ -363,7 +382,21 @@ class ControllerTest(unittest.TestCase):
             self.assertEqual(["esp-destination"], result["destination_node_ids"])
             self.assertEqual(1000, result["observation_window_ms"])
             self.assertEqual(value["clock_tolerance_ms"], result["clock_tolerance_ms"])
+            self.assertEqual(value["rx_burst_gap_ms"], result["rx_burst_gap_ms"])
             self.assertEqual("100:200", result["message_key"])
+            configure_commands = [
+                arguments
+                for node in controller.nodes
+                for name, arguments in node.commands
+                if name == "configure_session"
+            ]
+            self.assertTrue(configure_commands)
+            self.assertTrue(
+                all(
+                    item["rx_burst_gap_ms"] == value["rx_burst_gap_ms"]
+                    for item in configure_commands
+                )
+            )
 
 
 if __name__ == "__main__":

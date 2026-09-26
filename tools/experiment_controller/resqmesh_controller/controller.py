@@ -155,6 +155,12 @@ class ExperimentController:
             errors.append(f"manufacturer_id={result.get('manufacturer_id')!r}")
         if result.get("protocol_version", PROTOCOL_VERSION) != PROTOCOL_VERSION:
             errors.append(f"protocol_version={result.get('protocol_version')!r}")
+        expected_rx_burst_gap = int(self.config["rx_burst_gap_ms"])
+        if result.get("rx_burst_gap_ms") != expected_rx_burst_gap:
+            errors.append(
+                f"rx_burst_gap_ms={result.get('rx_burst_gap_ms')!r}, "
+                f"expected {expected_rx_burst_gap!r}"
+            )
         if node.transport == "adb":
             if result.get("bluetooth") is not True:
                 errors.append("Bluetooth is disabled")
@@ -263,6 +269,7 @@ class ExperimentController:
                 "protocol_epoch_seconds": PROTOCOL_EPOCH_SECONDS,
                 "manufacturer_id": 0xFFFF,
                 "burst_duration_ms": 2000,
+                "rx_burst_gap_ms": int(self.config["rx_burst_gap_ms"]),
                 "node_layer": topology.get("node_layer", 0),
                 "expected_hop_in": topology.get("expected_hop_in", 0),
                 "hop_out": topology.get("hop_out", 0),
@@ -442,6 +449,7 @@ class ExperimentController:
                 float(self.config["observation_window_seconds"]) * 1000
             ),
             "clock_tolerance_ms": int(self.config["clock_tolerance_ms"]),
+            "rx_burst_gap_ms": int(self.config["rx_burst_gap_ms"]),
             "started_at_ms": time.time_ns() // 1_000_000,
             "config_fingerprint": self.config_fingerprint,
         }

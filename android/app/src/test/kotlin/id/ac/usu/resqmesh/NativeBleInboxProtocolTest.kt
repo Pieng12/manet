@@ -71,7 +71,7 @@ class NativeBleInboxProtocolTest {
     fun sameDeviceSamePayloadRawRepeatsInsideBurstUseOneObservation() {
         val payload = hex("52 4D C6 A2 99 A9 E2 6F 7D 0E 45 FD 2A 83 1F 00 01")
         val first = NativeBleInbox.storeForTest("[]", payload, "AA:AA", -60, 1000L, 1000L)
-        val second = NativeBleInbox.storeForTest(first.itemsJson, payload, "AA:AA", -61, 2000L, 2000L)
+        val second = NativeBleInbox.storeForTest(first.itemsJson, payload, "AA:AA", -61, 1500L, 1500L)
         val items = JSONArray(second.itemsJson)
 
         assertEquals(NativeBleInboxStoreStatus.NEW_PENDING, first.result.status)
@@ -81,7 +81,7 @@ class NativeBleInboxProtocolTest {
         assertTrue(second.result.shouldScheduleWorker)
         assertEquals(1, items.length())
         assertEquals(1, items.getJSONObject(0).getInt("duplicate_count"))
-        assertEquals(2000L, items.getJSONObject(0).getLong("last_seen_at"))
+        assertEquals(1500L, items.getJSONObject(0).getLong("last_seen_at"))
         assertEquals(-61, items.getJSONObject(0).getInt("last_rssi"))
         assertEquals(first.result.observationId, items.getJSONObject(0).getString("observation_id"))
     }
@@ -95,7 +95,7 @@ class NativeBleInboxProtocolTest {
             .put("state", "processed")
             .put("processed_at", 1500L)
 
-        val duplicate = NativeBleInbox.storeForTest(items.toString(), payload, "AA:AA", -62, 2000L, 2000L)
+        val duplicate = NativeBleInbox.storeForTest(items.toString(), payload, "AA:AA", -62, 1500L, 1500L)
         val after = JSONArray(duplicate.itemsJson)
 
         assertEquals(
@@ -123,6 +123,45 @@ class NativeBleInboxProtocolTest {
         assertEquals(2, items.length())
         assertEquals("ble:AA:AA", items.getJSONObject(0).getString("observer_key"))
         assertEquals("ble:BB:BB", items.getJSONObject(1).getString("observer_key"))
+    }
+
+    @Test
+    fun interleavedAdvertisersKeepIndependentInactivityWindows() {
+        val payload = hex("52 4D C6 A2 99 A9 E2 6F 7D 0E 45 FD 2A 83 1F 00 01")
+        val firstA = NativeBleInbox.storeForTest(
+            "[]", payload, "AA:AA", -60, 1000L, 1000L, 1000L
+        )
+        val firstB = NativeBleInbox.storeForTest(
+            firstA.itemsJson, payload, "BB:BB", -61, 1200L, 1200L, 1000L
+        )
+        val secondA = NativeBleInbox.storeForTest(
+            firstB.itemsJson, payload, "AA:AA", -62, 1800L, 1800L, 1000L
+        )
+
+        assertEquals(firstA.result.observationId, secondA.result.observationId)
+        assertEquals(NativeBleInboxStoreStatus.EXISTING_PENDING, secondA.result.status)
+        assertEquals(2, JSONArray(secondA.itemsJson).length())
+    }
+
+    @Test
+    fun inactivityGapIsMeasuredFromEveryPhysicalPacket() {
+        val payload = hex("52 4D C6 A2 99 A9 E2 6F 7D 0E 45 FD 2A 83 1F 00 01")
+        val first = NativeBleInbox.storeForTest(
+            "[]", payload, "AA:AA", -60, 1000L, 1000L, 1000L
+        )
+        val second = NativeBleInbox.storeForTest(
+            first.itemsJson, payload, "AA:AA", -61, 1800L, 1800L, 1000L
+        )
+        val third = NativeBleInbox.storeForTest(
+            second.itemsJson, payload, "AA:AA", -62, 2500L, 2500L, 1000L
+        )
+        val nextBurst = NativeBleInbox.storeForTest(
+            third.itemsJson, payload, "AA:AA", -63, 3500L, 3500L, 1000L
+        )
+
+        assertEquals(first.result.observationId, second.result.observationId)
+        assertEquals(first.result.observationId, third.result.observationId)
+        assertNotEquals(first.result.observationId, nextBurst.result.observationId)
     }
 
     @Test
@@ -186,8 +225,8 @@ class NativeBleInboxProtocolTest {
             payload,
             "AA:AA",
             -62,
-            2100L,
-            2100L,
+            3900L,
+            3900L,
             rxBurstGapMs = 2000L
         )
 
@@ -200,13 +239,13 @@ class NativeBleInboxProtocolTest {
     fun unknownDeviceSamePayloadInsideBurstUsesStableFallbackObservation() {
         val payload = hex("52 4D C6 A2 99 A9 E2 6F 7D 0E 45 FD 2A 83 1F 00 01")
         val first = NativeBleInbox.storeForTest("[]", payload, "unknown", -60, 1000L, 1000L)
-        val second = NativeBleInbox.storeForTest(first.itemsJson, payload, "unknown", -61, 2000L, 2000L)
+        val second = NativeBleInbox.storeForTest(first.itemsJson, payload, "unknown", -61, 1500L, 1500L)
         val items = JSONArray(second.itemsJson)
 
         assertEquals(NativeBleInboxStoreStatus.EXISTING_PENDING, second.result.status)
         assertEquals(first.result.observationId, second.result.observationId)
         assertEquals(1, items.length())
-        assertEquals("unknown:0", items.getJSONObject(0).getString("observer_key"))
+        assertEquals("unknown", items.getJSONObject(0).getString("observer_key"))
     }
 
     @Test
@@ -225,7 +264,7 @@ class NativeBleInboxProtocolTest {
         val first = NativeBleInbox.storeForTest("[]", payload, null, -60, 1010L, 1010L)
         val restartedProcess = NativeBleInbox.storeForTest("[]", payload, null, -61, 4040L, 4040L)
 
-        assertEquals(first.result.observationId, restartedProcess.result.observationId)
+        assertNotEquals(first.result.observationId, restartedProcess.result.observationId)
         assertEquals(
             NativeBleInbox.observerKey(null, 1010L, 1010L),
             NativeBleInbox.observerKey(null, 4040L, 4040L)

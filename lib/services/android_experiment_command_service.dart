@@ -451,6 +451,8 @@ class AndroidExperimentCommandService {
       'trial_id': trial?.trialId,
       'role': session?.nodeRole,
       'protocol_active': session?.protocolActive,
+      'rx_burst_gap_ms':
+          session?.rxBurstGapMs ?? MeshConfig.defaultRxBurstGap.inMilliseconds,
       'expected_hop_in': session?.expectedHopIn,
       'hop_out': session?.hopOut,
       'gateway_enabled': session?.gatewayEnabled ?? false,

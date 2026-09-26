@@ -20,7 +20,7 @@ constexpr uint32_t kBurstMs = 2000;
 constexpr uint32_t kBasicIntervalMs = 2000;
 constexpr uint32_t kIminMs = 8000;
 constexpr uint32_t kImaxMs = 256000;
-constexpr uint32_t kObservationGapMs = 5000;
+constexpr uint32_t kDefaultRxBurstGapMs = 1000;
 constexpr uint32_t kQuietPeriodMs = 2000;
 
 enum class Role { Source, Relay, Destination, Observer };
@@ -37,6 +37,7 @@ struct NodeConfig {
   uint8_t nodeLayer = 0;
   uint8_t expectedHopIn = 0;
   uint8_t hopOut = 0;
+  uint32_t rxBurstGapMs = kDefaultRxBurstGapMs;
   bool protocolActive = false;
 };
 
@@ -64,8 +65,7 @@ bool wallClockValid = false;
 uint32_t burstSequence = 0;
 uint32_t quietUntil = 0;
 String serialBuffer;
-String lastObservationKey;
-uint32_t lastObservationAt = 0;
+ObservationTracker observationTracker(kDefaultRxBurstGapMs);
 
 bool due(uint32_t now, uint32_t deadline) {
   return static_cast<int32_t>(now - deadline) >= 0;
@@ -175,6 +175,7 @@ void persistConfig() {
   preferences.putUChar("layer", config.nodeLayer);
   preferences.putUChar("hopin", config.expectedHopIn);
   preferences.putUChar("hopout", config.hopOut);
+  preferences.putUInt("rxgap", config.rxBurstGapMs);
   preferences.putBool("active", config.protocolActive);
 }
 
@@ -193,8 +194,7 @@ void clearProtocolState() {
   if (scheduler.advertising && advertising != nullptr) advertising->stop();
   scheduler = SchedulerState();
   preferences.remove("packet");
-  lastObservationKey = "";
-  lastObservationAt = 0;
+  observationTracker.clear();
 }
 
 void chooseTrickleTransmit(uint32_t now, const char* reason) {
@@ -251,14 +251,10 @@ void recordConsistent(const Packet& incoming, const String& observationId) {
 void processPacket(const Packet& incoming, int rssi,
                    const String& advertiser) {
   const uint32_t now = millis();
-  const String observation =
-      advertiser + "|" + String(stateIdentity(incoming).c_str());
-  if (observation == lastObservationKey &&
-      static_cast<uint32_t>(now - lastObservationAt) < kObservationGapMs) {
-    return;
-  }
-  lastObservationKey = observation;
-  lastObservationAt = now;
+  const ObservationDecision decision = observationTracker.observe(
+      config.nodeId.c_str(), advertiser.c_str(), stateIdentity(incoming), now);
+  if (!decision.isNew) return;
+  const String observation(decision.observationId.c_str());
   emit("BLE_PACKET_RECEIVED", &incoming, nullptr, rssi, observation);
 
   if (!config.protocolActive || config.role == Role::Source ||
@@ -440,6 +436,7 @@ void emitReadiness(const String& commandId) {
           : 0;
   document["payload_length"] = kPayloadLength;
   document["manufacturer_id"] = kManufacturerId;
+  document["rx_burst_gap_ms"] = config.rxBurstGapMs;
   serializeJson(document, Serial);
   Serial.println();
 }
@@ -491,6 +488,12 @@ void handleCommand(const String& line) {
       respond(command, commandId, false, "INVALID_MODE");
       return;
     }
+    const uint32_t requestedRxBurstGapMs =
+        document["rx_burst_gap_ms"] | 0;
+    if (requestedRxBurstGapMs == 0) {
+      respond(command, commandId, false, "INVALID_rx_burst_gap_ms");
+      return;
+    }
     config.nodeId = String(document["node_id"] | "esp32-unconfigured");
     config.sessionLabel = String(document["build_id"] | "");
     config.sessionId = String(document["session_id"] | "");
@@ -500,7 +503,9 @@ void handleCommand(const String& line) {
     config.nodeLayer = document["node_layer"] | 0;
     config.expectedHopIn = document["expected_hop_in"] | 0;
     config.hopOut = document["hop_out"] | 0;
+    config.rxBurstGapMs = requestedRxBurstGapMs;
     config.protocolActive = document["protocol_active"] | true;
+    observationTracker.configure(config.rxBurstGapMs);
     persistConfig();
     respond(command, commandId, true);
     return;
@@ -568,7 +573,10 @@ void loadPersistentState() {
   config.nodeLayer = preferences.getUChar("layer", 0);
   config.expectedHopIn = preferences.getUChar("hopin", 0);
   config.hopOut = preferences.getUChar("hopout", 0);
+  config.rxBurstGapMs =
+      preferences.getUInt("rxgap", kDefaultRxBurstGapMs);
   config.protocolActive = preferences.getBool("active", false);
+  observationTracker.configure(config.rxBurstGapMs);
   if (preferences.getBytesLength("packet") == kPayloadLength) {
     std::array<uint8_t, kPayloadLength> bytes{};
     preferences.getBytes("packet", bytes.data(), bytes.size());

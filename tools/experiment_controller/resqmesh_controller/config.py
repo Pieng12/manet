@@ -185,6 +185,12 @@ def validate_config(config: dict[str, Any]) -> None:
         clock_tolerance = -1
     if clock_tolerance < 0:
         errors.append("clock_tolerance_ms must be zero or positive")
+    try:
+        rx_burst_gap = int(config.get("rx_burst_gap_ms", 0))
+    except (TypeError, ValueError):
+        rx_burst_gap = 0
+    if rx_burst_gap <= 0:
+        errors.append("rx_burst_gap_ms must be positive")
 
     if errors:
         raise ConfigError("; ".join(errors))

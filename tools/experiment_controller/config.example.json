@@ -14,6 +14,7 @@
   "observation_window_seconds": 60,
   "quiet_period_seconds": 5,
   "clock_tolerance_ms": 100,
+  "rx_burst_gap_ms": 1000,
   "latitude": 3.5952,
   "longitude": 98.6722,
   "gateway_enabled": false,

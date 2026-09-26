@@ -632,6 +632,30 @@ void main() {
     expect(stored['duplicate_count'], 1);
   });
 
+  test(
+    'basic flooding records duplicate without Trickle suppression',
+    () async {
+      final sos = message('basic-logical-duplicate', senderCrc: 4411);
+      await queue.storeAndQueueSos(message: sos, nextEligibleAt: now);
+
+      final recorded = await queue.recordLogicalDuplicateObservation(
+        messageId: sos.id,
+        observationId: 'basic-burst-duplicate',
+        observerKey: 'ble:R1',
+        nowMs: now + 1,
+      );
+      final stored = (await db.query(
+        'sos_messages',
+        where: 'id = ?',
+        whereArgs: [sos.id],
+      )).single;
+
+      expect(stored['duplicate_count'], 1);
+      expect(recorded.trickleRecorded, isFalse);
+      expect(await queue.trickleStateFor(sos.id), isNull);
+    },
+  );
+
   test('trickle observation id controls idempotent c increments', () async {
     final trickle = RelayQueueService(
       database: db,
