@@ -79,10 +79,17 @@ class FakeNode(NodeTransport):
         self.hop_out = 0
         self.reported_build_id: str | None = None
         self.reported_rx_burst_gap_ms: int | None = None
+        self.reject_configure_while_stale = False
 
     def command(self, name: str, arguments: dict) -> dict:
         self.commands.append((name, dict(arguments)))
         if name == "configure_session":
+            if self.reject_configure_while_stale and self.trial_id:
+                return {
+                    "ok": False,
+                    "command_id": arguments.get("command_id"),
+                    "error": "STALE_TRIAL_RUNNING",
+                }
             self.session_id = arguments["session_id"]
             self.mode = arguments["mode"]
             self.role = arguments["role"]
@@ -179,6 +186,38 @@ def fake_nodes(config: dict, provider=None) -> list[FakeNode]:
 
 
 class ControllerTest(unittest.TestCase):
+    def test_run_recovers_interrupted_trial_before_configuring(self) -> None:
+        value = physical_config()
+        nodes = fake_nodes(value)
+        for node in nodes:
+            node.session_id = "interrupted-session"
+            node.trial_id = "basic_flooding-H2-A001"
+            node.reject_configure_while_stale = True
+
+        with tempfile.TemporaryDirectory() as temporary:
+            controller = ExperimentController(
+                value,
+                nodes,
+                Path(temporary),
+                sleep=lambda _: None,
+            )
+            results = controller.run(limit=1)
+
+            self.assertEqual("SUCCESS", results[0]["result"])
+            self.assertEqual(6, len(controller.manifest["startup_recovery"]["states"]))
+            for node in nodes:
+                command_names = [name for name, _ in node.commands]
+                self.assertLess(
+                    command_names.index("reset_trial"),
+                    command_names.index("configure_session"),
+                )
+            android = next(node for node in nodes if node.transport == "adb")
+            command_names = [name for name, _ in android.commands]
+            self.assertLess(
+                command_names.index("finalize_trial"),
+                command_names.index("reset_trial"),
+            )
+
     def test_placeholder_build_ids_are_rejected(self) -> None:
         value = physical_config()
         value["android_build_id"] = "unknown"

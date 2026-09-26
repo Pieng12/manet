@@ -255,6 +255,83 @@ class ExperimentController:
             raise DeviceError("readiness failed: " + " | ".join(failures))
         return results
 
+    def recover_interrupted_trials(
+        self,
+        readiness: dict[str, dict[str, Any]],
+    ) -> None:
+        stale_by_node = {
+            node.node_id: str(readiness.get(node.node_id, {}).get("trial_id") or "").strip()
+            for node in self.nodes
+        }
+        stale_by_node = {
+            node_id: trial_id
+            for node_id, trial_id in stale_by_node.items()
+            if trial_id
+        }
+        if not stale_by_node:
+            return
+
+        recovered: list[dict[str, str]] = []
+        for node in self.nodes:
+            trial_id = stale_by_node.get(node.node_id)
+            if not trial_id:
+                continue
+            if node.transport == "adb":
+                finalized = node.command(
+                    "finalize_trial",
+                    {
+                        "command_id": self._command_id(
+                            "recover-finalize", trial_id, node.node_id
+                        ),
+                        "trial_id": trial_id,
+                        "result": "INVALID",
+                        "reason": "HOST_CONTROLLER_INTERRUPTED",
+                    },
+                )
+                if finalized.get("ok") is not True:
+                    raise DeviceError(
+                        f"interrupted trial finalization failed: {node.node_id}: {finalized}"
+                    )
+            reset = node.command(
+                "reset_trial",
+                {
+                    "command_id": self._command_id(
+                        "recover-reset", trial_id, node.node_id
+                    ),
+                    "trial_id": trial_id,
+                },
+            )
+            if reset.get("ok") is not True:
+                raise DeviceError(
+                    f"interrupted trial reset failed: {node.node_id}: {reset}"
+                )
+            recovered.append({"node_id": node.node_id, "trial_id": trial_id})
+
+        self.sleep(float(self.config.get("quiet_period_seconds", 3)))
+        verification = self.readiness()
+        failures: list[str] = []
+        for node in self.nodes:
+            result = verification[node.node_id]
+            if result.get("trial_id") not in (None, ""):
+                failures.append(
+                    f"{node.node_id}: trial_id was not cleared: {result.get('trial_id')!r}"
+                )
+            if result.get("advertising", result.get("advertiser")) is True:
+                failures.append(f"{node.node_id}: scheduler is still advertising")
+            if int(result.get("queue_size", 0) or 0) != 0:
+                failures.append(f"{node.node_id}: relay queue is not empty")
+            if result.get("packet_pending", False) is True:
+                failures.append(f"{node.node_id}: old packet is still pending")
+            if result.get("quiet_period_complete", True) is not True:
+                failures.append(f"{node.node_id}: quiet period is not complete")
+        if failures:
+            raise DeviceError("interrupted trial recovery failed: " + " | ".join(failures))
+        self.manifest["startup_recovery"] = {
+            "recovered_at_ms": time.time_ns() // 1_000_000,
+            "states": recovered,
+        }
+        self._save_manifest()
+
     def configure(self, spec: TrialSpec) -> None:
         for node in self.nodes:
             topology = self._node_topology(node, spec.hypothesis)
@@ -649,7 +726,8 @@ class ExperimentController:
             writer.writerows(rows)
 
     def run(self, limit: int | None = None) -> list[dict[str, Any]]:
-        self.readiness()
+        readiness = self.readiness()
+        self.recover_interrupted_trials(readiness)
         self._save_manifest()
         results: list[dict[str, Any]] = []
         index = 0
