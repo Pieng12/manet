@@ -202,8 +202,14 @@ class AdbNode(NodeTransport):
             document = json.loads(raw)
         except json.JSONDecodeError as error:
             raise DeviceError("Android event export is not valid JSON") from error
+        exported_device_id = str(document.get("session", {}).get("device_id") or "")
+        if exported_device_id != self.node_id:
+            raise DeviceError(
+                "Android event export device mismatch: "
+                f"{exported_device_id!r}, expected {self.node_id!r}"
+            )
         events = [
-            item
+            {**item, "node_id": self.node_id, "device_id": self.node_id}
             for item in document.get("events", [])
             if isinstance(item, dict) and item.get("event_type")
         ]

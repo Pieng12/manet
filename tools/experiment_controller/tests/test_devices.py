@@ -24,6 +24,7 @@ class DeviceTransportTest(unittest.TestCase):
             "json_path": "/data/user/0/id.ac.usu.resqmesh/app_flutter/trial.json",
         }
         exported = {
+            "session": {"device_id": "android-source"},
             "events": [
                 {
                     "session_id": "session-1",
@@ -46,6 +47,8 @@ class DeviceTransportTest(unittest.TestCase):
 
         self.assertEqual(1, len(events))
         self.assertEqual("SOURCE_FIRST_ADVERTISE_STARTED", events[0]["event_type"])
+        self.assertEqual("android-source", events[0]["node_id"])
+        self.assertEqual("android-source", events[0]["device_id"])
         self.assertEqual("exec-out", run.call_args.args[0][3])
         self.assertEqual("app_flutter/trial.json", run.call_args.args[0][-1])
 
