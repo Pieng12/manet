@@ -130,6 +130,9 @@ class ExperimentController:
     def _command_id(self, prefix: str, *parts: str) -> str:
         return "-".join((prefix, self.manifest["session_id"], *parts))
 
+    def _device_trial_id(self, spec: TrialSpec) -> str:
+        return f"{spec.trial_id}--{self.manifest['session_id']}"
+
     def _node_topology(self, node: NodeTransport, hypothesis: str) -> dict[str, Any]:
         configured = next(item for item in self.config["nodes"] if item["node_id"] == node.node_id)
         return {**configured, **configured["topology"][hypothesis]}
@@ -195,9 +198,10 @@ class ExperimentController:
                     errors.append(f"{key}={result.get(key)!r}, expected {value!r}")
             if result.get("gateway_enabled", False) is True or result.get("ack_enabled", False) is True:
                 errors.append("gateway/ACK is enabled in the main experiment")
-            if require_active_trial and result.get("trial_id") != spec.trial_id:
+            device_trial_id = self._device_trial_id(spec)
+            if require_active_trial and result.get("trial_id") != device_trial_id:
                 errors.append(
-                    f"trial_id={result.get('trial_id')!r}, expected {spec.trial_id!r}"
+                    f"trial_id={result.get('trial_id')!r}, expected {device_trial_id!r}"
                 )
             if after_reset and result.get("trial_id") not in (None, ""):
                 errors.append(f"trial_id was not cleared: {result.get('trial_id')!r}")
@@ -390,21 +394,27 @@ class ExperimentController:
 
     def _collect_trial_events(self, spec: TrialSpec) -> list[dict[str, Any]]:
         session_id = self.manifest["session_id"]
+        device_trial_id = self._device_trial_id(spec)
         events: list[dict[str, Any]] = []
         discarded: list[dict[str, Any]] = []
         for node in self.nodes:
-            node_events = node.collect_events(session_id=session_id, trial_id=spec.trial_id)
+            node_events = node.collect_events(
+                session_id=session_id,
+                trial_id=device_trial_id,
+            )
             accepted: list[dict[str, Any]] = []
             for event in node_events:
                 if (
                     event.get("session_id") != session_id
-                    or event.get("trial_id") != spec.trial_id
+                    or event.get("trial_id") != device_trial_id
                     or event.get("event_type") in (None, "")
                     or event.get("node_id", event.get("device_id")) != node.node_id
                 ):
                     discarded.append({"transport_node": node.node_id, "event": event})
                     continue
                 normalized = dict(event)
+                normalized["device_trial_id"] = device_trial_id
+                normalized["trial_id"] = spec.trial_id
                 normalized.setdefault("mode", spec.mode)
                 normalized.setdefault("hypothesis", spec.hypothesis)
                 normalized.setdefault("clock_sync_valid", True)
@@ -508,6 +518,7 @@ class ExperimentController:
             )
             self._save_manifest()
             return previous
+        device_trial_id = self._device_trial_id(spec)
         source_ids = [
             node.node_id
             for node in self.nodes
@@ -522,6 +533,7 @@ class ExperimentController:
         ]
         record: dict[str, Any] = {
             "trial_id": spec.trial_id,
+            "device_trial_id": device_trial_id,
             "session_id": self.manifest["session_id"],
             "terminal": False,
             "mode": spec.mode,
@@ -551,7 +563,7 @@ class ExperimentController:
                     {
                         "command_id": self._command_id("start", spec.trial_id, node.node_id),
                         "session_id": self.manifest["session_id"],
-                        "trial_id": spec.trial_id,
+                        "trial_id": device_trial_id,
                         "trial_code": spec.trial_id,
                     },
                 )
@@ -563,7 +575,7 @@ class ExperimentController:
                 "trigger_sos",
                 {
                     "command_id": self._command_id("trigger", spec.trial_id),
-                    "trial_id": spec.trial_id,
+                    "trial_id": device_trial_id,
                     "node_id": sources[0].node_id,
                     "latitude": self.config.get("latitude", 3.5952),
                     "longitude": self.config.get("longitude", 98.6722),
@@ -580,7 +592,7 @@ class ExperimentController:
                         "end_observation_window",
                         {
                             "command_id": self._command_id("window", spec.trial_id, node.node_id),
-                            "trial_id": spec.trial_id,
+                            "trial_id": device_trial_id,
                         },
                     )
             events = self._collect_trial_events(spec)
@@ -602,7 +614,7 @@ class ExperimentController:
                     "finalize_trial",
                     {
                         "command_id": self._command_id("finalize", spec.trial_id, node.node_id),
-                        "trial_id": spec.trial_id,
+                        "trial_id": device_trial_id,
                         "result": result_name,
                         "reason": ";".join(invalid_reasons),
                     },
@@ -612,7 +624,7 @@ class ExperimentController:
                     {
                         "command_id": self._command_id("export", spec.trial_id, node.node_id),
                         "session_id": self.manifest["session_id"],
-                        "trial_id": spec.trial_id,
+                        "trial_id": device_trial_id,
                     },
                 )
         except Exception as error:
@@ -631,7 +643,7 @@ class ExperimentController:
                         "reset_trial",
                         {
                             "command_id": self._command_id("reset", spec.trial_id, node.node_id),
-                            "trial_id": spec.trial_id,
+                            "trial_id": device_trial_id,
                         },
                     )
                     if response.get("ok") is not True:

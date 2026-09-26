@@ -151,9 +151,10 @@ def standard_provider(outcome_by_attempt=None):
     outcomes = outcome_by_attempt or (lambda _attempt: "SUCCESS")
 
     def provide(node: FakeNode, session_id: str, trial_id: str) -> list[dict]:
-        attempt = int(trial_id.rsplit("A", 1)[1])
-        hypothesis = trial_id.split("-")[1]
-        mode = trial_id.split("-")[0]
+        logical_trial_id = trial_id.split("--", 1)[0]
+        attempt = int(logical_trial_id.rsplit("A", 1)[1])
+        hypothesis = logical_trial_id.split("-")[1]
+        mode = logical_trial_id.split("-")[0]
         outcome = outcomes(attempt)
         values: list[dict] = []
         if node.node_id == "android-source":
@@ -186,6 +187,39 @@ def fake_nodes(config: dict, provider=None) -> list[FakeNode]:
 
 
 class ControllerTest(unittest.TestCase):
+    def test_device_trial_id_is_namespaced_by_session(self) -> None:
+        first = physical_config()
+        first["session_id"] = "session-one"
+        second = copy.deepcopy(first)
+        second["session_id"] = "session-two"
+        spec = build_plan(first)[0]
+
+        with (
+            tempfile.TemporaryDirectory() as first_output,
+            tempfile.TemporaryDirectory() as second_output,
+        ):
+            first_controller = ExperimentController(
+                first,
+                fake_nodes(first),
+                Path(first_output),
+                sleep=lambda _: None,
+            )
+            second_controller = ExperimentController(
+                second,
+                fake_nodes(second),
+                Path(second_output),
+                sleep=lambda _: None,
+            )
+
+            self.assertNotEqual(
+                first_controller._device_trial_id(spec),
+                second_controller._device_trial_id(spec),
+            )
+            self.assertEqual(
+                f"{spec.trial_id}--session-one",
+                first_controller._device_trial_id(spec),
+            )
+
     def test_run_recovers_interrupted_trial_before_configuring(self) -> None:
         value = physical_config()
         nodes = fake_nodes(value)
@@ -417,6 +451,10 @@ class ControllerTest(unittest.TestCase):
             controller = ExperimentController(value, fake_nodes(value), Path(temporary), sleep=lambda _: None)
             result = controller.run_trial(build_plan(value)[0])
             self.assertEqual(controller.manifest["session_id"], result["session_id"])
+            self.assertEqual(
+                f"{result['trial_id']}--{controller.manifest['session_id']}",
+                result["device_trial_id"],
+            )
             self.assertEqual("android-source", result["source_node_id"])
             self.assertEqual(["esp-destination"], result["destination_node_ids"])
             self.assertEqual(1000, result["observation_window_ms"])

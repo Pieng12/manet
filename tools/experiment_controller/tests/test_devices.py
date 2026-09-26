@@ -1,7 +1,8 @@
 import sys
 import unittest
+from unittest.mock import patch
 
-from resqmesh_controller.devices import SerialNode, _run
+from resqmesh_controller.devices import AdbNode, SerialNode, _run
 
 
 class FakeConnection:
@@ -16,6 +17,38 @@ class FakeConnection:
 
 
 class DeviceTransportTest(unittest.TestCase):
+    def test_adb_events_are_read_from_durable_export(self) -> None:
+        node = AdbNode("android-source", "SOURCE", "SERIAL")
+        node.command = lambda name, arguments: {
+            "ok": True,
+            "json_path": "/data/user/0/id.ac.usu.resqmesh/app_flutter/trial.json",
+        }
+        exported = {
+            "events": [
+                {
+                    "session_id": "session-1",
+                    "trial_id": "trial-1",
+                    "event_type": "SOURCE_FIRST_ADVERTISE_STARTED",
+                },
+                {
+                    "session_id": "old-session",
+                    "trial_id": "trial-1",
+                    "event_type": "BLE_ADVERTISE_STARTED",
+                },
+            ]
+        }
+
+        with patch(
+            "resqmesh_controller.devices._run",
+            return_value=__import__("json").dumps(exported),
+        ) as run:
+            events = node.collect_events("session-1", "trial-1")
+
+        self.assertEqual(1, len(events))
+        self.assertEqual("SOURCE_FIRST_ADVERTISE_STARTED", events[0]["event_type"])
+        self.assertEqual("exec-out", run.call_args.args[0][3])
+        self.assertEqual("app_flutter/trial.json", run.call_args.args[0][-1])
+
     def test_subprocess_output_replaces_non_utf8_bytes(self) -> None:
         output = _run(
             [

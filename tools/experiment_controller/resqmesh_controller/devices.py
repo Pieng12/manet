@@ -170,8 +170,43 @@ class AdbNode(NodeTransport):
         session_id: str | None = None,
         trial_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        logs = _run([self.adb, "-s", self.serial, "logcat", "-d", "-v", "raw"])
-        events = [item for item in _extract_json_lines(logs) if item.get("event_type")]
+        if session_id is None or trial_id is None:
+            raise DeviceError("Android event export requires session_id and trial_id")
+        exported = self.command(
+            "export_trial",
+            {
+                "command_id": f"collect-{session_id}-{trial_id}",
+                "session_id": session_id,
+                "trial_id": trial_id,
+            },
+        )
+        if exported.get("ok") is not True:
+            raise DeviceError(f"Android event export failed: {exported}")
+        json_path = str(exported.get("json_path") or "")
+        private_prefix = f"/data/user/0/{self.package}/"
+        if not json_path.startswith(private_prefix):
+            raise DeviceError(f"unexpected Android export path: {json_path!r}")
+        raw = _run(
+            [
+                self.adb,
+                "-s",
+                self.serial,
+                "exec-out",
+                "run-as",
+                self.package,
+                "cat",
+                json_path.removeprefix(private_prefix),
+            ],
+        )
+        try:
+            document = json.loads(raw)
+        except json.JSONDecodeError as error:
+            raise DeviceError("Android event export is not valid JSON") from error
+        events = [
+            item
+            for item in document.get("events", [])
+            if isinstance(item, dict) and item.get("event_type")
+        ]
         return [
             item
             for item in events
