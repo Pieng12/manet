@@ -64,11 +64,13 @@ class BleAdvertiserService {
   Timer? _slotTimer;
   bool _isSchedulerOwner = false;
   bool _isSelecting = false;
+  bool _researchObservationPaused = false;
   Timer? _queueWakeTimer;
   RelaySchedulerState _schedulerState = RelaySchedulerState.stopped;
   int _transientFailureCount = 0;
   bool get isSchedulerOwner => _isSchedulerOwner;
   RelaySchedulerState get schedulerState => _schedulerState;
+  bool get researchObservationPaused => _researchObservationPaused;
   String? get currentAdvertisedMessageId => _currentAdvertisedMessageId;
 
   static bool shouldLogSourceFirstAdvertise(SOSMessage message) =>
@@ -178,6 +180,7 @@ class BleAdvertiserService {
 
   void _startSlotTimer() {
     _slotTimer?.cancel();
+    if (_researchObservationPaused) return;
     _slotTimer = Timer(
       _relayQueue.slotDurationForMode(),
       () => advertiseLatestOrStop(preemptCurrent: true),
@@ -213,6 +216,10 @@ class BleAdvertiserService {
   Future<void> _scheduleNextQueueWake() async {
     _cancelQueueWakeTimer();
     await _publishPendingRelayWork();
+    if (_researchObservationPaused) {
+      _setSchedulerState(RelaySchedulerState.stopped);
+      return;
+    }
     if (_isBlockedSchedulerState) return;
     if (_isAdvertising) {
       _setSchedulerState(RelaySchedulerState.advertising);
@@ -342,6 +349,16 @@ class BleAdvertiserService {
     await advertiseLatestOrStop(preemptCurrent: true);
   }
 
+  void resumeResearchObservationWindow() {
+    _researchObservationPaused = false;
+  }
+
+  Future<void> pauseResearchObservationWindow() async {
+    _researchObservationPaused = true;
+    await stopAdvertising();
+    _setSchedulerState(RelaySchedulerState.stopped);
+  }
+
   Future<bool> advertiseOneHeadlessSlot() async {
     final wasOwner = _isSchedulerOwner;
     claimSchedulerOwnership();
@@ -406,6 +423,12 @@ class BleAdvertiserService {
       return;
     }
 
+    if (_researchObservationPaused) {
+      await stopAdvertising();
+      _setSchedulerState(RelaySchedulerState.stopped);
+      return;
+    }
+
     if (_isSelecting) return;
     _isSelecting = true;
     _setSchedulerState(RelaySchedulerState.selecting);
@@ -446,8 +469,18 @@ class BleAdvertiserService {
         _enterBlockedState(RelaySchedulerState.failedPermission);
         return;
       }
+      if (_researchObservationPaused) {
+        await stopAdvertising();
+        _setSchedulerState(RelaySchedulerState.stopped);
+        return;
+      }
 
       final queued = await _nextQueuedAdvertisement();
+      if (_researchObservationPaused) {
+        await stopAdvertising();
+        _setSchedulerState(RelaySchedulerState.stopped);
+        return;
+      }
       if (queued?.payload != null) {
         await _startQueuedAck(
           queued!,

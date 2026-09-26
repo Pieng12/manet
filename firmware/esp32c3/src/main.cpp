@@ -66,7 +66,9 @@ NimBLEScan* scanner = nullptr;
 uint64_t wallOffsetMs = 0;
 bool wallClockValid = false;
 uint32_t burstSequence = 0;
+uint64_t eventSequence = 0;
 uint32_t quietUntil = 0;
+bool observationWindowOpen = false;
 String serialBuffer;
 ObservationTracker observationTracker(kDefaultRxBurstGapMs);
 
@@ -115,6 +117,7 @@ void emit(const char* eventType, const Packet* packet = nullptr,
   JsonDocument document;
   document["kind"] = "event";
   document["event_type"] = eventType;
+  document["event_sequence"] = ++eventSequence;
   document["node_id"] = config.nodeId;
   document["session_id"] = config.sessionId;
   document["trial_id"] = config.trialId;
@@ -209,6 +212,16 @@ void clearProtocolState() {
   scheduler = SchedulerState();
   preferences.remove("packet");
   observationTracker.clear();
+}
+
+void cancelActiveBurst(const char* reason) {
+  if (!scheduler.advertising || advertising == nullptr) return;
+  advertising->stop();
+  resumeScanner();
+  scheduler.advertising = false;
+  emit("ADVERTISE_BURST_CANCELLED", &scheduler.packet, reason, 0, String(),
+       scheduler.burstId);
+  scheduler.burstId = "";
 }
 
 void chooseTrickleTransmit(uint32_t now, const char* reason) {
@@ -314,6 +327,7 @@ void processPacket(const Packet& incoming, int rssi,
 
 class ScanCallbacks : public NimBLEAdvertisedDeviceCallbacks {
   void onResult(NimBLEAdvertisedDevice* device) override {
+    if (!observationWindowOpen) return;
     if (!device->haveManufacturerData()) return;
     const std::string data = device->getManufacturerData();
     std::array<uint8_t, kPayloadLength> payload{};
@@ -399,7 +413,8 @@ void finishBurst() {
 }
 
 void tickScheduler() {
-  if (!scheduler.hasPacket || config.role == Role::Destination ||
+  if (!observationWindowOpen || !scheduler.hasPacket ||
+      config.role == Role::Destination ||
       config.role == Role::Observer || !config.protocolActive) {
     return;
   }
@@ -461,6 +476,7 @@ void emitReadiness(const String& commandId) {
   document["payload_length"] = kPayloadLength;
   document["manufacturer_id"] = kManufacturerId;
   document["rx_burst_gap_ms"] = config.rxBurstGapMs;
+  document["observation_window_open"] = observationWindowOpen;
   serializeJson(document, Serial);
   Serial.println();
 }
@@ -541,8 +557,18 @@ void handleCommand(const String& line) {
     }
     clearProtocolState();
     config.trialId = String(document["trial_id"] | "");
+    observationWindowOpen = true;
     persistConfig();
     emit("TRIAL_WINDOW_STARTED");
+    respond(command, commandId, true);
+    return;
+  }
+  if (command == "end_observation_window") {
+    if (observationWindowOpen) {
+      cancelActiveBurst("OBSERVATION_WINDOW_ENDED");
+      observationWindowOpen = false;
+      emit("TRIAL_WINDOW_ENDED");
+    }
     respond(command, commandId, true);
     return;
   }
@@ -575,6 +601,7 @@ void handleCommand(const String& line) {
     return;
   }
   if (command == "reset_trial") {
+    observationWindowOpen = false;
     clearProtocolState();
     quietUntil = millis() + kQuietPeriodMs;
     emit("TRIAL_RESET");

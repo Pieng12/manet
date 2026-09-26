@@ -57,6 +57,18 @@ void test_research_protocol_contract_is_stable() {
   TEST_ASSERT_EQUAL_UINT8(63, saturatedRelayHop(63));
 }
 
+void test_cross_node_identities_use_millisecond_timestamp() {
+  Packet packet;
+  packet.senderCrc = 2110340604;
+  packet.timestampSeconds = 1790450822;
+  packet.status = Status::Active;
+
+  TEST_ASSERT_EQUAL_STRING("2110340604:1790450822000",
+                           messageKey(packet).c_str());
+  TEST_ASSERT_EQUAL_STRING("2110340604:1790450822000:1:0:0",
+                           stateIdentity(packet).c_str());
+}
+
 void test_only_parallel_relay_counts_trickle_consistency() {
   TEST_ASSERT_FALSE(
       shouldCountTrickleConsistency(true, true, true, true, 1, 1));
@@ -120,6 +132,7 @@ int main(int, char**) {
   RUN_TEST(test_exact_epoch_boundaries);
   RUN_TEST(test_company_id_is_removed_from_manufacturer_data);
   RUN_TEST(test_research_protocol_contract_is_stable);
+  RUN_TEST(test_cross_node_identities_use_millisecond_timestamp);
   RUN_TEST(test_only_parallel_relay_counts_trickle_consistency);
   RUN_TEST(test_observations_use_per_advertiser_inactivity_gap);
   RUN_TEST(test_observation_tracker_is_bounded_and_evicts_oldest);

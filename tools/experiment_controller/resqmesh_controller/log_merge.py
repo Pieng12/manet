@@ -8,6 +8,19 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, Iterable
 
+from .excel_report import WORKBOOK_NAME, write_analysis_workbook
+
+
+METRIC_EVENT_TYPES = {
+    "ADVERTISE_BURST_STARTED",
+    "BLE_PACKET_ACCEPTED",
+    "BLE_PACKET_DUPLICATE",
+    "DESTINATION_FIRST_VALID_RECEIVE",
+    "SOURCE_FIRST_ADVERTISE_STARTED",
+    "TRICKLE_CONSISTENT_HEARD",
+    "TRICKLE_TX_SUPPRESSED",
+}
+
 
 def read_json_events(paths: Iterable[Path]) -> list[dict[str, Any]]:
     events: list[dict[str, Any]] = []
@@ -94,11 +107,114 @@ def _timestamp(event: dict[str, Any]) -> int | None:
     return int(round(float(value) + float(offset)))
 
 
+def event_within_observation_window(
+    event: dict[str, Any],
+    record: dict[str, Any],
+) -> bool:
+    start = record.get("observation_started_at_ms")
+    end = record.get("observation_ended_at_ms")
+    if start is None or end is None:
+        return True
+    timestamp = _timestamp(event)
+    if timestamp is None:
+        return False
+    return int(start) <= timestamp <= int(end)
+
+
+def research_event_integrity_errors(
+    events: list[dict[str, Any]],
+    record: dict[str, Any],
+) -> set[str]:
+    errors: set[str] = set()
+    if record.get("require_event_sequence") is True:
+        for node_id in record.get("event_sequence_node_ids", []):
+            node_events = [
+                event
+                for event in events
+                if event.get("node_id", event.get("device_id")) == node_id
+            ]
+            sequences: list[int] = []
+            for event in node_events:
+                try:
+                    sequences.append(int(event["event_sequence"]))
+                except (KeyError, TypeError, ValueError):
+                    errors.add(f"EVENT_SEQUENCE_MISSING:{node_id}")
+            if len(sequences) != len(set(sequences)):
+                errors.add(f"EVENT_SEQUENCE_DUPLICATE:{node_id}")
+            ordered = sorted(set(sequences))
+            if any(current != previous + 1 for previous, current in zip(ordered, ordered[1:])):
+                errors.add(f"EVENT_SEQUENCE_GAP:{node_id}")
+
+    if record.get("require_complete_event_cycles") is True:
+        received = {
+            (
+                event.get("node_id", event.get("device_id")),
+                event.get("observation_id"),
+            )
+            for event in events
+            if event.get("event_type") == "BLE_PACKET_RECEIVED"
+            and event.get("observation_id") not in (None, "")
+        }
+        for event in events:
+            if event.get("event_type") != "BLE_PACKET_DUPLICATE":
+                continue
+            node_id = event.get("node_id", event.get("device_id"))
+            observation_id = event.get("observation_id")
+            if observation_id in (None, ""):
+                errors.add(f"DUPLICATE_OBSERVATION_ID_MISSING:{node_id}")
+            elif (node_id, observation_id) not in received:
+                errors.add(f"DUPLICATE_RECEIVE_EVENT_MISSING:{node_id}")
+
+        terminal_bursts = {
+            (
+                event.get("node_id", event.get("device_id")),
+                event.get("burst_id"),
+            )
+            for event in events
+            if event.get("event_type")
+            in {"ADVERTISE_BURST_ENDED", "ADVERTISE_BURST_CANCELLED"}
+            and event.get("burst_id") not in (None, "")
+        }
+        for event in events:
+            if event.get("event_type") != "ADVERTISE_BURST_STARTED":
+                continue
+            node_id = event.get("node_id", event.get("device_id"))
+            burst_id = event.get("burst_id")
+            if burst_id in (None, "") or (node_id, burst_id) not in terminal_bursts:
+                errors.add(f"BURST_TERMINAL_EVENT_MISSING:{node_id}")
+    return errors
+
+
 def _hop(event: dict[str, Any]) -> int | None:
     try:
         return int(event.get("hop_in", event.get("hop_count", -1)))
     except (TypeError, ValueError):
         return None
+
+
+def canonical_message_key(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value)
+    try:
+        sender_crc, timestamp = text.split(":", 1)
+        timestamp_value = int(timestamp)
+    except (TypeError, ValueError):
+        return text
+    if 1_000_000_000 <= abs(timestamp_value) < 100_000_000_000:
+        timestamp_value *= 1000
+    return f"{sender_crc}:{timestamp_value}"
+
+
+def canonical_state_identity(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value)
+    parts = text.split(":")
+    if len(parts) != 5:
+        return text
+    message_key = canonical_message_key(":".join(parts[:2]))
+    return f"{message_key}:{':'.join(parts[2:])}"
 
 
 def summarize_trial(
@@ -108,26 +224,48 @@ def summarize_trial(
 ) -> dict[str, Any]:
     record = manifest_record or {}
     session_id = record.get("session_id")
-    events = deduplicate(
-        event
-        for event in events
-        if event.get("trial_id") == trial_id
-        and (session_id is None or event.get("session_id") == session_id)
-    )
+    normalized_events = []
+    for event in events:
+        if event.get("trial_id") != trial_id:
+            continue
+        if session_id is not None and event.get("session_id") != session_id:
+            continue
+        normalized = dict(event)
+        if "message_key" in normalized:
+            normalized["message_key"] = canonical_message_key(normalized["message_key"])
+        if "state_identity" in normalized:
+            normalized["state_identity"] = canonical_state_identity(
+                normalized["state_identity"]
+            )
+        normalized["within_observation_window"] = event_within_observation_window(
+            normalized,
+            record,
+        )
+        normalized_events.append(normalized)
+    events = deduplicate(normalized_events)
+    metric_events = [
+        event for event in events if event.get("within_observation_window") is True
+    ]
     evidence = record.get("evidence", {})
     source_node = record.get("source_node_id", evidence.get("source_node_id"))
     destinations = set(record.get("destination_node_ids", evidence.get("destination_node_ids", [])))
     expected_hop = record.get("expected_hop_in", evidence.get("expected_hop_in"))
-    expected_message_key = record.get("message_key", evidence.get("message_key"))
+    expected_message_key = canonical_message_key(
+        record.get("message_key", evidence.get("message_key"))
+    )
     invalid_reasons = {str(item) for item in record.get("invalid_reasons", [])}
+    invalid_reasons.update(research_event_integrity_errors(events, record))
     for key in (
         "source_node_id",
         "destination_node_ids",
         "expected_hop_in",
         "message_key",
     ):
-        if key in record and key in evidence and record[key] != evidence[key]:
-            invalid_reasons.add("CONTROLLER_LOG_EVIDENCE_MISMATCH")
+        if key in record and key in evidence:
+            record_value = canonical_message_key(record[key]) if key == "message_key" else record[key]
+            evidence_value = canonical_message_key(evidence[key]) if key == "message_key" else evidence[key]
+            if record_value != evidence_value:
+                invalid_reasons.add("CONTROLLER_LOG_EVIDENCE_MISMATCH")
 
     try:
         observation_window_ms = int(record["observation_window_ms"])
@@ -153,26 +291,30 @@ def summarize_trial(
         expected_hop_value = -1
         invalid_reasons.add("EXPECTED_HOP_INVALID")
 
-    accepted = sum(event.get("event_type") == "BLE_PACKET_ACCEPTED" for event in events)
-    duplicates = sum(event.get("event_type") == "BLE_PACKET_DUPLICATE" for event in events)
+    accepted = sum(
+        event.get("event_type") == "BLE_PACKET_ACCEPTED" for event in metric_events
+    )
+    duplicates = sum(
+        event.get("event_type") == "BLE_PACKET_DUPLICATE" for event in metric_events
+    )
     denominator = accepted + duplicates
     burst_starts = {
         (event.get("node_id", event.get("device_id")), event.get("burst_id"))
-        for event in events
+        for event in metric_events
         if event.get("event_type") == "ADVERTISE_BURST_STARTED"
         and event.get("packet_type", "sos") == "sos"
         and event.get("burst_id") not in (None, "")
     }
     source_events = [
         event
-        for event in events
+        for event in metric_events
         if event.get("event_type") == "SOURCE_FIRST_ADVERTISE_STARTED"
         and event.get("node_id", event.get("device_id")) == source_node
         and event.get("message_key") == expected_message_key
     ]
     destination_events = [
         event
-        for event in events
+        for event in metric_events
         if event.get("event_type") == "DESTINATION_FIRST_VALID_RECEIVE"
         and event.get("node_id", event.get("device_id")) in destinations
         and event.get("message_key") == expected_message_key
@@ -224,6 +366,14 @@ def summarize_trial(
         "result": result,
         "valid": result in {"SUCCESS", "FAILED_DELIVERY"},
         "invalid_reasons": ";".join(sorted(invalid_reasons)),
+        "events_total": len(events),
+        "events_in_window": len(metric_events),
+        "events_outside_window": len(events) - len(metric_events),
+        "metric_events_outside_window": sum(
+            event.get("within_observation_window") is False
+            and event.get("event_type") in METRIC_EVENT_TYPES
+            for event in events
+        ),
         "accepted": accepted,
         "duplicates": duplicates,
         "ldr": duplicates / denominator if denominator else None,
@@ -270,12 +420,28 @@ def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         writer.writerows(rows)
 
 
-def merge_directory(input_dir: Path, output_dir: Path, manifest_path: Path | None = None) -> dict[str, int]:
+def merge_directory(
+    input_dir: Path,
+    output_dir: Path,
+    manifest_path: Path | None = None,
+) -> dict[str, Any]:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path and manifest_path.exists() else {"trials": {}}
     events = deduplicate(read_json_events(input_dir.rglob("*.jsonl")))
     manifest_session = manifest.get("session_id")
     if manifest_session:
         events = [event for event in events if event.get("session_id") == manifest_session]
+    for event in events:
+        record = (manifest.get("trials") or {}).get(str(event.get("trial_id")), {})
+        if "message_key" in event:
+            event["message_key"] = canonical_message_key(event["message_key"])
+        if "state_identity" in event:
+            event["state_identity"] = canonical_state_identity(
+                event["state_identity"]
+            )
+        event["within_observation_window"] = event_within_observation_window(
+            event,
+            record,
+        )
     by_trial: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for event in events:
         if event.get("trial_id"):
@@ -308,4 +474,18 @@ def merge_directory(input_dir: Path, output_dir: Path, manifest_path: Path | Non
         for trial_id, record in sorted(manifest.get("trials", {}).items())
     ]
     _write_csv(output_dir / "attempt_summary.csv", attempts)
-    return {"events": len(events), "trials": len(summaries), "invalid": len(invalid)}
+    write_analysis_workbook(
+        output_dir / WORKBOOK_NAME,
+        manifest=manifest,
+        events=events,
+        trial_summaries=summaries,
+        aggregates=aggregates,
+        attempts=attempts,
+        invalid_trials=invalid,
+    )
+    return {
+        "events": len(events),
+        "trials": len(summaries),
+        "invalid": len(invalid),
+        "workbook": str(output_dir / WORKBOOK_NAME),
+    }

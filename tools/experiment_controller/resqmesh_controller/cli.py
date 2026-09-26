@@ -134,8 +134,18 @@ def main() -> int:
                 args.output.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(run_output / "smoke_report.json", args.output / "smoke_report.json")
                 shutil.copy2(run_output / "smoke_report.csv", args.output / "smoke_report.csv")
+                merge_directory(
+                    run_output / "raw",
+                    args.output / "smoke_merged",
+                    run_output / "manifest.json",
+                )
                 print(json.dumps(report, indent=2))
                 return 0 if report["passed"] else 5
+            merge_directory(
+                run_output / "raw",
+                run_output / "merged",
+                run_output / "manifest.json",
+            )
             print(json.dumps({"results": results, "summary": controller.batch_summary()}, indent=2))
     finally:
         for node in nodes:

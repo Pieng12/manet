@@ -232,7 +232,8 @@ bool extractApplicationPayload(
 
 std::string messageKey(const Packet& packet) {
   std::ostringstream stream;
-  stream << packet.senderCrc << ':' << packet.timestampSeconds;
+  stream << packet.senderCrc << ':'
+         << static_cast<uint64_t>(packet.timestampSeconds) * 1000ULL;
   return stream.str();
 }
 

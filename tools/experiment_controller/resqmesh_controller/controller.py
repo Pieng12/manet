@@ -14,6 +14,12 @@ from typing import Any, Callable
 from . import PROTOCOL_EPOCH_ID, PROTOCOL_EPOCH_SECONDS, PROTOCOL_VERSION
 from .config import HYPOTHESES, MODES, research_fingerprint, validate_config
 from .devices import DeviceError, NodeTransport, write_jsonl
+from .log_merge import (
+    canonical_message_key,
+    canonical_state_identity,
+    event_within_observation_window,
+    research_event_integrity_errors,
+)
 
 
 @dataclass(frozen=True)
@@ -413,6 +419,12 @@ class ExperimentController:
                     discarded.append({"transport_node": node.node_id, "event": event})
                     continue
                 normalized = dict(event)
+                if "message_key" in normalized:
+                    normalized["message_key"] = canonical_message_key(normalized["message_key"])
+                if "state_identity" in normalized:
+                    normalized["state_identity"] = canonical_state_identity(
+                        normalized["state_identity"]
+                    )
                 normalized["device_trial_id"] = device_trial_id
                 normalized["trial_id"] = spec.trial_id
                 normalized.setdefault("mode", spec.mode)
@@ -438,12 +450,19 @@ class ExperimentController:
         events: list[dict[str, Any]],
         source_node: NodeTransport,
         message_key: str | None,
+        record: dict[str, Any],
     ) -> tuple[str, list[str], dict[str, Any]]:
         invalid = {
             str(event.get("reason", "CONFIG_VIOLATION"))
             for event in events
             if event.get("event_type") == "EXPERIMENT_CONFIG_VIOLATION"
         }
+        invalid.update(research_event_integrity_errors(events, record))
+        metric_events = [
+            event
+            for event in events
+            if event_within_observation_window(event, record)
+        ]
         destination_ids = {
             node.node_id
             for node in self.nodes
@@ -454,7 +473,7 @@ class ExperimentController:
             invalid.add("MESSAGE_KEY_MISSING")
         source_starts = [
             event
-            for event in events
+            for event in metric_events
             if event.get("event_type") == "SOURCE_FIRST_ADVERTISE_STARTED"
             and event.get("node_id", event.get("device_id")) == source_node.node_id
             and (message_key is None or event.get("message_key") == message_key)
@@ -465,7 +484,7 @@ class ExperimentController:
             message_key = source_starts[0].get("message_key")
         destination_receives = [
             event
-            for event in events
+            for event in metric_events
             if event.get("event_type") == "DESTINATION_FIRST_VALID_RECEIVE"
             and event.get("node_id", event.get("device_id")) in destination_ids
             and event.get("message_key") == message_key
@@ -504,6 +523,9 @@ class ExperimentController:
             "expected_hop_in": expected_hop,
             "message_key": message_key,
             "e2e_latency_ms": latency_ms,
+            "events_total": len(events),
+            "events_in_window": len(metric_events),
+            "events_outside_window": len(events) - len(metric_events),
         }
 
     def run_trial(self, spec: TrialSpec) -> dict[str, Any]:
@@ -547,6 +569,11 @@ class ExperimentController:
             ),
             "clock_tolerance_ms": int(self.config["clock_tolerance_ms"]),
             "rx_burst_gap_ms": int(self.config["rx_burst_gap_ms"]),
+            "require_event_sequence": True,
+            "require_complete_event_cycles": True,
+            "event_sequence_node_ids": sorted(
+                node.node_id for node in self.nodes if node.transport == "serial"
+            ),
             "started_at_ms": time.time_ns() // 1_000_000,
             "config_fingerprint": self.config_fingerprint,
         }
@@ -571,6 +598,16 @@ class ExperimentController:
                     raise DeviceError(f"start failed: {node.node_id}: {result}")
             self.readiness(spec, require_active_trial=True)
             sources = [node for node in self.nodes if node.node_id == source_ids[0]]
+            observation_window_ms = int(
+                float(self.config["observation_window_seconds"]) * 1000
+            )
+            observation_started_at_ms = time.time_ns() // 1_000_000
+            observation_deadline = time.monotonic() + (observation_window_ms / 1000)
+            record["observation_started_at_ms"] = observation_started_at_ms
+            record["observation_ended_at_ms"] = (
+                observation_started_at_ms + observation_window_ms
+            )
+            self._save_manifest()
             trigger = sources[0].command(
                 "trigger_sos",
                 {
@@ -583,21 +620,38 @@ class ExperimentController:
             )
             if trigger.get("ok") is not True:
                 raise DeviceError(f"trigger failed: {trigger}")
-            record["message_key"] = trigger.get("message_key")
+            record["message_key"] = canonical_message_key(trigger.get("message_key"))
             self._save_manifest()
-            self.sleep(float(self.config["observation_window_seconds"]))
+            self.sleep(max(0.0, observation_deadline - time.monotonic()))
+            record["observation_stop_command_at_ms"] = time.time_ns() // 1_000_000
+            self._save_manifest()
             for node in self.nodes:
+                node_observation_end_ms = record["observation_ended_at_ms"]
                 if node.transport == "adb":
-                    node.command(
-                        "end_observation_window",
-                        {
-                            "command_id": self._command_id("window", spec.trial_id, node.node_id),
-                            "trial_id": device_trial_id,
-                        },
+                    node_observation_end_ms -= int(
+                        round(self.clock_offsets.get(node.node_id, 0.0))
+                    )
+                response = node.command(
+                    "end_observation_window",
+                    {
+                        "command_id": self._command_id(
+                            "window", spec.trial_id, node.node_id
+                        ),
+                        "trial_id": device_trial_id,
+                        "observation_ended_at_ms": node_observation_end_ms,
+                    },
+                )
+                if response.get("ok") is not True:
+                    raise DeviceError(
+                        f"end observation failed: {node.node_id}: {response}"
                     )
             events = self._collect_trial_events(spec)
             result_name, invalid_reasons, evidence = self._evaluate_events(
-                spec, events, sources[0], trigger.get("message_key")
+                spec,
+                events,
+                sources[0],
+                record["message_key"],
+                record,
             )
             record.update(
                 terminal=True,
@@ -783,7 +837,11 @@ class ExperimentController:
             paths = list((self.output_dir / "raw" / trial_id).glob("*.jsonl")) if trial_id else []
             events = read_json_events(paths)
             summary = summarize_trial(trial_id, events, record)
-            event_types = {event.get("event_type") for event in events}
+            event_types = {
+                event.get("event_type")
+                for event in events
+                if event_within_observation_window(event, record)
+            }
             missing: list[str] = []
             if record.get("result") != "SUCCESS":
                 missing.append("successful destination delivery")

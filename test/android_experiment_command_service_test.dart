@@ -15,8 +15,13 @@ void main() {
   late Database db;
   late AndroidExperimentCommandService commands;
   var activated = 0;
+  var observationStarts = 0;
+  var observationStops = 0;
 
   setUp(() async {
+    activated = 0;
+    observationStarts = 0;
+    observationStops = 0;
     sqfliteFfiInit();
     db = await databaseFactoryFfi.openDatabase(inMemoryDatabasePath);
     for (final sql in [
@@ -55,6 +60,12 @@ void main() {
       activateSos: (message) async {
         activated++;
         await db.insert('sos_messages', message.toDbMap());
+      },
+      startObservationWindow: () {
+        observationStarts++;
+      },
+      stopObservationWindow: () async {
+        observationStops++;
       },
       clock: FixedExperimentClock(
         wallMs: DateTime.utc(2026, 8, 1).millisecondsSinceEpoch,
@@ -223,6 +234,43 @@ void main() {
       greaterThan(eventsBefore),
     );
   });
+
+  test(
+    'end observation stops scheduling and preserves terminal event trial',
+    () async {
+      await commands.execute('configure_session', configureArgs());
+      await commands.execute('start_trial', {
+        'command_id': 'start-window',
+        'session_id': 'session-external',
+        'trial_id': 'trial-window',
+        'trial_code': 'H2-WINDOW',
+      });
+
+      final result = await commands.execute('end_observation_window', {
+        'command_id': 'end-window',
+        'trial_id': 'trial-window',
+        'observation_ended_at_ms': 1785542430000,
+      });
+
+      expect(result['changed'], isTrue);
+      expect(observationStarts, 1);
+      expect(observationStops, 1);
+      final trial = (await db.query(
+        'experiment_trials',
+        where: 'trial_id = ?',
+        whereArgs: ['trial-window'],
+      )).single;
+      expect(trial['status'], 'WINDOW_ENDED');
+      expect(trial['observation_ended_at'], 1785542430000);
+      final event = (await db.query(
+        'experiment_events',
+        where: 'event_type = ?',
+        whereArgs: ['TRIAL_WINDOW_ENDED'],
+      )).single;
+      expect(event['trial_id'], 'trial-window');
+      expect(event['event_timestamp_ms'], 1785542430000);
+    },
+  );
 
   test(
     'separate validation session may explicitly enable gateway and ACK',

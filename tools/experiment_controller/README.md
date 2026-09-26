@@ -68,8 +68,18 @@ diganti attempt baru sampai target atau `max_attempts_per_condition` tercapai.
 Resume tidak memicu ulang attempt terminal dan memakai urutan/seed dari
 manifest.
 
+Controller mencatat batas observation window host secara eksplisit, mengirim
+`end_observation_window` ke Android dan seluruh ESP32, serta hanya menghitung
+event di dalam batas tersebut. Event sesudah batas tetap diekspor untuk audit.
+Trial firmware baru juga diverifikasi melalui `event_sequence` dan pasangan
+receive/burst; kehilangan evidence membuat attempt `INVALID` dan memicu
+replacement sesuai `max_attempts_per_condition`.
+
 Output merger:
 
+- `resqmesh_analysis.xlsx` dengan sheet overview, definisi empat metrik,
+  ringkasan algoritma-hop, metrik setiap trial, seluruh event, attempt,
+  invalid trial, dan manifest trial
 - `events.json` dan `events.csv`
 - `trial_summary.csv`
 - `aggregate_by_mode_hop.csv`
@@ -79,6 +89,14 @@ Output merger:
 Output smoke adalah `smoke_report.json` dan `smoke_report.csv`. Raw log setiap
 attempt hanya berisi event dengan `session_id`, `trial_id`, dan node yang cocok.
 Event diagnostic yang ditolak disimpan terpisah di `diagnostics`.
+Perintah `smoke` otomatis membuat workbook di
+`<output>/smoke_merged/resqmesh_analysis.xlsx`; perintah `run` membuatnya di
+`<output>/merged/resqmesh_analysis.xlsx`. Perintah `merge` juga selalu membuat
+workbook yang sama di direktori output yang diberikan.
+
+Setelah perubahan controller, APK, atau firmware, commit perubahan terlebih
+dahulu lalu build dan flash ulang semua node dengan build ID commit yang sama.
+Smoke lama tidak boleh dipakai sebagai gate bagi build baru.
 
 ## Status Verifikasi
 

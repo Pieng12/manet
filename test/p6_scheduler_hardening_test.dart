@@ -54,6 +54,21 @@ void main() {
     },
   );
 
+  test('paused research window rejects later scheduler ticks', () async {
+    final advertiser = BleAdvertiserService();
+    advertiser.claimSchedulerOwnership();
+    addTearDown(() {
+      advertiser.resumeResearchObservationWindow();
+      advertiser.releaseSchedulerOwnership();
+    });
+
+    await advertiser.pauseResearchObservationWindow();
+    await advertiser.advertiseLatestOrStop(preemptCurrent: true);
+
+    expect(advertiser.researchObservationPaused, isTrue);
+    expect(advertiser.schedulerState, RelaySchedulerState.stopped);
+  });
+
   test(
     'failed advertising uses explicit retry delay without zero loop',
     () async {

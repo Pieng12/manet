@@ -4,7 +4,8 @@ Android dan ESP32 diekspor sebagai JSON event. Field canonical yang dipakai
 merger adalah `event_type`, `node_id`/`device_id`, `session_id`, `trial_id`,
 `mode`, `hypothesis`, `timestamp_ms`, `monotonic_ms` atau
 `elapsed_realtime_ms`, `message_key`, `state_identity`, `observation_id`,
-`event_key`, `burst_id`, `packet_type`, `status`, `hop_in`, `hop_out`, dan RSSI.
+`event_key`, `event_sequence`, `burst_id`, `packet_type`, `status`, `hop_in`,
+`hop_out`, dan RSSI.
 Merger hanya menerima event yang cocok dengan `session_id` dan `trial_id`
 manifest. Event tanpa trial, event trial lama, node tujuan yang salah, message
 key berbeda, dan hop yang tidak sesuai tidak boleh memengaruhi metrik.
@@ -22,6 +23,12 @@ Aturan hitung:
   `ADVERTISE_BURST_STARTED` pada semua node / jumlah trial valid. Trial gagal
   delivery tetap berada dalam penyebut.
 
+Keempat metrik hanya memakai event dengan normalized wall-clock timestamp di
+antara `observation_started_at_ms` dan `observation_ended_at_ms` (inklusif)
+pada manifest trial. Event di luar window tetap dipertahankan untuk audit dan
+ditandai melalui `within_observation_window=false`, tetapi tidak boleh mengubah
+DSR, E2E, LDR, transmission overhead, atau bukti suppression smoke.
+
 `ADVERTISE_BURST_REQUESTED` bukan TX sukses. Semua identitas deduplikasi selalu
 menyertakan session, trial, node, dan event type. Event started kemudian memakai
 burst ID, sedangkan event RX memakai event key atau observation ID. Hanya
@@ -37,3 +44,9 @@ trial `INVALID`.
 
 `attempt_summary.csv` memuat semua attempt terminal termasuk `INVALID`.
 `INVALID` tidak masuk penyebut DSR; `SUCCESS` dan `FAILED_DELIVERY` masuk.
+
+Trial baru mewajibkan `event_sequence` firmware yang kontinu. Gap atau sequence
+duplikat, `BLE_PACKET_DUPLICATE` tanpa `BLE_PACKET_RECEIVED` untuk observation
+yang sama, serta `ADVERTISE_BURST_STARTED` tanpa `ADVERTISE_BURST_ENDED` atau
+`ADVERTISE_BURST_CANCELLED` membuat trial `INVALID`. `message_key` dan
+`state_identity` lintas node memakai protocol timestamp dalam milidetik.

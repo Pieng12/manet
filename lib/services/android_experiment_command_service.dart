@@ -17,6 +17,8 @@ import 'package:pkmproject/utils/hash_utils.dart';
 import 'package:sqflite/sqflite.dart';
 
 typedef SosActivator = Future<void> Function(SOSMessage message);
+typedef ObservationWindowStarter = void Function();
+typedef ObservationWindowStopper = Future<void> Function();
 
 class AndroidExperimentCommandService {
   AndroidExperimentCommandService({
@@ -26,6 +28,8 @@ class AndroidExperimentCommandService {
     ExperimentLogger? logger,
     ExperimentExportService? exporter,
     SosActivator? activateSos,
+    ObservationWindowStarter? startObservationWindow,
+    ObservationWindowStopper? stopObservationWindow,
     ClockSource? clock,
     Duration resetQuietPeriod = MeshConfig.sosAdvertiseBurstDuration,
   }) : _database = database,
@@ -46,6 +50,12 @@ class AndroidExperimentCommandService {
              researchSessionService: sessions,
            ),
        _activateSos = activateSos ?? BleRelayService().activateForMessage,
+       _startObservationWindow =
+           startObservationWindow ??
+           BleAdvertiserService().resumeResearchObservationWindow,
+       _stopObservationWindow =
+           stopObservationWindow ??
+           BleAdvertiserService().pauseResearchObservationWindow,
        _clock = clock ?? ExperimentClock.instance,
        _resetQuietPeriod = resetQuietPeriod;
 
@@ -55,6 +65,8 @@ class AndroidExperimentCommandService {
   final ExperimentLogger _logger;
   final ExperimentExportService _exporter;
   final SosActivator _activateSos;
+  final ObservationWindowStarter _startObservationWindow;
+  final ObservationWindowStopper _stopObservationWindow;
   final ClockSource _clock;
   final Duration _resetQuietPeriod;
 
@@ -227,6 +239,7 @@ class AndroidExperimentCommandService {
       trialCode: _requiredString(args, 'trial_code'),
       commandId: _requiredString(args, 'command_id'),
     );
+    _startObservationWindow();
     await _logger.logEvent(
       eventType: ExperimentEventTypes.trialWindowStarted,
       deviceId: SyncService().deviceId,
@@ -299,19 +312,21 @@ class AndroidExperimentCommandService {
     Map<String, dynamic> args,
   ) async {
     final trialId = _requiredString(args, 'trial_id');
-    final now = DateTime.now().millisecondsSinceEpoch;
+    final now =
+        _optionalInt(args['observation_ended_at_ms']) ?? _clock.wallTimeMs();
     final db = await _db;
-    final changed = await db.update(
-      'experiment_trials',
-      {'status': 'WINDOW_ENDED', 'observation_ended_at': now},
-      where: 'trial_id = ? AND status = ?',
-      whereArgs: [trialId, 'RUNNING'],
-    );
+    await _stopObservationWindow();
     await _logger.logEvent(
       eventType: ExperimentEventTypes.trialWindowEnded,
       deviceId: SyncService().deviceId,
       eventTimestampMs: now,
       eventKey: 'TRIAL_WINDOW_ENDED|$trialId',
+    );
+    final changed = await db.update(
+      'experiment_trials',
+      {'status': 'WINDOW_ENDED', 'observation_ended_at': now},
+      where: 'trial_id = ? AND status = ?',
+      whereArgs: [trialId, 'RUNNING'],
     );
     return {'trial_id': trialId, 'changed': changed == 1};
   }

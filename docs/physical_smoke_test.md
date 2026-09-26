@@ -94,7 +94,9 @@ bukan jarak. Seluruh ESP memakai firmware yang sama.
 14. Periksa `experiment_output/smoke_report.json` dan `.csv`. H2/H3 Trickle
     harus memiliki consistency relay sejajar dan minimal satu suppression;
     Basic tidak boleh memiliki suppression Trickle. Requested burst tanpa
-    started callback tidak dihitung.
+    started callback tidak dihitung. Manifest setiap trial harus memiliki
+    `observation_started_at_ms` dan `observation_ended_at_ms`; event di luar
+    batas terlihat di workbook tetapi tidak masuk metrik.
 15. Jalankan batch hanya setelah smoke lulus.
 
     ```powershell
@@ -115,6 +117,8 @@ bukan jarak. Seluruh ESP memakai firmware yang sama.
 - Destination menerima message key yang sama pada hop kondisi.
 - E2E latency sinkron dan masuk akal.
 - Reset, queue kosong, dan quiet period terverifikasi.
+- Tidak ada `EVENT_SEQUENCE_*`, `DUPLICATE_RECEIVE_EVENT_MISSING`, atau
+  `BURST_TERMINAL_EVENT_MISSING` pada invalid reasons.
 - `smoke_report.json` memiliki `passed=true` untuk enam kondisi.
 
 Jika smoke gagal, controller keluar nonzero dan menyebut evidence yang hilang.

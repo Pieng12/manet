@@ -1,10 +1,14 @@
 import json
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
+
+from openpyxl import load_workbook
 
 from resqmesh_controller.log_merge import (
     aggregate,
+    canonical_state_identity,
     deduplicate,
     merge_directory,
     numeric_stats,
@@ -18,6 +22,8 @@ def trial_event(event_type: str, **values) -> dict:
         "trial_id": "trial-1",
         "node_id": "R1",
         "event_type": event_type,
+        "clock_sync_valid": True,
+        "clock_offset_ms": 0,
         **values,
     }
 
@@ -61,6 +67,12 @@ def delivery_events(*, source_time: int = 1000, destination_time: int = 1300) ->
 
 
 class LogMergeTest(unittest.TestCase):
+    def test_state_identity_normalizes_protocol_seconds_to_milliseconds(self) -> None:
+        self.assertEqual(
+            "2110340604:1790450822000:1:0:0",
+            canonical_state_identity("2110340604:1790450822:1:0:0"),
+        )
+
     def test_event_identity_is_scoped_and_exact_copies_are_deduplicated(self) -> None:
         value = trial_event("ADVERTISE_BURST_STARTED", burst_id="same")
         other_trial = value | {"trial_id": "trial-2"}
@@ -119,6 +131,89 @@ class LogMergeTest(unittest.TestCase):
         )
         self.assertEqual("INVALID", outside["result"])
         self.assertIn("E2E_LATENCY_OUT_OF_RANGE", outside["invalid_reasons"])
+
+    def test_metrics_exclude_events_after_explicit_observation_window(self) -> None:
+        events = delivery_events(source_time=1100, destination_time=1300) + [
+            trial_event(
+                "BLE_PACKET_ACCEPTED",
+                timestamp_ms=1200,
+                observation_id="accepted-in-window",
+            ),
+            trial_event(
+                "BLE_PACKET_DUPLICATE",
+                timestamp_ms=1400,
+                observation_id="duplicate-in-window",
+            ),
+            trial_event(
+                "BLE_PACKET_DUPLICATE",
+                timestamp_ms=2100,
+                observation_id="duplicate-after-window",
+            ),
+            trial_event(
+                "ADVERTISE_BURST_STARTED",
+                timestamp_ms=1500,
+                burst_id="burst-in-window",
+                packet_type="sos",
+            ),
+            trial_event(
+                "ADVERTISE_BURST_STARTED",
+                timestamp_ms=2200,
+                burst_id="burst-after-window",
+                packet_type="sos",
+            ),
+        ]
+        summary = summarize_trial(
+            "trial-1",
+            events,
+            valid_record(
+                observation_started_at_ms=1000,
+                observation_ended_at_ms=2000,
+            ),
+        )
+
+        self.assertEqual("SUCCESS", summary["result"])
+        self.assertEqual(1, summary["accepted"])
+        self.assertEqual(1, summary["duplicates"])
+        self.assertEqual(0.5, summary["ldr"])
+        self.assertEqual(1, summary["transmission_bursts"])
+        self.assertEqual(2, summary["metric_events_outside_window"])
+
+    def test_strict_integrity_rejects_sequence_and_unpaired_events(self) -> None:
+        events = delivery_events() + [
+            trial_event(
+                "BLE_PACKET_DUPLICATE",
+                node_id="relay",
+                observation_id="missing-receive",
+                event_sequence=1,
+            ),
+            trial_event(
+                "ADVERTISE_BURST_STARTED",
+                node_id="relay",
+                burst_id="missing-terminal",
+                packet_type="sos",
+                event_sequence=3,
+            ),
+        ]
+        summary = summarize_trial(
+            "trial-1",
+            events,
+            valid_record(
+                require_event_sequence=True,
+                event_sequence_node_ids=["relay"],
+                require_complete_event_cycles=True,
+            ),
+        )
+
+        self.assertEqual("INVALID", summary["result"])
+        self.assertIn("EVENT_SEQUENCE_GAP:relay", summary["invalid_reasons"])
+        self.assertIn(
+            "DUPLICATE_RECEIVE_EVENT_MISSING:relay",
+            summary["invalid_reasons"],
+        )
+        self.assertIn(
+            "BURST_TERMINAL_EVENT_MISSING:relay",
+            summary["invalid_reasons"],
+        )
 
     def test_missing_zero_or_negative_observation_window_is_invalid(self) -> None:
         for window in (None, 0, -1):
@@ -222,8 +317,41 @@ class LogMergeTest(unittest.TestCase):
                 "aggregate_by_mode_hop.csv",
                 "invalid_trials.csv",
                 "attempt_summary.csv",
+                "resqmesh_analysis.xlsx",
             ):
                 self.assertTrue((output / name).exists(), name)
+
+            workbook = load_workbook(output / "resqmesh_analysis.xlsx", read_only=True)
+            self.assertEqual(
+                [
+                    "Overview",
+                    "Metric Definitions",
+                    "Algorithm Summary",
+                    "Trial Metrics",
+                    "Event Type Counts",
+                    "Attempts",
+                    "Invalid Trials",
+                    "Manifest Metadata",
+                    "Manifest Trials",
+                    "All Events",
+                ],
+                workbook.sheetnames,
+            )
+            metric_rows = list(workbook["Metric Definitions"].iter_rows(values_only=True))
+            self.assertEqual({"DSR", "E2E", "LDR", "Overhead"}, {row[1] for row in metric_rows[1:]})
+            trial_rows = list(workbook["Trial Metrics"].iter_rows(values_only=True))
+            trial_header = list(trial_rows[0])
+            self.assertEqual("trickle", trial_rows[1][trial_header.index("algorithm")])
+            self.assertEqual(300, trial_rows[1][trial_header.index("e2e_latency_ms")])
+            event_rows = list(workbook["All Events"].iter_rows(values_only=True))
+            self.assertEqual(3, len(event_rows))
+            workbook.close()
+
+            with zipfile.ZipFile(output / "resqmesh_analysis.xlsx") as archive:
+                worksheet_xml = archive.read("xl/worksheets/sheet1.xml")
+                table_xml = archive.read("xl/tables/table1.xml")
+            self.assertNotIn(b"<autoFilter", worksheet_xml)
+            self.assertIn(b"<autoFilter", table_xml)
 
 
 if __name__ == "__main__":

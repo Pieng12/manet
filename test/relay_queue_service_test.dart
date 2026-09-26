@@ -555,6 +555,7 @@ void main() {
         ),
         existingMessage: localState,
         observerKey: 'ble:R1',
+        trialStartedAt: now - 1000,
       );
 
       expect(topology.countAsLogicalDuplicate, isTrue);

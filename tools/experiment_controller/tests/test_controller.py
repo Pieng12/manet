@@ -1,6 +1,7 @@
 import copy
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -144,7 +145,21 @@ class FakeNode(NodeTransport):
         return 0.0
 
     def collect_events(self, session_id=None, trial_id=None) -> list[dict]:
-        return self.provider(self, session_id, trial_id)
+        values = self.provider(self, session_id, trial_id)
+        base_timestamp = time.time_ns() // 1_000_000
+        sequence = 0
+        for value in values:
+            timestamp = int(value.get("timestamp_ms", 1000) or 1000)
+            if timestamp < 1_000_000_000_000:
+                value["timestamp_ms"] = base_timestamp + timestamp - 1000
+            if (
+                self.transport == "serial"
+                and value.get("session_id") == session_id
+                and value.get("trial_id") == trial_id
+            ):
+                sequence += 1
+                value.setdefault("event_sequence", sequence)
+        return values
 
 
 def standard_provider(outcome_by_attempt=None):
@@ -458,6 +473,12 @@ class ControllerTest(unittest.TestCase):
             self.assertEqual("android-source", result["source_node_id"])
             self.assertEqual(["esp-destination"], result["destination_node_ids"])
             self.assertEqual(1000, result["observation_window_ms"])
+            self.assertEqual(
+                result["observation_started_at_ms"] + 1000,
+                result["observation_ended_at_ms"],
+            )
+            self.assertTrue(result["require_event_sequence"])
+            self.assertTrue(result["require_complete_event_cycles"])
             self.assertEqual(value["clock_tolerance_ms"], result["clock_tolerance_ms"])
             self.assertEqual(value["rx_burst_gap_ms"], result["rx_burst_gap_ms"])
             self.assertEqual("100:200", result["message_key"])
@@ -472,6 +493,20 @@ class ControllerTest(unittest.TestCase):
                 all(
                     item["rx_burst_gap_ms"] == value["rx_burst_gap_ms"]
                     for item in configure_commands
+                )
+            )
+            end_window_commands = [
+                arguments
+                for node in controller.nodes
+                for name, arguments in node.commands
+                if name == "end_observation_window"
+            ]
+            self.assertEqual(len(controller.nodes), len(end_window_commands))
+            self.assertTrue(
+                all(
+                    item["observation_ended_at_ms"]
+                    == result["observation_ended_at_ms"]
+                    for item in end_window_commands
                 )
             )
 

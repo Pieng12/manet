@@ -55,7 +55,14 @@ class TopologyPolicy {
         reason: 'NODE_INACTIVE',
       );
     }
-    if (trialStartedAt != null && packet.timestampMs + 999 < trialStartedAt) {
+    if (trialStartedAt == null) {
+      return const TopologyDecision(
+        acceptForState: false,
+        relay: false,
+        reason: 'NO_RUNNING_RESEARCH_TRIAL',
+      );
+    }
+    if (packet.timestampMs + 999 < trialStartedAt) {
       return const TopologyDecision(
         acceptForState: false,
         relay: false,

@@ -62,6 +62,7 @@ void main() {
       packet: packet,
       session: session(role: 'DESTINATION'),
       observerKey: 'ble:source',
+      trialStartedAt: 1,
     );
 
     expect(result.acceptState, isTrue);
@@ -74,6 +75,7 @@ void main() {
       packet: packet,
       session: session(expectedHop: 1),
       observerKey: 'ble:source',
+      trialStartedAt: 1,
     );
 
     expect(result.acceptState, isFalse);
@@ -87,6 +89,7 @@ void main() {
       session: session(expectedHop: 1),
       existingMessage: existing(),
       observerKey: 'ble:peer-relay',
+      trialStartedAt: 1,
     );
 
     expect(result.acceptForState, isFalse);
@@ -104,6 +107,7 @@ void main() {
       session: session(expectedHop: 1),
       existingMessage: existing(status: SOSMessageStatus.resolved),
       observerKey: 'ble:peer-relay',
+      trialStartedAt: 1,
     );
 
     expect(result.countAsLogicalDuplicate, isFalse);
@@ -118,6 +122,7 @@ void main() {
       session: session(expectedHop: 1),
       existingMessage: existing(timestampMs: 2000),
       observerKey: 'ble:peer-relay',
+      trialStartedAt: 1,
     );
 
     expect(result.isTopologyIgnored, isTrue);
@@ -138,6 +143,7 @@ void main() {
       ),
       session: session(expectedHop: 63),
       observerKey: 'ble:source',
+      trialStartedAt: 1,
     );
 
     expect(result.acceptForState, isTrue);
@@ -149,6 +155,7 @@ void main() {
       packet: packet,
       session: session(role: 'SOURCE'),
       observerKey: 'ble:relay',
+      trialStartedAt: 1,
     );
 
     expect(result.isTopologyIgnored, isTrue);
@@ -162,6 +169,7 @@ void main() {
             packet: packet,
             session: session(active: false),
             observerKey: 'ble:source',
+            trialStartedAt: 1,
           )
           .reason,
       'NODE_INACTIVE',
@@ -172,6 +180,7 @@ void main() {
             packet: packet,
             session: session(allowed: '["ble:other"]'),
             observerKey: 'ble:source',
+            trialStartedAt: 1,
           )
           .reason,
       'ADVERTISER_NOT_ALLOWED',
@@ -188,5 +197,17 @@ void main() {
 
     expect(result.acceptState, isFalse);
     expect(result.reason, 'PREVIOUS_TRIAL_PACKET');
+  });
+
+  test('research packet is ignored when no trial is running', () {
+    final result = policy.evaluate(
+      packet: packet,
+      session: session(),
+      observerKey: 'ble:source',
+    );
+
+    expect(result.acceptState, isFalse);
+    expect(result.relay, isFalse);
+    expect(result.reason, 'NO_RUNNING_RESEARCH_TRIAL');
   });
 }

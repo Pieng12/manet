@@ -139,6 +139,8 @@ class AdbNode(NodeTransport):
             name,
         ]
         for key, value in arguments.items():
+            if value is None or (isinstance(value, str) and value == ""):
+                continue
             if isinstance(value, bool):
                 base.extend(["--ez", key, str(value).lower()])
             elif isinstance(value, int):
@@ -147,7 +149,7 @@ class AdbNode(NodeTransport):
                 base.extend(["--ef", key, str(value)])
             elif isinstance(value, list):
                 base.extend(["--esa", key, ",".join(str(item) for item in value)])
-            elif value is not None:
+            else:
                 base.extend(["--es", key, str(value)])
         _run(base)
         deadline = time.monotonic() + 8
