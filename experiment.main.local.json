@@ -2,8 +2,8 @@
     "testbed_profile":  "android_plus_five_esp32",
     "session_id":  "resqmesh-main-20260927-022153",
     "session_label":  "research-build-label",
-    "android_build_id":  "516f24c9bb8a",
-    "firmware_build_id":  "516f24c9bb8a",
+    "android_build_id":  "6f01f0d71798",
+    "firmware_build_id":  "6f01f0d71798",
     "protocol_version":  "resqmesh-ble17-v1",
     "modes":  [
                   "trickle",

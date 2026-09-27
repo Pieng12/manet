@@ -217,6 +217,152 @@ def canonical_state_identity(value: Any) -> str | None:
     return f"{message_key}:{':'.join(parts[2:])}"
 
 
+def _transmit_hop(event: dict[str, Any]) -> int | None:
+    for field in ("hop_out", "hop_in", "hop_count"):
+        try:
+            value = event.get(field)
+            if value is not None:
+                return int(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def latency_diagnostics(
+    events: list[dict[str, Any]],
+    *,
+    source_node: str | None,
+    destination_nodes: set[str],
+    expected_hop: int,
+    message_key: str | None,
+) -> dict[str, Any]:
+    diagnostics: dict[str, Any] = {
+        "source_bursts_before_destination": None,
+        "delivery_after_last_source_burst_ms": None,
+        "source_attempt_index_to_hop1_accept": None,
+        "source_first_attempt_success": None,
+        "source_retry_wait_ms": None,
+        "hop1_accept_after_source_burst_ms": None,
+    }
+    for hop in range(1, 4):
+        diagnostics.update(
+            {
+                f"hop{hop}_first_accept_elapsed_ms": None,
+                f"hop{hop}_segment_progress_ms": None,
+                f"hop{hop}_upstream_bursts_before_accept": None,
+                f"hop{hop}_attribution": None,
+            }
+        )
+
+    if not source_node or not destination_nodes or expected_hop < 1 or not message_key:
+        return diagnostics
+
+    message_events = [
+        event
+        for event in events
+        if event.get("message_key") == message_key
+        and event.get("packet_type", "sos") == "sos"
+    ]
+    source_times = [
+        timestamp
+        for event in message_events
+        if event.get("event_type") == "SOURCE_FIRST_ADVERTISE_STARTED"
+        and event.get("node_id", event.get("device_id")) == source_node
+        and (timestamp := _timestamp(event)) is not None
+    ]
+    if not source_times:
+        return diagnostics
+    source_time = min(source_times)
+
+    source_bursts = sorted(
+        (
+            timestamp,
+            str(event.get("burst_id")),
+        )
+        for event in message_events
+        if event.get("event_type") == "ADVERTISE_BURST_STARTED"
+        and event.get("node_id", event.get("device_id")) == source_node
+        and event.get("burst_id") not in (None, "")
+        and (timestamp := _timestamp(event)) is not None
+    )
+    destination_times = [
+        timestamp
+        for event in message_events
+        if event.get("event_type") == "DESTINATION_FIRST_VALID_RECEIVE"
+        and event.get("node_id", event.get("device_id")) in destination_nodes
+        and _hop(event) == expected_hop
+        and (timestamp := _timestamp(event)) is not None
+    ]
+    if destination_times:
+        destination_time = min(destination_times)
+        bursts_before_destination = [
+            timestamp for timestamp, _ in source_bursts if timestamp <= destination_time
+        ]
+        diagnostics["source_bursts_before_destination"] = len(
+            bursts_before_destination
+        )
+        if bursts_before_destination:
+            diagnostics["delivery_after_last_source_burst_ms"] = (
+                destination_time - bursts_before_destination[-1]
+            )
+
+    first_accept_by_hop: dict[int, int] = {}
+    for hop in range(1, expected_hop + 1):
+        accept_times = [
+            timestamp
+            for event in message_events
+            if event.get("event_type") == "BLE_PACKET_ACCEPTED"
+            and _hop(event) == hop
+            and (timestamp := _timestamp(event)) is not None
+        ]
+        if accept_times:
+            first_accept_by_hop[hop] = min(accept_times)
+
+    previous_arrival = source_time
+    for hop in range(1, min(expected_hop, 3) + 1):
+        accept_time = first_accept_by_hop.get(hop)
+        if accept_time is None:
+            continue
+        diagnostics[f"hop{hop}_first_accept_elapsed_ms"] = accept_time - source_time
+        diagnostics[f"hop{hop}_segment_progress_ms"] = accept_time - previous_arrival
+        diagnostics[f"hop{hop}_attribution"] = (
+            "exact_single_source" if hop == 1 else "layer_inferred_parallel_relays"
+        )
+
+        upstream_bursts = [
+            timestamp
+            for event in message_events
+            if event.get("event_type") == "ADVERTISE_BURST_STARTED"
+            and event.get("burst_id") not in (None, "")
+            and _transmit_hop(event) == hop
+            and (timestamp := _timestamp(event)) is not None
+            and timestamp <= accept_time
+            and (
+                hop != 1
+                or event.get("node_id", event.get("device_id")) == source_node
+            )
+        ]
+        diagnostics[f"hop{hop}_upstream_bursts_before_accept"] = len(
+            upstream_bursts
+        )
+
+        if hop == 1 and upstream_bursts:
+            selected_burst_time = max(upstream_bursts)
+            diagnostics["source_attempt_index_to_hop1_accept"] = len(
+                upstream_bursts
+            )
+            diagnostics["source_first_attempt_success"] = len(upstream_bursts) == 1
+            diagnostics["source_retry_wait_ms"] = selected_burst_time - min(
+                upstream_bursts
+            )
+            diagnostics["hop1_accept_after_source_burst_ms"] = (
+                accept_time - selected_burst_time
+            )
+        previous_arrival = accept_time
+
+    return diagnostics
+
+
 def summarize_trial(
     trial_id: str,
     events: list[dict[str, Any]],
@@ -353,6 +499,14 @@ def summarize_trial(
     if "e2e_latency_ms" in evidence and evidence.get("e2e_latency_ms") != latency_ms:
         invalid_reasons.add("CONTROLLER_LOG_EVIDENCE_MISMATCH")
 
+    diagnostics = latency_diagnostics(
+        metric_events,
+        source_node=source_node,
+        destination_nodes=destinations,
+        expected_hop=expected_hop_value,
+        message_key=expected_message_key,
+    )
+
     if invalid_reasons:
         result = "INVALID"
     elif controller_result in {"SUCCESS", "FAILED_DELIVERY"}:
@@ -379,6 +533,7 @@ def summarize_trial(
         "ldr": duplicates / denominator if denominator else None,
         "transmission_bursts": len(burst_starts),
         "e2e_latency_ms": latency_ms,
+        **diagnostics,
     }
 
 

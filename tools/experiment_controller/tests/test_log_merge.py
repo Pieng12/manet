@@ -10,6 +10,7 @@ from resqmesh_controller.log_merge import (
     aggregate,
     canonical_state_identity,
     deduplicate,
+    latency_diagnostics,
     merge_directory,
     numeric_stats,
     summarize_trial,
@@ -118,6 +119,282 @@ class LogMergeTest(unittest.TestCase):
         self.assertEqual(1, summary["transmission_bursts"])
         self.assertAlmostEqual(0.5, group["dsr"])
         self.assertAlmostEqual(2.0, group["transmission_overhead"])
+
+    def test_latency_diagnostics_separate_exact_and_layer_inferred_segments(self) -> None:
+        events = delivery_events(source_time=1000, destination_time=6500) + [
+            trial_event(
+                "ADVERTISE_BURST_STARTED",
+                node_id="source",
+                message_key="1:2",
+                packet_type="sos",
+                hop_out=1,
+                burst_id="source-1",
+                timestamp_ms=1000,
+            ),
+            trial_event(
+                "TRICKLE_TX_SUPPRESSED",
+                node_id="source",
+                message_key="1:2",
+                packet_type="sos",
+                hop_out=1,
+                timestamp_ms=3000,
+            ),
+            trial_event(
+                "ADVERTISE_BURST_STARTED",
+                node_id="source",
+                message_key="1:2",
+                packet_type="sos",
+                hop_out=1,
+                burst_id="source-2",
+                timestamp_ms=6000,
+            ),
+            trial_event(
+                "BLE_PACKET_ACCEPTED",
+                node_id="relay-a",
+                message_key="1:2",
+                packet_type="sos",
+                hop_in=1,
+                observation_id="relay-a-hop-1",
+                timestamp_ms=6100,
+            ),
+            trial_event(
+                "ADVERTISE_BURST_STARTED",
+                node_id="relay-a",
+                message_key="1:2",
+                packet_type="sos",
+                hop_in=2,
+                burst_id="relay-a-1",
+                timestamp_ms=6150,
+            ),
+            trial_event(
+                "ADVERTISE_BURST_STARTED",
+                node_id="relay-b",
+                message_key="1:2",
+                packet_type="sos",
+                hop_in=2,
+                burst_id="relay-b-1",
+                timestamp_ms=6200,
+            ),
+            trial_event(
+                "BLE_PACKET_ACCEPTED",
+                node_id="destination",
+                message_key="1:2",
+                packet_type="sos",
+                hop_in=2,
+                observation_id="destination-hop-2",
+                timestamp_ms=6490,
+            ),
+        ]
+
+        summary = summarize_trial(
+            "trial-1",
+            events,
+            valid_record(observation_window_ms=7000),
+        )
+
+        self.assertEqual(5500, summary["e2e_latency_ms"])
+        self.assertEqual(2, summary["source_bursts_before_destination"])
+        self.assertEqual(500, summary["delivery_after_last_source_burst_ms"])
+        self.assertEqual(2, summary["source_attempt_index_to_hop1_accept"])
+        self.assertFalse(summary["source_first_attempt_success"])
+        self.assertEqual(5000, summary["source_retry_wait_ms"])
+        self.assertEqual(100, summary["hop1_accept_after_source_burst_ms"])
+        self.assertEqual(5100, summary["hop1_first_accept_elapsed_ms"])
+        self.assertEqual("exact_single_source", summary["hop1_attribution"])
+        self.assertEqual(5490, summary["hop2_first_accept_elapsed_ms"])
+        self.assertEqual(390, summary["hop2_segment_progress_ms"])
+        self.assertEqual(2, summary["hop2_upstream_bursts_before_accept"])
+        self.assertEqual(
+            "layer_inferred_parallel_relays",
+            summary["hop2_attribution"],
+        )
+
+    def test_latency_diagnostics_ignore_other_messages_and_suppression(self) -> None:
+        events = [
+            trial_event(
+                "SOURCE_FIRST_ADVERTISE_STARTED",
+                node_id="source",
+                message_key="1:2",
+                timestamp_ms=1000,
+            ),
+            trial_event(
+                "ADVERTISE_BURST_STARTED",
+                node_id="source",
+                message_key="1:2",
+                hop_out=1,
+                burst_id="matching",
+                timestamp_ms=1000,
+            ),
+            trial_event(
+                "ADVERTISE_BURST_STARTED",
+                node_id="source",
+                message_key="other",
+                hop_out=1,
+                burst_id="other-message",
+                timestamp_ms=1050,
+            ),
+            trial_event(
+                "TRICKLE_TX_SUPPRESSED",
+                node_id="source",
+                message_key="1:2",
+                hop_out=1,
+                timestamp_ms=1075,
+            ),
+            trial_event(
+                "BLE_PACKET_ACCEPTED",
+                node_id="destination",
+                message_key="1:2",
+                hop_in=1,
+                timestamp_ms=1100,
+            ),
+            trial_event(
+                "DESTINATION_FIRST_VALID_RECEIVE",
+                node_id="destination",
+                message_key="1:2",
+                hop_in=1,
+                timestamp_ms=1110,
+            ),
+        ]
+
+        diagnostics = latency_diagnostics(
+            events,
+            source_node="source",
+            destination_nodes={"destination"},
+            expected_hop=1,
+            message_key="1:2",
+        )
+
+        self.assertEqual(1, diagnostics["source_bursts_before_destination"])
+        self.assertEqual(1, diagnostics["source_attempt_index_to_hop1_accept"])
+        self.assertTrue(diagnostics["source_first_attempt_success"])
+
+    def test_h3_diagnostics_keep_later_segments_layer_inferred(self) -> None:
+        events = [
+            trial_event(
+                "SOURCE_FIRST_ADVERTISE_STARTED",
+                node_id="source",
+                message_key="1:2",
+                timestamp_ms=1000,
+            ),
+            trial_event(
+                "ADVERTISE_BURST_STARTED",
+                node_id="source",
+                message_key="1:2",
+                hop_out=1,
+                burst_id="source-1",
+                timestamp_ms=1000,
+            ),
+            trial_event(
+                "BLE_PACKET_ACCEPTED",
+                node_id="relay-1a",
+                message_key="1:2",
+                hop_in=1,
+                timestamp_ms=1100,
+            ),
+            trial_event(
+                "ADVERTISE_BURST_STARTED",
+                node_id="relay-1a",
+                message_key="1:2",
+                hop_in=2,
+                burst_id="relay-1a-1",
+                timestamp_ms=1150,
+            ),
+            trial_event(
+                "BLE_PACKET_ACCEPTED",
+                node_id="relay-2a",
+                message_key="1:2",
+                hop_in=2,
+                timestamp_ms=1250,
+            ),
+            trial_event(
+                "ADVERTISE_BURST_STARTED",
+                node_id="relay-2a",
+                message_key="1:2",
+                hop_in=3,
+                burst_id="relay-2a-1",
+                timestamp_ms=1300,
+            ),
+            trial_event(
+                "BLE_PACKET_ACCEPTED",
+                node_id="destination",
+                message_key="1:2",
+                hop_in=3,
+                timestamp_ms=1450,
+            ),
+            trial_event(
+                "DESTINATION_FIRST_VALID_RECEIVE",
+                node_id="destination",
+                message_key="1:2",
+                hop_in=3,
+                timestamp_ms=1460,
+            ),
+        ]
+
+        diagnostics = latency_diagnostics(
+            events,
+            source_node="source",
+            destination_nodes={"destination"},
+            expected_hop=3,
+            message_key="1:2",
+        )
+
+        self.assertEqual("exact_single_source", diagnostics["hop1_attribution"])
+        self.assertEqual(
+            "layer_inferred_parallel_relays",
+            diagnostics["hop2_attribution"],
+        )
+        self.assertEqual(
+            "layer_inferred_parallel_relays",
+            diagnostics["hop3_attribution"],
+        )
+        self.assertEqual(100, diagnostics["hop1_segment_progress_ms"])
+        self.assertEqual(150, diagnostics["hop2_segment_progress_ms"])
+        self.assertEqual(200, diagnostics["hop3_segment_progress_ms"])
+
+    def test_latency_diagnostics_use_clock_normalized_timestamps(self) -> None:
+        events = [
+            trial_event(
+                "SOURCE_FIRST_ADVERTISE_STARTED",
+                node_id="source",
+                message_key="1:2",
+                timestamp_ms=1000,
+                clock_offset_ms=100,
+            ),
+            trial_event(
+                "ADVERTISE_BURST_STARTED",
+                node_id="source",
+                message_key="1:2",
+                hop_out=1,
+                burst_id="source-1",
+                timestamp_ms=1000,
+                clock_offset_ms=100,
+            ),
+            trial_event(
+                "BLE_PACKET_ACCEPTED",
+                node_id="destination",
+                message_key="1:2",
+                hop_in=1,
+                timestamp_ms=1150,
+            ),
+            trial_event(
+                "DESTINATION_FIRST_VALID_RECEIVE",
+                node_id="destination",
+                message_key="1:2",
+                hop_in=1,
+                timestamp_ms=1160,
+            ),
+        ]
+
+        diagnostics = latency_diagnostics(
+            events,
+            source_node="source",
+            destination_nodes={"destination"},
+            expected_hop=1,
+            message_key="1:2",
+        )
+
+        self.assertEqual(50, diagnostics["hop1_first_accept_elapsed_ms"])
+        self.assertEqual(60, diagnostics["delivery_after_last_source_burst_ms"])
 
     def test_observation_window_boundary_and_out_of_range(self) -> None:
         boundary = summarize_trial(
@@ -328,6 +605,8 @@ class LogMergeTest(unittest.TestCase):
                     "Metric Definitions",
                     "Algorithm Summary",
                     "Trial Metrics",
+                    "Latency Diagnostics",
+                    "Diagnostic Definitions",
                     "Event Type Counts",
                     "Attempts",
                     "Invalid Trials",
@@ -343,6 +622,17 @@ class LogMergeTest(unittest.TestCase):
             trial_header = list(trial_rows[0])
             self.assertEqual("trickle", trial_rows[1][trial_header.index("algorithm")])
             self.assertEqual(300, trial_rows[1][trial_header.index("e2e_latency_ms")])
+            self.assertNotIn("source_first_attempt_success", trial_header)
+            diagnostic_rows = list(
+                workbook["Latency Diagnostics"].iter_rows(values_only=True)
+            )
+            diagnostic_header = list(diagnostic_rows[0])
+            self.assertIn("source_first_attempt_success", diagnostic_header)
+            self.assertIn("hop2_attribution", diagnostic_header)
+            definition_rows = list(
+                workbook["Diagnostic Definitions"].iter_rows(values_only=True)
+            )
+            self.assertEqual("field", definition_rows[0][0])
             event_rows = list(workbook["All Events"].iter_rows(values_only=True))
             self.assertEqual(3, len(event_rows))
             workbook.close()

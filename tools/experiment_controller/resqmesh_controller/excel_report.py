@@ -59,6 +59,109 @@ METRIC_DEFINITIONS = [
     },
 ]
 
+LATENCY_DIAGNOSTIC_FIELDS = (
+    "trial_id",
+    "algorithm",
+    "hypothesis",
+    "result",
+    "e2e_latency_ms",
+    "source_bursts_before_destination",
+    "delivery_after_last_source_burst_ms",
+    "source_attempt_index_to_hop1_accept",
+    "source_first_attempt_success",
+    "source_retry_wait_ms",
+    "hop1_first_accept_elapsed_ms",
+    "hop1_accept_after_source_burst_ms",
+    "hop1_segment_progress_ms",
+    "hop1_upstream_bursts_before_accept",
+    "hop1_attribution",
+    "hop2_first_accept_elapsed_ms",
+    "hop2_segment_progress_ms",
+    "hop2_upstream_bursts_before_accept",
+    "hop2_attribution",
+    "hop3_first_accept_elapsed_ms",
+    "hop3_segment_progress_ms",
+    "hop3_upstream_bursts_before_accept",
+    "hop3_attribution",
+)
+
+TRIAL_METRIC_FIELDS = (
+    "trial_id",
+    "algorithm",
+    "mode",
+    "hypothesis",
+    "result",
+    "valid",
+    "delivery_success",
+    "e2e_latency_ms",
+    "events_total",
+    "events_in_window",
+    "events_outside_window",
+    "metric_events_outside_window",
+    "accepted",
+    "duplicates",
+    "ldr",
+    "transmission_bursts",
+    "invalid_reasons",
+)
+
+DIAGNOSTIC_DEFINITIONS = [
+    {
+        "field": "source_bursts_before_destination",
+        "unit": "bursts",
+        "definition": "Source ADVERTISE_BURST_STARTED events at or before destination delivery",
+        "attribution": "exact observation; not full-route causality",
+    },
+    {
+        "field": "delivery_after_last_source_burst_ms",
+        "unit": "milliseconds",
+        "definition": "Destination receive minus latest source burst started before delivery",
+        "attribution": "diagnostic only; not full-route causality for H2/H3",
+    },
+    {
+        "field": "source_attempt_index_to_hop1_accept",
+        "unit": "attempt index",
+        "definition": "Count of source bursts started through first hop-1 acceptance",
+        "attribution": "exact because the source is unique",
+    },
+    {
+        "field": "source_first_attempt_success",
+        "unit": "boolean",
+        "definition": "True when first hop-1 acceptance follows the first source burst",
+        "attribution": "exact because the source is unique",
+    },
+    {
+        "field": "source_retry_wait_ms",
+        "unit": "milliseconds",
+        "definition": "Selected source burst start minus first source burst start",
+        "attribution": "exact for source to layer 1",
+    },
+    {
+        "field": "hopN_first_accept_elapsed_ms",
+        "unit": "milliseconds",
+        "definition": "First BLE_PACKET_ACCEPTED at hop N minus first source advertise",
+        "attribution": "hop 1 exact; later hops identify only the receiving layer",
+    },
+    {
+        "field": "hopN_segment_progress_ms",
+        "unit": "milliseconds",
+        "definition": "First acceptance at hop N minus first acceptance at hop N-1",
+        "attribution": "hop 1 exact; later hops are layer-inferred elapsed progression",
+    },
+    {
+        "field": "hopN_upstream_bursts_before_accept",
+        "unit": "bursts",
+        "definition": "Started bursts carrying hop N at or before first hop-N acceptance",
+        "attribution": "observed starts only; Trickle suppression is not an attempt",
+    },
+    {
+        "field": "hopN_attribution",
+        "unit": "category",
+        "definition": "exact_single_source or layer_inferred_parallel_relays",
+        "attribution": "prevents device-level claims when parallel relays are ambiguous",
+    },
+]
+
 
 def _excel_value(value: Any) -> Any:
     if value is None or isinstance(value, (str, int, float, bool)):
@@ -203,37 +306,38 @@ def write_analysis_workbook(
             "transmission_overhead",
         ),
     )
-    trial_rows = [
-        {
+    trial_rows = []
+    for row in trial_summaries:
+        values = {
             **row,
             "algorithm": row.get("mode"),
             "delivery_success": 1 if row.get("result") == "SUCCESS" else 0,
+        }
+        trial_rows.append({field: values.get(field) for field in TRIAL_METRIC_FIELDS})
+    _write_table(
+        workbook,
+        "Trial Metrics",
+        trial_rows,
+        TRIAL_METRIC_FIELDS,
+    )
+    latency_rows = [
+        {
+            field: row.get("mode") if field == "algorithm" else row.get(field)
+            for field in LATENCY_DIAGNOSTIC_FIELDS
         }
         for row in trial_summaries
     ]
     _write_table(
         workbook,
-        "Trial Metrics",
-        trial_rows,
-        (
-            "trial_id",
-            "algorithm",
-            "mode",
-            "hypothesis",
-            "result",
-            "valid",
-            "delivery_success",
-            "e2e_latency_ms",
-            "events_total",
-            "events_in_window",
-            "events_outside_window",
-            "metric_events_outside_window",
-            "accepted",
-            "duplicates",
-            "ldr",
-            "transmission_bursts",
-            "invalid_reasons",
-        ),
+        "Latency Diagnostics",
+        latency_rows,
+        LATENCY_DIAGNOSTIC_FIELDS,
+    )
+    _write_table(
+        workbook,
+        "Diagnostic Definitions",
+        DIAGNOSTIC_DEFINITIONS,
+        ("field", "unit", "definition", "attribution"),
     )
     _write_table(
         workbook,
