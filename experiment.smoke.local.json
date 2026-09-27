@@ -1,9 +1,9 @@
 {
     "testbed_profile":  "android_plus_five_esp32",
-    "session_id":  "resqmesh-smoke-20260927-022153",
+    "session_id":  "resqmesh-smoke-20260927-08",
     "session_label":  "physical-smoke-01",
-    "android_build_id":  "8ffee80644ee",
-    "firmware_build_id":  "8ffee80644ee",
+    "android_build_id":  "516f24c9bb8a",
+    "firmware_build_id":  "516f24c9bb8a",
     "protocol_version":  "resqmesh-ble17-v1",
     "modes":  [
                   "trickle",

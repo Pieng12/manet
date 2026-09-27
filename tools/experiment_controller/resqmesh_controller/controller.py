@@ -670,7 +670,7 @@ class ExperimentController:
                         "command_id": self._command_id("finalize", spec.trial_id, node.node_id),
                         "trial_id": device_trial_id,
                         "result": result_name,
-                        "reason": ";".join(invalid_reasons),
+                        "reason": ",".join(invalid_reasons),
                     },
                 )
                 record.setdefault("exports", {})[node.node_id] = node.command(
@@ -843,7 +843,11 @@ class ExperimentController:
                 if event_within_observation_window(event, record)
             }
             missing: list[str] = []
-            if record.get("result") != "SUCCESS":
+            result = record.get("result")
+            if result == "INVALID":
+                reasons = record.get("invalid_reasons") or ["UNSPECIFIED"]
+                missing.extend(f"invalid trial: {reason}" for reason in reasons)
+            elif result != "SUCCESS":
                 missing.append("successful destination delivery")
             if "SOURCE_FIRST_ADVERTISE_STARTED" not in event_types:
                 missing.append("SOURCE_FIRST_ADVERTISE_STARTED")
@@ -865,7 +869,7 @@ class ExperimentController:
                     "mode": mode,
                     "hypothesis": hypothesis,
                     "trial_id": trial_id,
-                    "result": record.get("result", "MISSING"),
+                    "result": result or "MISSING",
                     "passed": not missing,
                     "missing_evidence": ";".join(missing),
                 }

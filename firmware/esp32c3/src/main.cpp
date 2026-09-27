@@ -2,6 +2,8 @@
 #include <ArduinoJson.h>
 #include <NimBLEDevice.h>
 #include <Preferences.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 
 #include <array>
 #include <string>
@@ -71,6 +73,7 @@ uint32_t quietUntil = 0;
 bool observationWindowOpen = false;
 String serialBuffer;
 ObservationTracker observationTracker(kDefaultRxBurstGapMs);
+SemaphoreHandle_t serialOutputMutex = nullptr;
 
 bool due(uint32_t now, uint32_t deadline) {
   return static_cast<int32_t>(now - deadline) >= 0;
@@ -114,6 +117,9 @@ void emit(const char* eventType, const Packet* packet = nullptr,
           const char* reason = nullptr, int rssi = 0,
           const String& observationId = String(),
           const String& burstId = String()) {
+  if (serialOutputMutex != nullptr) {
+    xSemaphoreTake(serialOutputMutex, portMAX_DELAY);
+  }
   JsonDocument document;
   document["kind"] = "event";
   document["event_type"] = eventType;
@@ -144,6 +150,7 @@ void emit(const char* eventType, const Packet* packet = nullptr,
   }
   serializeJson(document, Serial);
   Serial.println();
+  if (serialOutputMutex != nullptr) xSemaphoreGive(serialOutputMutex);
 }
 
 void respond(const String& command, const String& commandId, bool ok,
@@ -154,8 +161,12 @@ void respond(const String& command, const String& commandId, bool ok,
   document["command_id"] = commandId;
   document["ok"] = ok;
   if (error != nullptr) document["error"] = error;
+  if (serialOutputMutex != nullptr) {
+    xSemaphoreTake(serialOutputMutex, portMAX_DELAY);
+  }
   serializeJson(document, Serial);
   Serial.println();
+  if (serialOutputMutex != nullptr) xSemaphoreGive(serialOutputMutex);
 }
 
 Role parseRole(const String& value) {
@@ -477,8 +488,12 @@ void emitReadiness(const String& commandId) {
   document["manufacturer_id"] = kManufacturerId;
   document["rx_burst_gap_ms"] = config.rxBurstGapMs;
   document["observation_window_open"] = observationWindowOpen;
+  if (serialOutputMutex != nullptr) {
+    xSemaphoreTake(serialOutputMutex, portMAX_DELAY);
+  }
   serializeJson(document, Serial);
   Serial.println();
+  if (serialOutputMutex != nullptr) xSemaphoreGive(serialOutputMutex);
 }
 
 void handleCommand(const String& line) {
@@ -639,6 +654,7 @@ void loadPersistentState() {
 }  // namespace
 
 void setup() {
+  serialOutputMutex = xSemaphoreCreateMutex();
   Serial.setRxBufferSize(kSerialRxBufferBytes);
   Serial.begin(115200);
   delay(300);

@@ -460,6 +460,32 @@ class ControllerTest(unittest.TestCase):
             self.assertEqual(6, len(report["conditions"]))
             self.assertTrue((Path(temporary) / "smoke_report.csv").exists())
 
+    def test_smoke_report_exposes_invalid_trial_reasons(self) -> None:
+        value = physical_config()
+        spec = build_plan(value)[0]
+        with tempfile.TemporaryDirectory() as temporary:
+            controller = ExperimentController(
+                value,
+                fake_nodes(value, standard_provider(lambda _attempt: "INVALID")),
+                Path(temporary),
+                sleep=lambda _: None,
+            )
+            controller.run_trial(spec)
+
+            report = controller.smoke_report()
+            condition = next(
+                item
+                for item in report["conditions"]
+                if item["mode"] == spec.mode
+                and item["hypothesis"] == spec.hypothesis
+            )
+
+            self.assertEqual("INVALID", condition["result"])
+            self.assertIn(
+                "invalid trial: SIMULATED_INVALID",
+                condition["missing_evidence"],
+            )
+
     def test_manifest_trial_record_contains_reconstruction_inputs(self) -> None:
         value = physical_config()
         with tempfile.TemporaryDirectory() as temporary:

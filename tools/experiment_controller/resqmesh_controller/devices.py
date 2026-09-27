@@ -144,7 +144,8 @@ class AdbNode(NodeTransport):
             if isinstance(value, bool):
                 base.extend(["--ez", key, str(value).lower()])
             elif isinstance(value, int):
-                base.extend(["--ei", key, str(value)])
+                extra_type = "--el" if value < -(1 << 31) or value > (1 << 31) - 1 else "--ei"
+                base.extend([extra_type, key, str(value)])
             elif isinstance(value, float):
                 base.extend(["--ef", key, str(value)])
             elif isinstance(value, list):
