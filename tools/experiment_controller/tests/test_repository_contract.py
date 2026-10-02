@@ -17,6 +17,9 @@ class RepositoryContractTest(unittest.TestCase):
         self.assertIn("ARDUINO_USB_CDC_ON_BOOT=1", platformio)
         self.assertIn("monitor_dtr = 0", platformio)
         self.assertIn("monitor_rts = 0", platformio)
+        self.assertIn("55.03.312-1/platform-espressif32.zip", platformio)
+        self.assertIn("NimBLE-Arduino@2.5.1", platformio)
+        self.assertIn("CONFIG_BT_NIMBLE_EXT_ADV=1", platformio)
 
     def test_template_contains_android_and_five_esp32(self) -> None:
         config = json.loads(
@@ -81,10 +84,12 @@ class RepositoryContractTest(unittest.TestCase):
         self.assertIn("NimBLEScan* scanner = nullptr;", firmware)
         self.assertIn("if (!pauseScanner())", firmware)
         self.assertIn("resumeScanner();", firmware)
-        self.assertIn(
-            "advertising->setAdvertisementType(BLE_GAP_CONN_MODE_NON);",
-            firmware,
-        )
+        radio = (ROOT / "firmware" / "esp32c3" / "src" / "CodedRadio.cpp").read_text(encoding="utf-8")
+        self.assertIn("ble_gap_ext_adv_params params{};", radio)
+        self.assertIn("params.primary_phy = params.secondary_phy = BLE_HCI_LE_PHY_CODED;", radio)
+        self.assertIn("ble_gap_ext_adv_configure", radio)
+        self.assertNotIn("getAdvertising()", firmware)
+        self.assertIn("scanner->setPhy(NimBLEScan::SCAN_CODED);", firmware)
         self.assertNotIn("BLE_HCI_ADV_TYPE_ADV_NONCONN_IND", firmware)
 
 

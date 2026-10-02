@@ -58,6 +58,73 @@ void main() {
     expect(config, contains('const val MANUFACTURER_ID = 0xFFFF'));
   });
 
+  test('coded scan bypasses batching and logs packet-correlated PHY', () {
+    final manager = read(
+      'android/app/src/main/kotlin/com/example/pkmproject/NativeBleManager.kt',
+    );
+    final policy = read(
+      'android/app/src/main/kotlin/com/example/pkmproject/CodedRadioPolicy.kt',
+    );
+    final receiver = read(
+      'android/app/src/main/kotlin/com/example/pkmproject/BleWakeUpReceiver.kt',
+    );
+
+    expect(policy, contains('const val SCAN_REPORT_DELAY_MS = 0L'));
+    expect(manager, contains('.setLegacy(false)'));
+    expect(
+      manager,
+      contains('.setPhy(android.bluetooth.BluetoothDevice.PHY_LE_CODED)'),
+    );
+    expect(
+      manager,
+      contains('.setReportDelay(CodedRadioPolicy.SCAN_REPORT_DELAY_MS)'),
+    );
+    expect(manager, isNot(contains('.setReportDelay(1000L)')));
+    expect(receiver, contains(r'primary=${scanResult.primaryPhy}'));
+    expect(receiver, contains(r'secondary=${scanResult.secondaryPhy}'));
+    expect(receiver, contains(r'legacy=${scanResult.isLegacy}'));
+    expect(receiver, contains(r'sender_crc=${metadata?.senderCrc}'));
+    expect(
+      receiver,
+      contains(r'timestamp_compact=${metadata?.timestampCompact}'),
+    );
+    expect(receiver, contains(r'hop=${metadata?.hop}'));
+  });
+
+  test('scan registration is reused and asynchronous errors are handled', () {
+    final manager = read(
+      'android/app/src/main/kotlin/com/example/pkmproject/NativeBleManager.kt',
+    );
+    final receiver = read(
+      'android/app/src/main/kotlin/com/example/pkmproject/BleWakeUpReceiver.kt',
+    );
+
+    expect(
+      manager,
+      contains('activeScanAllAdvertisements = scanAllAdvertisements'),
+    );
+    expect(manager, contains(RegExp(r'@Synchronized\s+fun startBleScan\(')));
+    expect(manager, contains(RegExp(r'@Synchronized\s+fun stopBleScan\(')));
+    expect(
+      manager.indexOf('if (canReuseScan('),
+      lessThan(manager.indexOf('scanner.startScan(')),
+    );
+    expect(
+      manager.indexOf('scanner.stopScan(pendingIntent)'),
+      lessThan(manager.indexOf('scanner.startScan(')),
+    );
+    expect(receiver, contains('BluetoothLeScanner.EXTRA_ERROR_CODE'));
+    expect(receiver, contains('NativeBleManager.reportScanFailure(scanError)'));
+    expect(
+      receiver.indexOf('if (scanError != 0)'),
+      lessThan(receiver.indexOf('val results = scanResultsFrom(intent)')),
+    );
+    expect(
+      manager,
+      contains('if (!telemetry.active) activeScanAllAdvertisements = null'),
+    );
+  });
+
   test('native inbox and diagnostics method channel are wired', () {
     final service = read(
       'android/app/src/main/kotlin/com/example/pkmproject/MeshBackgroundService.kt',
@@ -107,8 +174,9 @@ void main() {
     expect(advertiser, contains('Timer? _queueWakeTimer'));
     expect(advertiser, contains('RelaySchedulerState.waitingNextSlot'));
     expect(advertiser, contains('reconcileNativeAdvertisingState'));
-    expect(nativeAdvertiser, contains('advertiseGeneration'));
-    expect(nativeAdvertiser, contains('Ignoring stale advertiser'));
+    expect(nativeAdvertiser, contains('AdvertisingLifecycle()'));
+    expect(nativeAdvertiser, contains('lifecycle.finish(token)'));
+    expect(nativeAdvertiser, contains('stopAdvertisingSet'));
   });
 
   test('versioned permission contract is documented in code and manifest', () {

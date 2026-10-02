@@ -5,6 +5,7 @@
   "android_build_id": "<GIT_SHA_12>",
   "firmware_build_id": "<GIT_SHA_12>",
   "protocol_version": "resqmesh-ble17-v1",
+  "radio_mode": "coded",
   "modes": ["trickle", "basic_flooding"],
   "hypotheses": ["H1", "H2", "H3"],
   "valid_trials_per_condition": 15,

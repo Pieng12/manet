@@ -14,6 +14,7 @@ from typing import Any, Callable
 from . import PROTOCOL_EPOCH_ID, PROTOCOL_EPOCH_SECONDS, PROTOCOL_VERSION
 from .config import HYPOTHESES, MODES, research_fingerprint, validate_config
 from .devices import DeviceError, NodeTransport, write_jsonl
+from .radio import radio_readiness_errors
 from .log_merge import (
     canonical_message_key,
     canonical_state_identity,
@@ -116,6 +117,9 @@ class ExperimentController:
             "random_seed": int(self.config.get("random_seed", 231402095)),
             "trial_order": [item.to_json() for item in build_plan(self.config)],
             "trials": {},
+            "radio_mode": self.config.get("radio_mode"),
+            "android_build_id": self.config.get("android_build_id"),
+            "firmware_build_id": self.config.get("firmware_build_id"),
         }
 
     def _save_manifest(self) -> None:
@@ -155,6 +159,11 @@ class ExperimentController:
         epoch = result.get("protocol_epoch", result)
         if result.get("ok") is not True:
             errors.append("ok=false")
+        node_config = next(item for item in self.config["nodes"] if item["node_id"] == node.node_id)
+        requested_radio = node_config.get("radio_mode", self.config.get("radio_mode"))
+        radio = result.get("radio")
+        if requested_radio is not None or radio is not None:
+            errors.extend(radio_readiness_errors(radio, requested_radio or "coded", spec is not None))
         if epoch.get("valid", epoch.get("epoch_valid")) is not True:
             errors.append("protocol epoch is invalid")
         if epoch.get("epoch_id") != PROTOCOL_EPOCH_ID:
@@ -251,6 +260,8 @@ class ExperimentController:
                     },
                 )
             result = node.command("readiness", {"command_id": command_id})
+            if result.get("radio") is not None:
+                self.manifest.setdefault("radio_readiness", {})[node.node_id] = result["radio"]
             results[node.node_id] = result
             reasons = self._readiness_errors(
                 node,
@@ -371,6 +382,9 @@ class ExperimentController:
             if node.node_id in self.clock_offsets:
                 arguments["clock_offset_ms"] = self.clock_offsets[node.node_id]
                 arguments["clock_tolerance_ms"] = int(self.config.get("clock_tolerance_ms", 100))
+            radio_mode = topology.get("radio_mode", self.config.get("radio_mode"))
+            if radio_mode is not None:
+                arguments["radio_mode"] = radio_mode
             result = node.command("configure_session", arguments)
             if result.get("ok") is not True:
                 raise DeviceError(f"configuration failed: {node.node_id}: {result}")

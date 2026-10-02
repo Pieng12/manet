@@ -188,6 +188,14 @@ class AndroidExperimentCommandService {
     }.contains(role)) {
       throw ArgumentError('INVALID_ROLE: $role');
     }
+    if (args.containsKey('radio_mode')) {
+      final radio = await NativeBridgeService.configureBleRadio(
+        _requiredString(args, 'radio_mode'),
+      );
+      if (radio['ready'] != true) {
+        throw StateError('RADIO_NOT_READY: ${radio['last_error']}');
+      }
+    }
     final session = await _sessions.startSession(
       sessionId: _requiredString(args, 'session_id'),
       sessionCode: _requiredString(args, 'session_code'),
@@ -221,6 +229,14 @@ class AndroidExperimentCommandService {
     await NativeBridgeService.setResearchRxBurstGapMs(
       session.rxBurstGapMs ?? MeshConfig.defaultRxBurstGap.inMilliseconds,
     );
+    final radio = (await NativeBridgeService.getBleCapabilities())['radio'];
+    if (radio is Map) {
+      await _logger.logEvent(
+        eventType: 'RADIO_CONFIGURED',
+        deviceId: session.deviceId,
+        detail: Map<String, dynamic>.from(radio),
+      );
+    }
     return {
       'session_id': session.sessionId,
       'mode': session.forwardingMode,
@@ -449,14 +465,16 @@ class AndroidExperimentCommandService {
         ) ??
         0;
     final epoch = ProtocolEpochReadiness.at(_clock.wallTimeMs());
+    final radio = capabilities['radio'];
     return {
-      'ok': true,
+      'ok': radio is! Map || radio['ready'] == true,
       'node_id': session?.deviceId,
       'android_build_id': MeshConfig.buildId,
       'build_id': MeshConfig.buildId,
       'protocol_version': MeshConfig.protocolVersion,
       'payload_length': MeshConfig.protocolLength,
       'manufacturer_id': MeshConfig.manufacturerId,
+      'radio': capabilities['radio'],
       'clock_valid': epoch.isValid,
       'bluetooth': capabilities['bluetoothEnabled'],
       'permissions': {

@@ -271,6 +271,8 @@ def write_analysis_workbook(
         {"field": "config_fingerprint", "value": manifest.get("config_fingerprint")},
         {"field": "protocol_version", "value": manifest.get("protocol_version")},
         {"field": "protocol_epoch_id", "value": manifest.get("epoch_id")},
+        {"field": "radio_mode", "value": manifest.get("radio_mode")},
+        {"field": "radio_readiness", "value": manifest.get("radio_readiness")},
         {"field": "algorithms", "value": ", ".join(sorted({str(row.get("mode")) for row in trial_summaries if row.get("mode")}))},
         {"field": "trial_count", "value": len(trial_summaries)},
         {"field": "event_count", "value": len(events)},

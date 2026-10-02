@@ -17,7 +17,8 @@ object NativeBleManager {
     const val RESQ_MESH_SERVICE_UUID_STRING = NativeBleConfig.RESQ_MESH_SERVICE_UUID_STRING
     const val BLE_WAKE_UP_ACTION = "id.ac.usu.resqmesh.BLE_WAKE_UP"
     private const val DEFAULT_SCAN_ALL_ADVERTISEMENTS = false
-    private var nativeScanActive = false
+    @Volatile private var nativeScanActive = false
+    private var activeScanAllAdvertisements: Boolean? = null
     private var lastScanErrorCode: String? = null
 
     internal data class ScanStopTelemetry(
@@ -25,6 +26,19 @@ object NativeBleManager {
         val active: Boolean,
         val errorCode: String?
     )
+
+    internal fun canReuseScan(active: Boolean, currentScanAll: Boolean?, requestedScanAll: Boolean): Boolean {
+        return active && currentScanAll == requestedScanAll
+    }
+
+    internal fun scanFailureTelemetry(errorCode: Int): ScanStopTelemetry {
+        return ScanStopTelemetry(success = false, active = false, errorCode = "SCAN_STATUS_$errorCode")
+    }
+
+    @Synchronized
+    fun reportScanFailure(errorCode: Int) {
+        applyStopTelemetry(scanFailureTelemetry(errorCode))
+    }
 
     internal fun stopTelemetryForUnavailable(errorCode: String): ScanStopTelemetry {
         return ScanStopTelemetry(success = true, active = false, errorCode = errorCode)
@@ -68,16 +82,16 @@ object NativeBleManager {
 
     private fun applyStopTelemetry(telemetry: ScanStopTelemetry): Boolean {
         nativeScanActive = telemetry.active
+        if (!telemetry.active) activeScanAllAdvertisements = null
         lastScanErrorCode = telemetry.errorCode
         return telemetry.success
     }
 
+    @Synchronized
     fun startBleScan(
         context: Context,
         scanAllAdvertisements: Boolean = DEFAULT_SCAN_ALL_ADVERTISEMENTS
     ): Boolean {
-        Log.i(TAG, "Starting BLE scan (PendingIntent mode), scanAll=$scanAllAdvertisements")
-
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
             Log.w(TAG, "BLE PendingIntent scan requires Android 8.0+")
             nativeScanActive = false
@@ -101,12 +115,24 @@ object NativeBleManager {
         }
 
         val scanner = bluetoothAdapter.bluetoothLeScanner
+        if (!bluetoothAdapter.isLeCodedPhySupported || !bluetoothAdapter.isLeExtendedAdvertisingSupported) {
+            nativeScanActive = false
+            lastScanErrorCode = "CODED_EXTENDED_UNSUPPORTED"
+            return false
+        }
         if (scanner == null) {
             Log.e(TAG, "BLE scanner not available")
             nativeScanActive = false
             lastScanErrorCode = "SCANNER_UNAVAILABLE"
             return false
         }
+
+        if (canReuseScan(nativeScanActive, activeScanAllAdvertisements, scanAllAdvertisements)) {
+            Log.d(TAG, "Reusing existing BLE scan registration")
+            return true
+        }
+
+        Log.i(TAG, "Starting BLE scan (PendingIntent mode), scanAll=$scanAllAdvertisements")
 
         val filters = if (scanAllAdvertisements) {
             Log.w(TAG, "Debug scan-all mode is active. Experiment filters are disabled.")
@@ -124,19 +150,32 @@ object NativeBleManager {
         }
 
         val scanSettings = ScanSettings.Builder()
+            .setLegacy(false)
+            .setPhy(android.bluetooth.BluetoothDevice.PHY_LE_CODED)
             .setScanMode(ScanSettings.SCAN_MODE_BALANCED)
             .setCallbackType(ScanSettings.CALLBACK_TYPE_ALL_MATCHES)
             .setMatchMode(ScanSettings.MATCH_MODE_AGGRESSIVE)
-            .setReportDelay(1000L)
+            // Android's batch parser can reconstruct results with legacy/1M defaults.
+            .setReportDelay(CodedRadioPolicy.SCAN_REPORT_DELAY_MS)
             .build()
 
         val pendingIntent = buildScanPendingIntent(context)
 
         return try {
-            scanner.startScan(filters, scanSettings, pendingIntent)
+            // A PendingIntent scan can outlive this process or retain old settings.
+            scanner.stopScan(pendingIntent)
+            nativeScanActive = false
+            activeScanAllAdvertisements = null
+            val result = scanner.startScan(filters, scanSettings, pendingIntent)
+            if (result != 0) {
+                nativeScanActive = false
+                lastScanErrorCode = "SCAN_STATUS_$result"
+                return false
+            }
             nativeScanActive = true
+            activeScanAllAdvertisements = scanAllAdvertisements
             lastScanErrorCode = null
-            Log.i(TAG, "BLE scan active via PendingIntent")
+            Log.i(TAG, "BLE scan registration accepted via PendingIntent (phy=coded, legacy=false, reportDelayMs=${CodedRadioPolicy.SCAN_REPORT_DELAY_MS})")
             true
         } catch (e: Exception) {
             Log.e(TAG, "Fatal error starting scan: ${e.message}", e)
@@ -146,6 +185,7 @@ object NativeBleManager {
         }
     }
 
+    @Synchronized
     fun stopBleScan(context: Context): Boolean {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
             return applyStopTelemetry(

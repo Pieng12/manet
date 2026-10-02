@@ -111,6 +111,13 @@ class FakeNode(NodeTransport):
                 "bluetooth": True,
                 "permissions": {"scan": True, "advertise": True},
                 "scanner": True,
+                "radio": {
+                    "ready": True, "requested_mode": "coded", "configured_mode": "coded",
+                    "primary_phy": "coded", "secondary_phy": "coded", "scan_phy": "coded",
+                    "advertising_interval_units": 400,
+                    "coding_selection_support": "unsupported", "s8_requirement_accepted": False,
+                    "on_air_coding_verified": False,
+                },
                 "advertising": False,
                 "queue_size": 0,
                 "packet_pending": False,
@@ -202,6 +209,26 @@ def fake_nodes(config: dict, provider=None) -> list[FakeNode]:
 
 
 class ControllerTest(unittest.TestCase):
+    def test_radio_configuration_is_sent_and_readiness_saved(self) -> None:
+        config = physical_config()
+        with tempfile.TemporaryDirectory() as output:
+            nodes = fake_nodes(config)
+            controller = ExperimentController(config, nodes, Path(output), sleep=lambda _: None)
+            spec = build_plan(config)[0]
+            controller.configure(spec)
+            controller.readiness(spec)
+            self.assertEqual("coded", controller.manifest["radio_mode"])
+            self.assertEqual(6, len(controller.manifest["radio_readiness"]))
+            for node in nodes:
+                commands = [args for name, args in node.commands if name == "configure_session"]
+                self.assertEqual("coded", commands[0]["radio_mode"])
+
+    def test_radio_mode_changes_research_fingerprint(self) -> None:
+        config = physical_config()
+        changed = copy.deepcopy(config)
+        changed["nodes"][1]["radio_mode"] = "coded_s8_required"
+        self.assertNotEqual(research_fingerprint(config), research_fingerprint(changed))
+
     def test_device_trial_id_is_namespaced_by_session(self) -> None:
         first = physical_config()
         first["session_id"] = "session-one"

@@ -107,6 +107,13 @@ class NativeBridgeService {
     });
   }
 
+  static Future<Map<String, dynamic>> configureBleRadio(String mode) async {
+    final result = await _platform.invokeMethod<Map>('configureBleRadio', {
+      'mode': mode,
+    });
+    return Map<String, dynamic>.from(result ?? {});
+  }
+
   static Future<bool> hasPendingRelayWork() async {
     try {
       return await _platform.invokeMethod<bool>('hasPendingRelayWork') ?? false;

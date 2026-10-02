@@ -20,6 +20,13 @@ class BleWakeUpReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action != NativeBleManager.BLE_WAKE_UP_ACTION) return
 
+        val scanError = intent.getIntExtra(BluetoothLeScanner.EXTRA_ERROR_CODE, 0)
+        if (scanError != 0) {
+            NativeBleManager.reportScanFailure(scanError)
+            Log.e(TAG, "BLE scan failed asynchronously: SCAN_STATUS_$scanError")
+            return
+        }
+
         val results = scanResultsFrom(intent)
         if (results.isEmpty()) return
 
@@ -64,6 +71,10 @@ class BleWakeUpReceiver : BroadcastReceiver() {
 
             val idLabel = if (id == -1) "raw" else "0x${String.format("%04X", id)}"
             Log.i(TAG, "ResQMesh BLE candidate. ID=$idLabel, RSSI=${scanResult.rssi}")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val metadata = NativeBleInbox.protocolMetadata(data)
+                Log.i(TAG, "RX PHY primary=${scanResult.primaryPhy} secondary=${scanResult.secondaryPhy} legacy=${scanResult.isLegacy}; sender_crc=${metadata?.senderCrc} timestamp_compact=${metadata?.timestampCompact} hop=${metadata?.hop}; coding unverified")
+            }
             processPotentialPayload(
                 context,
                 data,

@@ -236,6 +236,28 @@ class _ResearchMonitorScreenState extends State<ResearchMonitorScreen>
           ],
         ]),
         _systemSummary(),
+        _section('Extended Coded Radio', [
+          for (final key in const [
+            'requested_mode',
+            'configured_mode',
+            'ready',
+            'primary_phy',
+            'secondary_phy',
+            'scan_phy',
+            'coding_requested',
+            'coding_selection_support',
+            's8_requirement_accepted',
+            'on_air_coding_verified',
+            'tx_power_requested_dbm',
+            'tx_power_actual_dbm',
+            'advertising_interval_ms',
+            'last_error',
+          ])
+            _kv(
+              key.replaceAll('_', ' '),
+              '${(_capabilities['radio'] as Map?)?[key] ?? '-'}',
+            ),
+        ]),
       ],
     );
   }

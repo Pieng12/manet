@@ -9,6 +9,7 @@
 #include <string>
 
 #include "Protocol.h"
+#include "CodedRadio.h"
 
 #ifndef RESQMESH_FIRMWARE_BUILD_ID
 #error "RESQMESH_FIRMWARE_BUILD_ID must be injected by the PlatformIO build"
@@ -63,7 +64,8 @@ struct SchedulerState {
 Preferences preferences;
 NodeConfig config;
 SchedulerState scheduler;
-NimBLEAdvertising* advertising = nullptr;
+CodedRadio radio;
+CodedRadio* advertising = &radio;
 NimBLEScan* scanner = nullptr;
 uint64_t wallOffsetMs = 0;
 bool wallClockValid = false;
@@ -129,6 +131,10 @@ void emit(const char* eventType, const Packet* packet = nullptr,
   document["trial_id"] = config.trialId;
   document["mode"] = modeName(config.mode);
   document["role"] = roleName(config.role);
+  if (strncmp(eventType, "ADVERTISE_BURST_", 16) == 0 ||
+      strcmp(eventType, "SERVICE_STARTED") == 0) {
+    radio.telemetry(document["radio"].to<JsonObject>());
+  }
   document["monotonic_ms"] = millis();
   if (wallClockValid) document["timestamp_ms"] = wallTimeMs();
   document["clock_sync_valid"] = wallClockValid;
@@ -213,7 +219,7 @@ bool pauseScanner() {
 
 void resumeScanner() {
   if (scanner != nullptr && !scanner->isScanning()) {
-    scanner->start(0, nullptr, false);
+    scanner->start(0, false, false);
   }
 }
 
@@ -336,8 +342,8 @@ void processPacket(const Packet& incoming, int rssi,
   storeForRelay(incoming, sameMessage ? "NEW_STATE" : "NEW_MESSAGE");
 }
 
-class ScanCallbacks : public NimBLEAdvertisedDeviceCallbacks {
-  void onResult(NimBLEAdvertisedDevice* device) override {
+class ScanCallbacks : public NimBLEScanCallbacks {
+  void onResult(const NimBLEAdvertisedDevice* device) override {
     if (!observationWindowOpen) return;
     if (!device->haveManufacturerData()) return;
     const std::string data = device->getManufacturerData();
@@ -367,15 +373,6 @@ void startBurst() {
   emit("ADVERTISE_BURST_REQUESTED", &scheduler.packet, nullptr, 0, String(),
        scheduler.burstId);
 
-  std::string manufacturer;
-  manufacturer.reserve(kPayloadLength + 2);
-  manufacturer.push_back(static_cast<char>(0xFF));
-  manufacturer.push_back(static_cast<char>(0xFF));
-  manufacturer.append(reinterpret_cast<const char*>(payload.data()),
-                      payload.size());
-  NimBLEAdvertisementData data;
-  data.setFlags(0x04);
-  data.setManufacturerData(manufacturer);
   if (!pauseScanner()) {
     scheduler.transmitAt = millis() + kNativeStartRetryMs;
     emit("ADVERTISE_BURST_FAILED", &scheduler.packet, "SCAN_STOP_FAILED", 0,
@@ -383,10 +380,7 @@ void startBurst() {
     scheduler.burstId = "";
     return;
   }
-  advertising->stop();
-  advertising->setAdvertisementData(data);
-  advertising->setAdvertisementType(BLE_GAP_CONN_MODE_NON);
-  if (!advertising->start()) {
+  if (!advertising->start(payload)) {
     resumeScanner();
     scheduler.transmitAt = millis() + kNativeStartRetryMs;
     emit("ADVERTISE_BURST_FAILED", &scheduler.packet, "NATIVE_START_FAILED",
@@ -456,7 +450,8 @@ void emitReadiness(const String& commandId) {
   document["kind"] = "response";
   document["command"] = "readiness";
   document["command_id"] = commandId;
-  document["ok"] = true;
+  document["ok"] = radio.ready();
+  radio.telemetry(document["radio"].to<JsonObject>());
   document["node_id"] = config.nodeId;
   document["build_id"] = RESQMESH_FIRMWARE_BUILD_ID;
   document["firmware_build_id"] = RESQMESH_FIRMWARE_BUILD_ID;
@@ -470,7 +465,7 @@ void emitReadiness(const String& commandId) {
   document["hop_out"] = config.hopOut;
   document["protocol_version"] = kProtocolVersion;
   document["bluetooth"] = true;
-  document["scanner"] = true;
+  document["scanner"] = scanner != nullptr && scanner->isScanning();
   document["advertising"] = scheduler.advertising;
   document["packet_pending"] = scheduler.hasPacket;
   document["queue_size"] = scheduler.hasPacket ? 1 : 0;
@@ -520,6 +515,11 @@ void handleCommand(const String& line) {
     return;
   }
   if (command == "configure_session") {
+    const String radioMode = document["radio_mode"] | "coded";
+    if (radioMode != "coded" && radioMode != "coded_s8_required") {
+      respond(command, commandId, false, "INVALID_RADIO_MODE");
+      return;
+    }
     const String epochId = document["protocol_epoch_id"] | "";
     const uint32_t epochSeconds = document["protocol_epoch_seconds"] | 0;
     const String protocolVersion = document["protocol_version"] | "";
@@ -549,6 +549,12 @@ void handleCommand(const String& line) {
       respond(command, commandId, false, "INVALID_rx_burst_gap_ms");
       return;
     }
+    preferences.putBool("s8required", radioMode == "coded_s8_required");
+    if (!radio.configure(radioMode == "coded_s8_required")) {
+      resumeScanner();
+      respond(command, commandId, false, "RADIO_CONFIGURATION_FAILED_CHECK_READINESS");
+      return;
+    }
     config.nodeId = String(document["node_id"] | "esp32-unconfigured");
     config.sessionLabel = String(document["build_id"] | "");
     config.sessionId = String(document["session_id"] | "");
@@ -566,6 +572,10 @@ void handleCommand(const String& line) {
     return;
   }
   if (command == "start_trial") {
+    if (!radio.ready()) {
+      respond(command, commandId, false, "RADIO_NOT_READY");
+      return;
+    }
     if (!wallClockValid || !epochValid(wallTimeMs() / 1000)) {
       respond(command, commandId, false, "PROTOCOL_EPOCH_OUT_OF_RANGE");
       return;
@@ -661,15 +671,15 @@ void setup() {
   randomSeed(esp_random());
   preferences.begin("resqmesh", false);
   NimBLEDevice::init("");
-  NimBLEDevice::setPower(ESP_PWR_LVL_P9);
-  advertising = NimBLEDevice::getAdvertising();
-  advertising->setScanResponse(false);
+  NimBLEDevice::setPower(kRadioTxPowerDbm);
+  radio.configure(preferences.getBool("s8required", false));
   scanner = NimBLEDevice::getScan();
-  scanner->setAdvertisedDeviceCallbacks(new ScanCallbacks(), true);
+  scanner->setScanCallbacks(new ScanCallbacks(), true);
+  scanner->setPhy(NimBLEScan::SCAN_CODED);
   scanner->setActiveScan(false);
   scanner->setInterval(97);
   scanner->setWindow(67);
-  scanner->start(0, nullptr, false);
+  scanner->start(0, false, false);
   loadPersistentState();
   emit("SERVICE_STARTED");
 }

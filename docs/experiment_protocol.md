@@ -243,3 +243,20 @@ Batch harus didahului smoke Trickle H1-H3 dan Basic H1-H3. Smoke menghasilkan
 `smoke_report.json`/`.csv`, sedangkan merger menghasilkan `events.json`,
 `events.csv`, `trial_summary.csv`, `aggregate_by_mode_hop.csv`,
 `invalid_trials.csv`, dan `attempt_summary.csv`.
+# Migrasi Extended Coded Radio
+
+Binary pada branch kerja Extended/Coded menggunakan interval radio tetap
+250 ms, primary/secondary Coded, manufacturer `0xFFFF`, application payload
+17 byte. Basic, Trickle (8000/256000 ms, k=1), burst 2 s, dan definisi metrik
+tetap sama. Jangan campur dataset legacy dengan dataset radio baru.
+
+Konfigurasi eksperimen baru harus menyatakan `"radio_mode": "coded"` secara
+eksplisit. Override `nodes[].radio_mode = "coded_s8_required"` hanya untuk ESP
+yang controller-nya memenuhi V2; OPPO tetap `coded`. Controller memeriksa PHY,
+interval, kesiapan dan penerimaan S8 sebelum trial, serta menyimpan snapshot
+radio pada manifest. Konfigurasi radio eksplisit masuk fingerprint sehingga
+resume/smoke lama tidak bisa digunakan untuk konfigurasi radio berbeda.
+
+Android public AdvertisingSet API tidak menyediakan pemilihan S8. Jangan klaim
+125 kbps terkunci dari callback, RSSI, atau primary/secondary Coded. Panduan:
+[Uji Windows Extended Coded](coded_radio_windows.md).

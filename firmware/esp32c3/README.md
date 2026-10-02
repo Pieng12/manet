@@ -20,11 +20,28 @@ menetapkan `ARDUINO_USB_MODE=1`, `ARDUINO_USB_CDC_ON_BOOT=1`, serta DTR/RTS nol.
 Nomor COM dapat berubah setelah upload. Firmware tidak menunggu serial monitor
 dan command `readiness` dapat dikirim kapan saja setelah boot.
 
-Firmware memakai NimBLE legacy `ADV_NONCONN_IND`, sehingga advertising tidak
-connectable dan tidak scannable. Raw manufacturer AD membawa company ID
+Firmware memakai Extended Advertising non-connectable/non-scannable, dengan
+primary dan secondary LE Coded serta passive extended scanning Coded. Toolchain
+dipin ke pioarduino `55.03.312-1`, Arduino `3.3.12` / ESP-IDF `5.5.5`,
+NimBLE-Arduino `2.5.1`. Tidak memakai API Bluedroid.
+Raw manufacturer AD membawa company ID
 `FF FF`, diikuti application payload ResQMesh tepat 17 byte. Codec menerima
 17 byte application payload atau 19 byte manufacturer data lalu memisahkan
 company ID secara eksplisit.
+
+Adapter `CodedRadio` memiliki satu advertising instance GAP (0), tidak memakai
+wrapper advertising bersamaan. Interval radio 250 ms (400 x 0.625 ms) identik
+untuk Basic dan Trickle; daya diminta +9 dBm seperti sebelumnya, daya terpilih
+dicatat dari hasil configure. Scheduler dan burst 2 s tidak diubah.
+
+`configure_session.radio_mode` menerima `coded` (default) atau
+`coded_s8_required`. Mode kedua hanya menggunakan PHY options `0x04` ketika
+supported commands HCI menyatakan Set Extended Advertising Parameters V2
+tersedia. `0x02` berarti prefer, bukan require. Bila V2 tidak tersedia atau
+controller menolak configure, readiness gagal tanpa fallback. Header library
+bukan bukti bahwa controller mendukung V2. Telemetry `radio.last_error` memuat
+kode return NimBLE asli. `s8_requirement_accepted` tidak berarti coding di udara
+sudah diverifikasi. Lihat [panduan uji](../../docs/coded_radio_windows.md).
 
 ## Konstanta Protokol
 

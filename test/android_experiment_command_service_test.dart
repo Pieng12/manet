@@ -147,6 +147,59 @@ void main() {
     );
   });
 
+  test(
+    'explicit coded radio configuration is recorded and preserves readiness metadata',
+    () async {
+      final radio = <String, Object?>{
+        'ready': true,
+        'requested_mode': 'coded',
+        'coding_selection_support': 'unsupported',
+        'on_air_coding_verified': false,
+      };
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (call) async {
+            if (call.method == 'configureBleRadio') {
+              expect(call.arguments['mode'], 'coded');
+              return radio;
+            }
+            if (call.method == 'getBleCapabilities') return {'radio': radio};
+            return true;
+          });
+      final result = await commands.execute(
+        'configure_session',
+        configureArgs()..['radio_mode'] = 'coded',
+      );
+      expect(result['ok'], true);
+      expect((await commands.execute('readiness', {}))['radio'], radio);
+      expect(
+        await db.query(
+          'experiment_events',
+          where: 'event_type = ?',
+          whereArgs: ['RADIO_CONFIGURED'],
+        ),
+        hasLength(1),
+      );
+    },
+  );
+
+  test('required S8 is rejected before creating a research session', () async {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(
+          channel,
+          (call) async => {
+            'ready': false,
+            'last_error': 'S8_SELECTION_UNSUPPORTED',
+          },
+        );
+    final result = await commands.execute(
+      'configure_session',
+      configureArgs()..['radio_mode'] = 'coded_s8_required',
+    );
+    expect(result['ok'], false);
+    expect(result['error'], contains('S8_SELECTION_UNSUPPORTED'));
+    expect(await db.query('experiment_sessions'), isEmpty);
+  });
+
   test('readiness reports configured RX burst inactivity gap', () async {
     await commands.execute('configure_session', configureArgs());
     final result = await commands.execute('readiness', const {});

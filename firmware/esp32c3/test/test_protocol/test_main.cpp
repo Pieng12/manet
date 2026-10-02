@@ -3,6 +3,7 @@
 #include <cmath>
 
 #include "Protocol.h"
+#include "RadioConfig.h"
 
 using namespace resqmesh;
 
@@ -126,8 +127,38 @@ void test_observation_tracker_is_bounded_and_evicts_oldest() {
                            tracker.activeEntryCount());
 }
 
+void test_extended_manufacturer_boundary_for_sos_and_ack() {
+  for (auto kind : {PacketKind::Sos, PacketKind::Ack}) {
+    Packet packet;
+    packet.kind = kind;
+    packet.timestampSeconds = kEpochSeconds + 123;
+    packet.status = kind == PacketKind::Ack ? Status::Resolved : Status::Active;
+    packet.hop = 63;
+    std::array<uint8_t, kPayloadLength> payload{};
+    TEST_ASSERT_TRUE(encode(packet, payload));
+    const auto manufacturer = manufacturerPayload(payload);
+    TEST_ASSERT_EQUAL_UINT32(19, manufacturer.size());
+    TEST_ASSERT_EQUAL_HEX8(0xff, manufacturer[0]);
+    TEST_ASSERT_EQUAL_HEX8(0xff, manufacturer[1]);
+    std::array<uint8_t, kPayloadLength> recovered{};
+    TEST_ASSERT_TRUE(extractApplicationPayload(manufacturer.data(), manufacturer.size(), recovered));
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(payload.data(), recovered.data(), kPayloadLength);
+  }
+}
+
+void test_s8_options_do_not_silently_fallback() {
+  TEST_ASSERT_EQUAL_HEX8(0x02, kPreferS8);
+  TEST_ASSERT_EQUAL_HEX8(0x04, kRequireS8);
+  TEST_ASSERT_EQUAL_HEX8(0x04, codingOption(true, true));
+  TEST_ASSERT_EQUAL_HEX8(0, codingOption(false, true));
+  TEST_ASSERT_EQUAL_HEX8(0, codingOption(true, false));
+  TEST_ASSERT_EQUAL_UINT16(400, kRadioIntervalUnits);
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
+  RUN_TEST(test_extended_manufacturer_boundary_for_sos_and_ack);
+  RUN_TEST(test_s8_options_do_not_silently_fallback);
   RUN_TEST(test_round_trip_signed_coordinates_and_hop);
   RUN_TEST(test_exact_epoch_boundaries);
   RUN_TEST(test_company_id_is_removed_from_manufacturer_data);

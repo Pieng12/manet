@@ -383,6 +383,9 @@ class MeshBackgroundService : Service() {
                     "getBleCapabilities" -> {
                         result.success(bleCapabilities())
                     }
+                    "configureBleRadio" -> {
+                        result.success(NativeBleRadio.configure(this, call.argument<String>("mode") ?: CodedRadioPolicy.CODED))
+                    }
                     "setResearchRxBurstGapMs" -> {
                         val value = call.argument<Number>("rxBurstGapMs")?.toLong() ?: 0L
                         NativeBleConfig.setRxBurstGapMs(this, value)
@@ -644,6 +647,7 @@ class MeshBackgroundService : Service() {
         val bluetoothEnabled = adapter?.isEnabled == true
         return mapOf(
             "sdkInt" to Build.VERSION.SDK_INT,
+            "radio" to NativeBleRadio.statusMap(this),
             "androidRelease" to Build.VERSION.RELEASE,
             "deviceManufacturer" to Build.MANUFACTURER,
             "deviceModel" to Build.MODEL,

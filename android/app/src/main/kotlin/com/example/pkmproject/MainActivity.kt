@@ -118,6 +118,9 @@ class MainActivity : FlutterActivity() {
                     "getBleCapabilities" -> {
                         result.success(bleCapabilities())
                     }
+                    "configureBleRadio" -> {
+                        result.success(NativeBleRadio.configure(this, call.argument<String>("mode") ?: CodedRadioPolicy.CODED))
+                    }
                     "getDeviceMetadata" -> {
                         result.success(deviceMetadata())
                     }
@@ -240,6 +243,7 @@ class MainActivity : FlutterActivity() {
         val bluetoothEnabled = adapter?.isEnabled == true
         return mapOf(
             "sdkInt" to Build.VERSION.SDK_INT,
+            "radio" to NativeBleRadio.statusMap(this),
             "androidRelease" to Build.VERSION.RELEASE,
             "deviceManufacturer" to Build.MANUFACTURER,
             "deviceModel" to Build.MODEL,

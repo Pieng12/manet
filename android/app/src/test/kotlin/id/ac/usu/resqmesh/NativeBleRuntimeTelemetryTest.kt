@@ -8,6 +8,33 @@ import org.junit.Test
 
 class NativeBleRuntimeTelemetryTest {
     @Test
+    fun repeatedScanStartsReuseOnlyTheSameActiveConfiguration() {
+        assertTrue(NativeBleManager.canReuseScan(true, false, false))
+        assertTrue(NativeBleManager.canReuseScan(true, true, true))
+        assertFalse(NativeBleManager.canReuseScan(false, false, false))
+        assertFalse(NativeBleManager.canReuseScan(true, null, false))
+        assertFalse(NativeBleManager.canReuseScan(true, false, true))
+        assertFalse(NativeBleManager.canReuseScan(true, true, false))
+    }
+
+    @Test
+    fun asynchronousScanFailureClearsActiveStateAndPreservesNativeCode() {
+        for (errorCode in 1..6) {
+            val telemetry = NativeBleManager.scanFailureTelemetry(errorCode)
+            val status = NativeBleManager.scanStatusMapForTest(
+                rawNativeScanActive = telemetry.active,
+                rawLastScanErrorCode = telemetry.errorCode,
+                bluetoothEnabled = true,
+                bleSupported = true,
+                scannerAvailable = true
+            )
+            assertFalse(telemetry.success)
+            assertFalse(status["nativeScanActive"] as Boolean)
+            assertEquals("SCAN_STATUS_$errorCode", status["lastScanErrorCode"])
+        }
+    }
+
+    @Test
     fun stopWhenBluetoothAlreadyOffClearsScanTelemetry() {
         val telemetry = NativeBleManager.stopTelemetryForUnavailable("BLUETOOTH_DISABLED")
         val status = NativeBleManager.scanStatusMapForTest(

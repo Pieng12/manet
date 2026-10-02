@@ -6,7 +6,7 @@ Energy Menggunakan Algoritma Trickle".
 
 ## Protokol dan Identitas
 
-- Payload tetap legacy manufacturer data `0xFFFF`, tepat 17 byte, big-endian.
+- Payload tetap manufacturer data `0xFFFF`, tepat 17 byte, big-endian.
 - Koordinat adalah integer signed 24-bit two's complement dengan skala 10.000.
 - Sumber mengiklankan hop 1; relay memakai `min(hop_in + 1, 63)`. Nilai 63
   hanya saturasi representasi, bukan TTL.
@@ -47,7 +47,9 @@ tanpa memasukkan SOS ke relay queue. RSSI hanya metrik observasional.
 
 ## Burst dan Metrik
 
-Advertising eksperimen selalu legacy, non-connectable, dan non-scannable.
+Advertising eksperimen menggunakan Extended Advertising LE Coded primary dan
+secondary, non-connectable, dan non-scannable. Android tidak memilih coding S8;
+PHY Coded saja bukan bukti 125 kbps. Lihat [panduan radio](coded_radio_windows.md).
 Satu callback start native yang sukses menghasilkan satu burst transmission.
 Setiap burst memiliki `burst_id` dan event requested/started/ended/failed.
 Penerimaan memakai `ScanResult.timestampNanos`, kemudian dipetakan ke wall

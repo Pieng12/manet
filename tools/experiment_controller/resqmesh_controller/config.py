@@ -52,6 +52,12 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ConfigError("nodes must be a non-empty list")
 
     node_ids = [str(node.get("node_id", "")).strip() for node in nodes]
+    radio_mode = config.get("radio_mode", "coded")
+    if radio_mode not in {"coded", "coded_s8_required"}:
+        errors.append("radio_mode must be coded or coded_s8_required")
+    for node in nodes:
+        if node.get("radio_mode", radio_mode) not in {"coded", "coded_s8_required"}:
+            errors.append(f"invalid radio_mode for {node.get('node_id')}")
     if any(not node_id for node_id in node_ids):
         errors.append("every node requires a non-empty node_id")
     if len(node_ids) != len(set(node_ids)):
@@ -213,6 +219,9 @@ def research_fingerprint(config: dict[str, Any]) -> str:
         "longitude": config.get("longitude"),
         "rx_burst_gap_ms": config.get("rx_burst_gap_ms"),
     }
+    # Preserve historical fingerprints; explicit radio runs cannot mix with legacy runs.
+    if "radio_mode" in config:
+        relevant["radio_mode"] = config["radio_mode"]
     encoded = json.dumps(relevant, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()
 

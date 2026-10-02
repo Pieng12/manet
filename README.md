@@ -351,3 +351,15 @@ tambahkan autentikasi payload, enkripsi atau signature ringkas, validasi server,
 manufacturer ID resmi, identity aplikasi final, dan release signing dengan
 `android/key.properties` atau environment CI. Nilai `0xFFFF` tetap hanya untuk
 eksperimen.
+# Extended Coded Radio
+
+Perubahan radio pada branch kerja memakai Extended Advertising non-connectable,
+non-scannable dengan primary/secondary LE Coded, tanpa mengubah payload RM17,
+SOS/ACK atau algoritma. Interval radio tetap 250 ms untuk kedua algoritma.
+Android tidak dapat mengunci S8 melalui public AdvertisingSet API. Firmware
+memeriksa dukungan HCI V2 sebelum menerima `coded_s8_required`; mode biasa
+`coded` tidak mengklaim bitrate 125 kbps terkunci.
+
+Panduan build, instalasi dan matriks validasi perangkat:
+[Extended Coded Windows](docs/coded_radio_windows.md). Eksperimen baru memerlukan
+APK/firmware baru dan sesi/output baru; data legacy tidak ditulis ulang.

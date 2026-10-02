@@ -1,234 +1,139 @@
 package id.ac.usu.resqmesh
 
-import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothManager
-import android.bluetooth.le.AdvertiseCallback
 import android.bluetooth.le.AdvertiseData
-import android.bluetooth.le.AdvertiseSettings
+import android.bluetooth.le.AdvertisingSet
+import android.bluetooth.le.AdvertisingSetCallback
+import android.bluetooth.le.AdvertisingSetParameters
 import android.bluetooth.le.BluetoothLeAdvertiser
 import android.content.Context
-import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
-import androidx.annotation.RequiresApi
 
 object NativeBleAdvertiser {
-    private const val TAG = "NativeBleAdvertiser"
-
     private var advertiser: BluetoothLeAdvertiser? = null
-    private var isAdvertising = false
-    private var currentPayload: ByteArray? = null
-    private var currentDebugVisible = false
-    private var currentConnectable = false
-    private var advertiserStatus = "stopped"
-    private var lastErrorCode: String? = null
-    private var pendingStartCallback: ((Boolean, String, String?) -> Unit)? = null
-    private val mainHandler by lazy { Handler(Looper.getMainLooper()) }
-    private var advertiseGeneration = 0L
-    private var activeAdvertiseCallback: AdvertiseCallback? = null
+    private var activeCallback: AdvertisingSetCallback? = null
+    private var pending: ((Boolean, String, String?) -> Unit)? = null
+    private var payload: ByteArray? = null
+    private var debugVisible = false
+    private var status = "stopped"
+    private var error: String? = null
+    private val lifecycle = AdvertisingLifecycle()
+    private val handler by lazy { Handler(Looper.getMainLooper()) }
 
-    private fun getBluetoothAdapter(context: Context): BluetoothAdapter? {
-        val bluetoothManager =
-            context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
-        return bluetoothManager.adapter
-    }
-
-    @RequiresApi(Build.VERSION_CODES.LOLLIPOP)
-    fun startAdvertising(
-        context: Context,
-        payload: ByteArray?,
-        debugVisible: Boolean = currentDebugVisible,
-        connectable: Boolean = false,
-        callback: ((Boolean, String, String?) -> Unit)? = null
-    ): Boolean {
-        val finalPayload = payload ?: currentPayload
-        currentDebugVisible = debugVisible
-        currentConnectable = false
-
-        Log.d(
-            TAG,
-            "Starting BLE broadcast. Payload: ${finalPayload?.size ?: 0} bytes, debugVisible=$debugVisible, connectable=$connectable"
-        )
-
-        if (!NativeBlePermissions.hasAdvertisePermission(context)) {
-            return failStart("MISSING_PERMISSION", callback)
+    fun startAdvertising(context: Context, payload: ByteArray?,
+                         debugVisible: Boolean = this.debugVisible, connectable: Boolean = false,
+                         callback: ((Boolean, String, String?) -> Unit)? = null): Boolean {
+        // UI, service and worker share this single advertising-set owner.
+        val next = (payload ?: this.payload)?.copyOf()
+        stopAdvertising()
+        this.debugVisible = debugVisible
+        val rejection = NativeBleRadio.rejection(context)
+            ?: if (next?.size != NativeBleConfig.PROTOCOL_LENGTH_BYTES) "INVALID_PAYLOAD_LENGTH" else null
+        if (rejection != null) {
+            status = "failed"; error = rejection; NativeBleRadio.lastError = rejection
+            callback?.invoke(false, status, error)
+            return false
         }
-
-        val bluetoothAdapter = getBluetoothAdapter(context)
-        if (bluetoothAdapter == null || !bluetoothAdapter.isEnabled) {
-            return failStart("BLUETOOTH_UNAVAILABLE", callback)
+        this.payload = next
+        val owner = try {
+            (context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager)
+                .adapter?.bluetoothLeAdvertiser
+        } catch (_: SecurityException) { null }
+        if (owner == null) {
+            status = "failed"; error = "ADVERTISER_UNAVAILABLE"
+            NativeBleRadio.lastError = error
+            callback?.invoke(false, status, error)
+            return false
         }
-
-        advertiser = bluetoothAdapter.bluetoothLeAdvertiser
-        if (advertiser == null) {
-            return failStart("FEATURE_UNSUPPORTED", callback)
-        }
-
-        if (finalPayload == null) {
-            return failStart("MISSING_PAYLOAD", callback)
-        }
-
-        if (finalPayload.size != NativeBleConfig.PROTOCOL_LENGTH_BYTES) {
-            return failStart("INVALID_PAYLOAD_LENGTH_${finalPayload.size}", callback)
-        }
-
-        try {
-            activeAdvertiseCallback?.let { advertiser?.stopAdvertising(it) }
-        } catch (_: Exception) {
-        }
-
-        val dataBuilder = AdvertiseData.Builder()
-            .setIncludeDeviceName(false)
-            .setIncludeTxPowerLevel(false)
-
-        dataBuilder.addManufacturerData(NativeBleConfig.MANUFACTURER_ID, finalPayload)
-        currentPayload = finalPayload
-
-        val settings = AdvertiseSettings.Builder()
-            .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_BALANCED)
-            .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_MEDIUM)
-            .setConnectable(false)
-            .setTimeout(0)
-            .build()
-
-        return try {
-            val generation = ++advertiseGeneration
-            val advertiseCallback = buildAdvertiseCallback(generation)
-            activeAdvertiseCallback = advertiseCallback
-            isAdvertising = false
-            advertiserStatus = "starting"
-            lastErrorCode = null
-            pendingStartCallback = callback
-            if (callback != null) {
-                mainHandler.postDelayed({
-                    if (advertiserStatus == "starting" && advertiseGeneration == generation) {
-                        Log.e(TAG, "BLE advertising start timed out")
-                        advertiseGeneration++
-                        try {
-                            advertiser?.stopAdvertising(advertiseCallback)
-                        } catch (_: Exception) {
-                        }
-                        isAdvertising = false
-                        advertiserStatus = "failed"
-                        lastErrorCode = "START_TIMEOUT"
-                        pendingStartCallback?.invoke(false, advertiserStatus, lastErrorCode)
-                        pendingStartCallback = null
-                    }
-                }, 2500L)
+        advertiser = owner
+        val token = lifecycle.begin()
+        status = "starting"; error = null; pending = callback
+        val setCallback = object : AdvertisingSetCallback() {
+            override fun onAdvertisingSetStarted(set: AdvertisingSet?, txPower: Int, result: Int) {
+                if (!lifecycle.finish(token)) {
+                    if (token == lifecycle.generation && status == "active") return
+                    // Timed-out/cancelled sets can still start on the controller.
+                    release(owner, this)
+                    return
+                }
+                if (result == ADVERTISE_SUCCESS && set != null) {
+                    NativeBleRadio.configured = true
+                    NativeBleRadio.actualTxPower = txPower
+                    complete(true, null)
+                } else {
+                    release(owner, this)
+                    complete(false, "ADVERTISE_STATUS_$result")
+                }
             }
-
-            advertiser?.startAdvertising(settings, dataBuilder.build(), advertiseCallback)
+            override fun onAdvertisingSetStopped(set: AdvertisingSet?) {
+                if (token == lifecycle.generation && status == "active") status = "stopped"
+            }
+        }
+        activeCallback = setCallback
+        return try {
+            val parameters = AdvertisingSetParameters.Builder()
+                .setLegacyMode(false).setConnectable(false).setScannable(false)
+                .setPrimaryPhy(BluetoothDevice.PHY_LE_CODED)
+                .setSecondaryPhy(BluetoothDevice.PHY_LE_CODED)
+                .setInterval(CodedRadioPolicy.INTERVAL_UNITS)
+                .setTxPowerLevel(CodedRadioPolicy.TX_POWER_DBM).build()
+            val data = AdvertiseData.Builder().setIncludeDeviceName(false)
+                .setIncludeTxPowerLevel(false)
+                .addManufacturerData(NativeBleConfig.MANUFACTURER_ID, next!!).build()
+            handler.postDelayed({
+                if (lifecycle.finish(token)) {
+                    lifecycle.cancel()
+                    release(owner, setCallback)
+                    complete(false, "START_TIMEOUT")
+                }
+            }, 2500L)
+            owner.startAdvertisingSet(parameters, data, null, null, null, setCallback, handler)
             true
-        } catch (e: Exception) {
-            Log.e(TAG, "Fatal error starting advertiser: ${e.message}", e)
-            failStart("START_EXCEPTION", callback)
-        }
-    }
-
-    @RequiresApi(Build.VERSION_CODES.LOLLIPOP)
-    fun stopAdvertising() {
-        Log.d(TAG, "Stopping BLE broadcast")
-        advertiseGeneration++
-        try {
-            activeAdvertiseCallback?.let { advertiser?.stopAdvertising(it) }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error stopping: ${e.message}", e)
-        }
-        isAdvertising = false
-        advertiserStatus = "stopped"
-        lastErrorCode = null
-        currentPayload = null
-        activeAdvertiseCallback = null
-    }
-
-    fun isCurrentlyAdvertising(): Boolean {
-        return isAdvertising
-    }
-
-    fun isCurrentlyAdvertising(context: Context): Boolean {
-        return statusMap(context)["active"] == true
-    }
-
-    fun statusMap(): Map<String, Any?> {
-        return mapOf(
-            "status" to advertiserStatus,
-            "active" to isAdvertising,
-            "errorCode" to lastErrorCode,
-            "connectable" to currentConnectable,
-            "debugVisible" to currentDebugVisible
-        )
-    }
-
-    fun statusMap(context: Context): Map<String, Any?> {
-        val bluetoothAdapter = getBluetoothAdapter(context)
-        val bluetoothEnabled = bluetoothAdapter?.isEnabled == true
-        val advertiserAvailable = if (bluetoothEnabled) {
-            bluetoothAdapter?.bluetoothLeAdvertiser != null
-        } else {
+        } catch (exception: Exception) {
+            Log.e("NativeBleAdvertiser", "Extended advertising failed", exception)
+            if (lifecycle.finish(token)) {
+                lifecycle.cancel()
+                release(owner, setCallback)
+                complete(false, "START_EXCEPTION_${exception.javaClass.simpleName}")
+            }
             false
         }
-        return NativeBleRuntimeTelemetry.advertisingStatusMap(
-            rawStatus = advertiserStatus,
-            rawActive = isAdvertising,
-            rawErrorCode = lastErrorCode,
-            connectable = currentConnectable,
-            debugVisible = currentDebugVisible,
-            bluetoothEnabled = bluetoothEnabled,
-            advertiserAvailable = advertiserAvailable
-        )
     }
 
-    private fun failStart(
-        errorCode: String,
-        callback: ((Boolean, String, String?) -> Unit)?
-    ): Boolean {
-        Log.e(TAG, "BLE advertising failed before start: $errorCode")
-        isAdvertising = false
-        advertiserStatus = "failed"
-        lastErrorCode = errorCode
-        pendingStartCallback = null
-        callback?.invoke(false, advertiserStatus, errorCode)
-        return false
+    private fun complete(success: Boolean, reason: String?) {
+        status = if (success) "active" else "failed"
+        error = reason; NativeBleRadio.lastError = reason
+        val callback = pending
+        pending = null
+        callback?.invoke(success, status, reason)
     }
-
-    private fun buildAdvertiseCallback(generation: Long): AdvertiseCallback {
-        return object : AdvertiseCallback() {
-            override fun onStartSuccess(settingsInEffect: AdvertiseSettings?) {
-                super.onStartSuccess(settingsInEffect)
-                if (generation != advertiseGeneration || advertiserStatus != "starting") {
-                    Log.w(TAG, "Ignoring stale advertiser success callback generation=$generation")
-                    return
-                }
-                Log.d(TAG, "BLE advertising started successfully")
-                isAdvertising = true
-                advertiserStatus = "active"
-                lastErrorCode = null
-                pendingStartCallback?.invoke(true, advertiserStatus, null)
-                pendingStartCallback = null
-            }
-
-            override fun onStartFailure(errorCode: Int) {
-                super.onStartFailure(errorCode)
-                if (generation != advertiseGeneration || advertiserStatus != "starting") {
-                    Log.w(TAG, "Ignoring stale advertiser failure callback generation=$generation")
-                    return
-                }
-                val errorMsg = when (errorCode) {
-                    ADVERTISE_FAILED_DATA_TOO_LARGE -> "DATA_TOO_LARGE"
-                    ADVERTISE_FAILED_TOO_MANY_ADVERTISERS -> "TOO_MANY_ADVERTISERS"
-                    ADVERTISE_FAILED_ALREADY_STARTED -> "ALREADY_STARTED"
-                    ADVERTISE_FAILED_INTERNAL_ERROR -> "INTERNAL_ERROR"
-                    ADVERTISE_FAILED_FEATURE_UNSUPPORTED -> "FEATURE_UNSUPPORTED"
-                    else -> "UNKNOWN_ERROR ($errorCode)"
-                }
-                Log.e(TAG, "BLE advertising failed: $errorMsg")
-                isAdvertising = false
-                advertiserStatus = "failed"
-                lastErrorCode = errorMsg
-                pendingStartCallback?.invoke(false, advertiserStatus, errorMsg)
-                pendingStartCallback = null
-            }
-        }
+    private fun release(owner: BluetoothLeAdvertiser?, callback: AdvertisingSetCallback) {
+        try { owner?.stopAdvertisingSet(callback) }
+        catch (exception: Exception) { Log.w("NativeBleAdvertiser", "Cannot release advertising set", exception) }
+    }
+    fun stopAdvertising() {
+        lifecycle.cancel()
+        val old = activeCallback
+        activeCallback = null
+        old?.let { release(advertiser, it) }
+        val cancelled = pending
+        pending = null
+        status = "stopped"; error = null; payload = null
+        cancelled?.invoke(false, "stopped", "START_CANCELLED")
+    }
+    fun isCurrentlyAdvertising() = status == "active"
+    fun isCurrentlyAdvertising(context: Context) = statusMap(context)["active"] == true
+    fun statusMap(): Map<String, Any?> = mapOf("status" to status,
+        "active" to isCurrentlyAdvertising(), "errorCode" to error,
+        "connectable" to false, "debugVisible" to debugVisible)
+    fun statusMap(context: Context): Map<String, Any?> {
+        val adapter = (context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager).adapter
+        val enabled = adapter?.isEnabled == true
+        return NativeBleRuntimeTelemetry.advertisingStatusMap(status, isCurrentlyAdvertising(),
+            error, false, debugVisible, enabled, enabled && adapter?.bluetoothLeAdvertiser != null) +
+            mapOf("radio" to NativeBleRadio.statusMap(context))
     }
 }

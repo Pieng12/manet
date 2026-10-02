@@ -10,6 +10,9 @@ enum ForwardingMode {
 enum ResqMeshMode { offline, gateway }
 
 class MeshConfig {
+  static const String defaultRadioMode = 'coded';
+  static const int radioAdvertisingIntervalUnits = 400;
+  static const int radioAdvertisingIntervalMs = 250;
   static const String protocolVersion = 'resqmesh-ble17-v1';
   static const Duration defaultRxBurstGap = Duration(milliseconds: 1000);
   static const int protocolEpochSeconds = int.fromEnvironment(
