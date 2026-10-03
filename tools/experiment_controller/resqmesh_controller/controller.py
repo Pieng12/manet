@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import PROTOCOL_EPOCH_ID, PROTOCOL_EPOCH_SECONDS, PROTOCOL_VERSION
-from .config import HYPOTHESES, MODES, research_fingerprint, validate_config
+from .config import HYPOTHESES, MODES, METHOD_DESIGN_VERSION, METHOD_PARAMETERS, research_fingerprint, validate_config
 from .devices import DeviceError, NodeTransport, write_jsonl
 from .radio import radio_readiness_errors
 from .log_merge import (
@@ -28,6 +28,7 @@ class TrialSpec:
     mode: str
     hypothesis: str
     number: int
+    block: int | None = None
 
     @property
     def trial_id(self) -> str:
@@ -39,11 +40,12 @@ class TrialSpec:
             "mode": self.mode,
             "hypothesis": self.hypothesis,
             "attempt": self.number,
+            "block": self.block,
         }
 
     @classmethod
     def from_json(cls, value: dict[str, Any]) -> "TrialSpec":
-        return cls(str(value["mode"]), str(value["hypothesis"]), int(value["attempt"]))
+        return cls(str(value["mode"]), str(value["hypothesis"]), int(value["attempt"]), value.get("block"))
 
 
 class BatchIncompleteError(RuntimeError):
@@ -54,6 +56,17 @@ class BatchIncompleteError(RuntimeError):
 
 def build_plan(config: dict[str, Any]) -> list[TrialSpec]:
     target = int(config.get("valid_trials_per_condition", config.get("trials_per_condition", 15)))
+    strategy = config.get("trial_order", "balanced_randomized")
+    if strategy == "balanced_randomized":
+        randomizer = random.Random(int(config.get("random_seed", 231402095)))
+        plan = []
+        for block in range(1, target + 1):
+            conditions = [TrialSpec(mode, hypothesis, block, block)
+                          for mode in config.get("modes", MODES)
+                          for hypothesis in config.get("hypotheses", HYPOTHESES)]
+            randomizer.shuffle(conditions)
+            plan.extend(conditions)
+        return plan
     plan = [
         TrialSpec(mode, hypothesis, number)
         for mode in config.get("modes", MODES)
@@ -99,6 +112,8 @@ class ExperimentController:
     def _load_manifest(self) -> dict[str, Any]:
         if self.manifest_path.exists():
             manifest = json.loads(self.manifest_path.read_text(encoding="utf-8"))
+            if self.config.get("session_id") and manifest.get("session_id") != self.config["session_id"]:
+                raise DeviceError("manifest session differs; use a new output directory")
             existing = manifest.get("config_fingerprint")
             if existing and existing != self.config_fingerprint:
                 raise DeviceError("manifest config/topology fingerprint does not match this configuration")
@@ -113,7 +128,11 @@ class ExperimentController:
             "config_fingerprint": self.config_fingerprint,
             "valid_trials_per_condition": self.valid_target,
             "max_attempts_per_condition": self.max_attempts,
-            "trial_order_strategy": self.config.get("trial_order", "blocked"),
+            "trial_order_strategy": self.config.get("trial_order", "balanced_randomized"),
+            "method_design_version": METHOD_DESIGN_VERSION,
+            "method_parameters": METHOD_PARAMETERS,
+            "target_valid_trials": len(MODES) * len(HYPOTHESES) * self.valid_target,
+            "topology_basis": "logical_hop_filtering_not_physical_RF_isolation",
             "random_seed": int(self.config.get("random_seed", 231402095)),
             "trial_order": [item.to_json() for item in build_plan(self.config)],
             "trials": {},
@@ -161,6 +180,8 @@ class ExperimentController:
             errors.append("ok=false")
         if result.get("measurement_timing_version") != 2:
             errors.append("measurement_timing_version=2 required; update APK/firmware")
+        if result.get("method_design_version") != METHOD_DESIGN_VERSION:
+            errors.append("method_design_version mismatch: rebuild APK and firmware")
         node_config = next(item for item in self.config["nodes"] if item["node_id"] == node.node_id)
         requested_radio = node_config.get("radio_mode", self.config.get("radio_mode"))
         radio = result.get("radio")
@@ -202,6 +223,14 @@ class ExperimentController:
         if result.get("scanner") is not True:
             errors.append("BLE scanner is not active")
         if spec is not None:
+            parameters = METHOD_PARAMETERS[spec.mode]
+            for key, expected_value in {
+                "suppression_enabled": parameters["suppression_enabled"],
+                "trickle_imin_ms": 8000, "trickle_imax_ms": 256000,
+                "trickle_k": 1, "burst_duration_ms": 2000,
+            }.items():
+                if result.get(key) != expected_value:
+                    errors.append(f"{key}={result.get(key)!r}, expected {expected_value!r}")
             topology = self._node_topology(node, spec.hypothesis)
             expected_active = topology.get("active", topology.get("role") != "OBSERVER")
             expected = {
@@ -617,6 +646,8 @@ class ExperimentController:
             "require_event_sequence": True,
             "require_complete_event_cycles": True,
             "require_trickle_timing_metadata": True,
+            "block": spec.block,
+            "method_design_version": METHOD_DESIGN_VERSION,
             "observation_window_basis": "SOURCE_FIRST_ADVERTISE_STARTED",
             "event_sequence_node_ids": sorted(
                 node.node_id for node in self.nodes if node.transport == "serial"
@@ -908,12 +939,8 @@ class ExperimentController:
                 missing.append("DESTINATION_FIRST_VALID_RECEIVE")
             if summary.get("e2e_latency_ms") is None:
                 missing.append("valid end-to-end latency")
-            if mode == "trickle" and hypothesis in {"H2", "H3"}:
-                if "TRICKLE_CONSISTENT_HEARD" not in event_types:
-                    missing.append("TRICKLE_CONSISTENT_HEARD")
-                if "TRICKLE_TX_SUPPRESSED" not in event_types:
-                    missing.append("TRICKLE_TX_SUPPRESSED")
-            if mode == "basic_flooding" and "TRICKLE_TX_SUPPRESSED" in event_types:
+            # Zero consistent observations/suppression is a legitimate radio outcome.
+            if mode != "trickle" and "TRICKLE_TX_SUPPRESSED" in event_types:
                 missing.append("absence of TRICKLE_TX_SUPPRESSED")
             if record.get("reset_verified") is not True:
                 missing.append("reset/quiet-period verification")
@@ -928,7 +955,7 @@ class ExperimentController:
                 }
             )
         report = {
-            "passed": len(conditions) == 6 and all(item["passed"] for item in conditions),
+            "passed": len(conditions) == len(MODES) * len(HYPOTHESES) and all(item["passed"] for item in conditions),
             "config_fingerprint": self.config_fingerprint,
             "session_id": self.manifest["session_id"],
             "conditions": conditions,

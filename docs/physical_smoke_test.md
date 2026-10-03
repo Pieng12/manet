@@ -85,15 +85,18 @@ bukan jarak. Seluruh ESP memakai firmware yang sama.
     py tools/experiment_controller/run.py readiness --config experiment.local.json
     ```
 
-13. Jalankan smoke tepat enam kondisi.
+13. Jalankan smoke tepat sembilan kondisi menggunakan config tiga metode dan
+    direktori session baru (lihat [panduan 135 trial](three_method_experiment.md)).
 
     ```powershell
     py tools/experiment_controller/run.py smoke --config experiment.local.json --output experiment_output
     ```
 
-14. Periksa `experiment_output/smoke_report.json` dan `.csv`. H2/H3 Trickle
-    harus memiliki consistency relay sejajar dan minimal satu suppression;
-    Basic tidak boleh memiliki suppression Trickle. Requested burst tanpa
+14. Periksa `experiment_output/smoke_report.json` dan `.csv`. Ketiga metode
+    harus lolos H1/H2/H3. Zero consistency/suppression tetap sah. Jika c>=k
+    benar-benar teramati pada kesempatan, Trickle menekan kesempatan, sedangkan
+    no-suppression mengizinkan. Basic dan no-suppression tidak boleh memiliki
+    suppression Trickle. Requested burst tanpa
     started callback tidak dihitung. Manifest setiap trial harus memiliki
     `observation_started_at_ms` dan `observation_ended_at_ms`; event di luar
     batas terlihat di workbook tetapi tidak masuk metrik.

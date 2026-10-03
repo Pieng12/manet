@@ -434,6 +434,63 @@ void main() {
     expect(next, isNotNull);
   });
 
+  test(
+    'no-suppression queue counts/deduplicates c, transmits and still terminates on ACK',
+    () async {
+      final ablation = RelayQueueService(
+        database: db,
+        random: Random(1),
+        mode: ForwardingMode.trickleNoSuppression,
+      );
+      final sos = message(
+        'no-suppression',
+        senderCrc: 4250,
+        expired: true,
+        hopCount: 63,
+      );
+      await ablation.storeAndQueueSos(message: sos, nextEligibleAt: now);
+      final item = (await ablation.getItem(sos.id, 'sos'))!;
+      expect(item.nextEligibleAt, inInclusiveRange(now + 4000, now + 7999));
+      for (var index = 0; index < 2; index++) {
+        expect(
+          await ablation.recordConsistentSosObservation(
+            messageId: sos.id,
+            observationId: 'same-physical-observation',
+            observerKey: 'peer',
+            nowMs: now + 1,
+          ),
+          index == 0,
+        );
+      }
+      final decision = await ablation.handleTrickleQueueEvent(
+        item: item,
+        nowMs: item.nextEligibleAt,
+      );
+      expect(decision.shouldAdvertise, isTrue);
+      expect(decision.state.consistencyCount, 1);
+      await ablation.markAdvertisingSucceeded(
+        item,
+        nowMs: item.nextEligibleAt,
+        nextEligibleAtOverride: decision.nextEligibleAt,
+      );
+      expect((await ablation.getItem(sos.id, 'sos'))!.relayCount, 1);
+      await ablation.acceptAndQueueAck(
+        senderCrc: 4250,
+        ackTimestampMs: sos.updatedAt,
+        status: SOSMessageStatus.resolved,
+        nowMs: now,
+        schedulerNowMs: item.nextEligibleAt,
+      );
+      expect(await ablation.getItem(sos.id, 'sos'), isNull);
+      expect(await ablation.trickleStateFor(sos.id), isNull);
+      expect(await ablation.queueSizeByType('ack'), 1);
+      expect(
+        RelayQueueService.modeFromPersistedValue('trickle_no_suppression'),
+        ForwardingMode.trickleNoSuppression,
+      );
+    },
+  );
+
   test('basic flooding and trickle produce different SOS schedules', () async {
     final basic = RelayQueueService(
       database: db,

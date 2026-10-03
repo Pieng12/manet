@@ -6,7 +6,18 @@ import re
 from typing import Any
 
 
-MODES = ("trickle", "basic_flooding")
+MODES = ("basic_flooding", "trickle_no_suppression", "trickle")
+METHOD_DESIGN_VERSION = 3
+METHOD_PARAMETERS = {
+    mode: {
+        "scheduler": "basic" if mode == "basic_flooding" else "trickle",
+        "suppression_enabled": mode == "trickle",
+        "imin_ms": 8000, "imax_ms": 256000, "imax_doublings": 5, "k": 1,
+        "burst_ms": 2000, "basic_wait_ms": 2000,
+        "jitter_min_ms": 300, "jitter_max_ms": 1500,
+        "termination": "ACK/newer state/admin deletion; no hard TTL/hop/count",
+    } for mode in MODES
+}
 HYPOTHESES = ("H1", "H2", "H3")
 ROLES = {"SOURCE", "RELAY", "DESTINATION", "OBSERVER"}
 PHYSICAL_NODE_IDS = {
@@ -84,8 +95,8 @@ def validate_config(config: dict[str, Any]) -> None:
 
     modes = config.get("modes", list(MODES))
     hypotheses = config.get("hypotheses", list(HYPOTHESES))
-    if set(modes) != set(MODES):
-        errors.append("modes must contain trickle and basic_flooding")
+    if len(modes) != len(MODES) or set(modes) != set(MODES):
+        errors.append("modes must contain each of basic_flooding, trickle_no_suppression, trickle once")
     if set(hypotheses) != set(HYPOTHESES):
         errors.append("topology must contain H1, H2, and H3")
     if config.get("testbed_profile") == "android_plus_five_esp32" and set(node_ids) != PHYSICAL_NODE_IDS:
@@ -161,8 +172,8 @@ def validate_config(config: dict[str, Any]) -> None:
         errors.append("valid_trials_per_condition must be positive")
     if max_attempts < valid_target:
         errors.append("max_attempts_per_condition must be >= valid trial target")
-    if config.get("trial_order", "blocked") not in {"blocked", "randomized"}:
-        errors.append("trial_order must be blocked or randomized")
+    if config.get("trial_order", "balanced_randomized") not in {"blocked", "randomized", "balanced_randomized"}:
+        errors.append("trial_order must be blocked, randomized, or balanced_randomized")
     if config.get("gateway_enabled") is True or config.get("ack_enabled") is True:
         errors.append("gateway and ACK must be disabled for the main experiment")
 
@@ -219,6 +230,8 @@ def research_fingerprint(config: dict[str, Any]) -> str:
         "longitude": config.get("longitude"),
         "rx_burst_gap_ms": config.get("rx_burst_gap_ms"),
         "measurement_timing_version": 2,
+        "method_design_version": METHOD_DESIGN_VERSION,
+        "method_parameters": METHOD_PARAMETERS,
         "observation_window_basis": "SOURCE_FIRST_ADVERTISE_STARTED",
     }
     # Preserve historical fingerprints; explicit radio runs cannot mix with legacy runs.

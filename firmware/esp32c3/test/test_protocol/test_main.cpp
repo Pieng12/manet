@@ -179,8 +179,30 @@ void test_trickle_deadlines_survive_millis_wraparound() {
   TEST_ASSERT_FALSE(trickleTransmitDue(started + 8000, started, 8000, transmit));
 }
 
+void test_trickle_suppression_ablation_only_changes_decision() {
+  TEST_ASSERT_TRUE(trickleAllowsTransmission(true, 0, 1));
+  TEST_ASSERT_TRUE(trickleAllowsTransmission(false, 0, 1));
+  TEST_ASSERT_FALSE(trickleAllowsTransmission(true, 1, 1));
+  TEST_ASSERT_TRUE(trickleAllowsTransmission(false, 1, 1));
+  TEST_ASSERT_FALSE(trickleAllowsTransmission(true, 20, 1));
+  TEST_ASSERT_TRUE(trickleAllowsTransmission(false, 20, 1));
+}
+
+void test_trickle_expired_opportunity_is_missed_not_late_transmit() {
+  TEST_ASSERT_FALSE(trickleOpportunityMissed(4409966, 4402060, 8000, false));
+  TEST_ASSERT_FALSE(trickleOpportunityMissed(4410059, 4402060, 8000, false));
+  TEST_ASSERT_TRUE(trickleOpportunityMissed(4410060, 4402060, 8000, false));
+  TEST_ASSERT_TRUE(trickleOpportunityMissed(4410061, 4402060, 8000, false));
+  TEST_ASSERT_FALSE(trickleOpportunityMissed(4410061, 4402060, 8000, true));
+  const uint32_t start = UINT32_MAX - 2000;
+  TEST_ASSERT_TRUE(trickleOpportunityMissed(start + 8000, start, 8000, false));
+  TEST_ASSERT_FALSE(trickleTransmitDue(4410060, 4402060, 8000, 4409966));
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
+  RUN_TEST(test_trickle_expired_opportunity_is_missed_not_late_transmit);
+  RUN_TEST(test_trickle_suppression_ablation_only_changes_decision);
   RUN_TEST(test_extended_manufacturer_boundary_for_sos_and_ack);
   RUN_TEST(test_s8_options_do_not_silently_fallback);
   RUN_TEST(test_trickle_first_opportunity_is_in_second_half);

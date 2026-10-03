@@ -309,6 +309,15 @@ class AndroidExperimentCommandService {
       trialCode: _requiredString(args, 'trial_code'),
       commandId: _requiredString(args, 'command_id'),
     );
+    final session = await _sessions.currentSession();
+    await NativeBridgeService.configureResearchPhyTelemetry({
+      'sessionId': trial.sessionId,
+      'trialId': trial.trialId,
+      'nodeId': session?.deviceId,
+      'mode': session?.forwardingMode,
+      'clockOffsetMs': session?.clockOffsetMs,
+      'until': _clock.wallTimeMs() + 180000,
+    });
     _startObservationWindow();
     await _logger.logEvent(
       eventType: ExperimentEventTypes.trialWindowStarted,
@@ -386,6 +395,7 @@ class AndroidExperimentCommandService {
         _optionalInt(args['observation_ended_at_ms']) ?? _clock.wallTimeMs();
     final db = await _db;
     await _stopObservationWindow();
+    await NativeBridgeService.configureResearchPhyTelemetry({'until': 0});
     await _logger.logEvent(
       eventType: ExperimentEventTypes.trialWindowEnded,
       deviceId: SyncService().deviceId,
@@ -543,6 +553,15 @@ class AndroidExperimentCommandService {
       'protocol_version': MeshConfig.protocolVersion,
       'payload_length': MeshConfig.protocolLength,
       'measurement_timing_version': 2,
+      'method_design_version': 3,
+      'supported_modes': ForwardingMode.values
+          .map((mode) => mode.logValue)
+          .toList(),
+      'suppression_enabled': session?.forwardingMode == 'trickle',
+      'trickle_imin_ms': MeshConfig.trickleIminMs,
+      'trickle_imax_ms': MeshConfig.trickleImaxMs,
+      'trickle_k': MeshConfig.trickleRedundancyConstant,
+      'burst_duration_ms': MeshConfig.sosAdvertiseBurstDuration.inMilliseconds,
       'manufacturer_id': MeshConfig.manufacturerId,
       'radio': capabilities['radio'],
       'clock_valid': epoch.isValid,
@@ -629,6 +648,7 @@ class AndroidExperimentCommandService {
   static ForwardingMode _forwardingMode(String value) {
     return switch (value.toLowerCase()) {
       'trickle' => ForwardingMode.trickle,
+      'trickle_no_suppression' => ForwardingMode.trickleNoSuppression,
       'basic' || 'basic_flooding' => ForwardingMode.basicFlooding,
       _ => throw ArgumentError('INVALID_FORWARDING_MODE: $value'),
     };

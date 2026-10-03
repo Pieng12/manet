@@ -11,6 +11,51 @@ import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 void main() {
   setUpAll(sqfliteFfiInit);
 
+  test('queue wake delay excludes time already spent logging', () {
+    expect(
+      BleAdvertiserService.remainingQueueWakeDelay(
+        deadlineMs: 4409966,
+        nowMs: 4409950,
+      ),
+      const Duration(milliseconds: 16),
+    );
+    expect(
+      BleAdvertiserService.remainingQueueWakeDelay(
+        deadlineMs: 4409966,
+        nowMs: 4410060,
+      ),
+      Duration.zero,
+    );
+  });
+
+  test(
+    'burst stop reasons distinguish window closure from normal duration',
+    () {
+      expect(
+        BleAdvertiserService.burstStopReason(
+          requestedReason: 'OBSERVATION_WINDOW_ENDED',
+          actualDurationMs: 510,
+          targetDurationMs: 2000,
+        ),
+        'OBSERVATION_WINDOW_ENDED',
+      );
+      expect(
+        BleAdvertiserService.burstStopReason(
+          actualDurationMs: 2000,
+          targetDurationMs: 2000,
+        ),
+        'TARGET_DURATION_REACHED',
+      );
+      expect(
+        BleAdvertiserService.burstStopReason(
+          actualDurationMs: 510,
+          targetDurationMs: 2000,
+        ),
+        'STOP_REQUESTED',
+      );
+    },
+  );
+
   test('native advertiser hard failures map to blocked scheduler states', () {
     expect(
       BleAdvertiserService.blockedStateForNativeAdvertiseError(

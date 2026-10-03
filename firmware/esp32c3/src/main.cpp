@@ -32,7 +32,10 @@ constexpr uint32_t kNativeStartRetryMs = 1000;
 constexpr size_t kSerialRxBufferBytes = 2048;
 
 enum class Role { Source, Relay, Destination, Observer };
-enum class Mode { Basic, Trickle };
+enum class Mode { Basic, TrickleNoSuppression, Trickle };
+
+bool usesTrickle(Mode mode) { return mode != Mode::Basic; }
+bool suppressionEnabled(Mode mode) { return mode == Mode::Trickle; }
 
 struct NodeConfig {
   String nodeId = "esp32-unconfigured";
@@ -58,6 +61,7 @@ struct SchedulerState {
   uint32_t intervalEndAt = 0;
   uint32_t consistencyCount = 0;
   bool waitingIntervalEnd = false;
+  bool opportunityEvaluated = false;
   bool advertising = false;
   bool firstAdvertiseStarted = false;
   uint64_t firstAdvertiseStartedAtMs = 0;
@@ -87,6 +91,9 @@ struct ReceivedPacket {
   char advertiser[18];
   uint32_t receivedAt;
   uint32_t generation;
+  uint8_t primaryPhy;
+  uint8_t secondaryPhy;
+  bool legacy;
 };
 
 QueueHandle_t receivedPackets = nullptr;
@@ -113,6 +120,7 @@ const char* roleName(Role role) {
 }
 
 const char* modeName(Mode mode) {
+  if (mode == Mode::TrickleNoSuppression) return "trickle_no_suppression";
   return mode == Mode::Trickle ? "trickle" : "basic_flooding";
 }
 
@@ -136,7 +144,8 @@ void emit(const char* eventType, const Packet* packet = nullptr,
           const char* reason = nullptr, int rssi = 0,
           const String& observationId = String(),
           const String& burstId = String(),
-          const uint32_t* physicalReceivedAt = nullptr) {
+          const uint32_t* physicalReceivedAt = nullptr,
+          const String& observerKey = String()) {
   if (serialOutputMutex != nullptr) {
     xSemaphoreTake(serialOutputMutex, portMAX_DELAY);
   }
@@ -160,7 +169,7 @@ void emit(const char* eventType, const Packet* packet = nullptr,
   document["clock_sync_valid"] = wallClockValid;
   if (wallClockValid) document["clock_offset_ms"] = 0;
   if (reason != nullptr) document["reason"] = reason;
-  if (config.mode == Mode::Trickle && scheduler.hasPacket &&
+  if (usesTrickle(config.mode) && scheduler.hasPacket &&
       (strncmp(eventType, "TRICKLE_", 8) == 0 ||
        strncmp(eventType, "ADVERTISE_BURST_", 16) == 0)) {
     document["interval_ms"] = scheduler.intervalMs;
@@ -168,8 +177,15 @@ void emit(const char* eventType, const Packet* packet = nullptr,
     document["transmit_at_monotonic_ms"] = scheduler.transmitAt;
     document["interval_end_at_monotonic_ms"] = scheduler.intervalEndAt;
     document["consistency_count"] = scheduler.consistencyCount;
+    document["k"] = 1;
+    document["suppression_enabled"] = suppressionEnabled(config.mode);
+    if (strcmp(eventType, "TRICKLE_CONSISTENT_HEARD") == 0) {
+      document["c_before"] = scheduler.consistencyCount - 1;
+      document["c_after"] = scheduler.consistencyCount;
+    }
   }
   if (!observationId.isEmpty()) document["observation_id"] = observationId;
+  if (!observerKey.isEmpty()) document["observer_key"] = observerKey;
   if (!burstId.isEmpty()) document["burst_id"] = burstId;
   if (rssi != 0) document["rssi"] = rssi;
   if (packet != nullptr) {
@@ -212,6 +228,7 @@ Role parseRole(const String& value) {
 }
 
 Mode parseMode(const String& value) {
+  if (value == "trickle_no_suppression") return Mode::TrickleNoSuppression;
   return value == "basic" || value == "basic_flooding" ? Mode::Basic
                                                          : Mode::Trickle;
 }
@@ -275,6 +292,7 @@ void cancelActiveBurst(const char* reason) {
 }
 
 void chooseTrickleTransmit(uint32_t now, const char* reason) {
+  scheduler.opportunityEvaluated = false;
   scheduler.intervalStartedAt = now;
   scheduler.intervalEndAt = now + scheduler.intervalMs;
   scheduler.transmitAt = now + trickleTransmitOffset(
@@ -288,7 +306,7 @@ void chooseTrickleTransmit(uint32_t now, const char* reason) {
 void scheduleNewState(const char* reason) {
   const uint32_t now = millis();
   scheduler.intervalMs = kIminMs;
-  if (config.mode == Mode::Trickle) {
+  if (usesTrickle(config.mode)) {
     chooseTrickleTransmit(now, reason);
   } else {
     scheduler.transmitAt = now;
@@ -318,24 +336,47 @@ void storeForRelay(const Packet& incoming, const char* reason,
   }
 }
 
-void recordConsistent(const Packet& incoming, const String& observationId) {
+void recordConsistent(const Packet& incoming, const String& observationId, const String& advertiser) {
   emit("BLE_PACKET_DUPLICATE", &incoming, "CONSISTENT", 0, observationId);
   if (shouldCountTrickleConsistency(
-          config.mode == Mode::Trickle, config.role == Role::Relay, true, true,
+          usesTrickle(config.mode), config.role == Role::Relay, true, true,
           incoming.hop, config.expectedHopIn)) {
     scheduler.consistencyCount++;
-    emit("TRICKLE_CONSISTENT_HEARD", &incoming);
+    emit("TRICKLE_CONSISTENT_HEARD", &incoming, nullptr, 0, observationId, String(), nullptr, advertiser);
   }
 }
 
 void processPacket(const Packet& incoming, int rssi,
-                   const String& advertiser, uint32_t now) {
+                   const String& advertiser, uint32_t now,
+                   uint8_t primaryPhy, uint8_t secondaryPhy, bool legacy) {
   const ObservationDecision decision = observationTracker.observe(
       config.nodeId.c_str(), advertiser.c_str(), stateIdentity(incoming), now);
   if (!decision.isNew) return;
   const String observation(decision.observationId.c_str());
   emit("BLE_PACKET_RECEIVED", &incoming, nullptr, rssi, observation,
        String(), &now);
+  JsonDocument phy;
+  phy["kind"] = "event";
+  phy["event_type"] = "BLE_RX_PHY_OBSERVED";
+  phy["event_sequence"] = ++eventSequence;
+  phy["node_id"] = config.nodeId;
+  phy["session_id"] = config.sessionId;
+  phy["trial_id"] = config.trialId;
+  phy["mode"] = modeName(config.mode);
+  phy["observation_id"] = observation;
+  phy["message_key"] = messageKey(incoming);
+  phy["timestamp_ms"] = wallOffsetMs + now;
+  phy["monotonic_ms"] = now;
+  phy["clock_sync_valid"] = wallClockValid;
+  phy["clock_offset_ms"] = 0;
+  phy["primary_phy"] = primaryPhy;
+  phy["secondary_phy"] = secondaryPhy;
+  phy["legacy"] = legacy;
+  phy["coding"] = "unknown";
+  xSemaphoreTake(serialOutputMutex, portMAX_DELAY);
+  serializeJson(phy, Serial);
+  Serial.println();
+  xSemaphoreGive(serialOutputMutex);
 
   if (!config.protocolActive || config.role == Role::Source ||
       !due(now, quietUntil)) {
@@ -360,10 +401,10 @@ void processPacket(const Packet& incoming, int rssi,
   }
   if (parallel) {
     if (sameState) {
-      recordConsistent(incoming, observation);
+      recordConsistent(incoming, observation, advertiser);
       return;
     }
-    if (config.mode == Mode::Trickle) {
+    if (usesTrickle(config.mode)) {
       scheduler.intervalMs = kIminMs;
       chooseTrickleTransmit(now, "PARALLEL_RELAY_INCONSISTENT");
       emit("TRICKLE_INCONSISTENT_HEARD", &incoming);
@@ -398,6 +439,9 @@ class ScanCallbacks : public NimBLEScanCallbacks {
     received.rssi = device->getRSSI();
     received.receivedAt = receivedAt;
     received.generation = generation;
+    received.primaryPhy = device->getPrimaryPhy();
+    received.secondaryPhy = device->getSecondaryPhy();
+    received.legacy = device->isLegacyAdvertisement();
     const std::string address = device->getAddress().toString();
     snprintf(received.advertiser, sizeof(received.advertiser), "%s", address.c_str());
     // The NimBLE task never reads or mutates scheduler/configuration state.
@@ -420,14 +464,14 @@ void drainReceivedPackets() {
       continue;
     }
     processPacket(received.packet, received.rssi, String(received.advertiser),
-                  received.receivedAt);
+                  received.receivedAt, received.primaryPhy, received.secondaryPhy, received.legacy);
   }
 }
 
 void startBurst() {
   if (!scheduler.hasPacket || advertising == nullptr) return;
   // Recheck after scheduler logging; its serial output can cross an interval end.
-  if (config.mode == Mode::Trickle &&
+  if (usesTrickle(config.mode) &&
       (scheduler.waitingIntervalEnd ||
        !trickleTransmitDue(millis(), scheduler.intervalStartedAt,
                            scheduler.intervalMs, scheduler.transmitAt))) {
@@ -502,26 +546,40 @@ void tickScheduler() {
     if (due(now, scheduler.burstEndsAt)) finishBurst();
     return;
   }
-  if (config.mode == Mode::Trickle && due(now, scheduler.intervalEndAt)) {
+  if (usesTrickle(config.mode) && due(now, scheduler.intervalEndAt)) {
+    if (trickleOpportunityMissed(now, scheduler.intervalStartedAt,
+                                scheduler.intervalMs, scheduler.opportunityEvaluated)) {
+      scheduler.opportunityEvaluated = true;
+      emit("TRICKLE_TX_MISSED", &scheduler.packet, "SCHEDULER_LATE", 0,
+           String(), String(), &now);
+    }
     scheduler.intervalMs = min(scheduler.intervalMs * 2, kImaxMs);
     chooseTrickleTransmit(now, "INTERVAL_ADVANCED");
     return;
   }
   if (!due(now, scheduler.transmitAt)) return;
-  if (config.mode == Mode::Trickle &&
+  if (usesTrickle(config.mode) &&
       (scheduler.waitingIntervalEnd ||
        !trickleTransmitDue(now, scheduler.intervalStartedAt,
                            scheduler.intervalMs, scheduler.transmitAt))) {
     return;
   }
-  if (config.mode == Mode::Trickle && scheduler.consistencyCount >= 1) {
+  if (usesTrickle(config.mode) && !scheduler.opportunityEvaluated) {
+    scheduler.opportunityEvaluated = true;
+    emit("TRICKLE_TX_OPPORTUNITY", &scheduler.packet,
+         trickleAllowsTransmission(suppressionEnabled(config.mode), scheduler.consistencyCount, 1)
+             ? "ALLOWED" : "SUPPRESSED");
+  }
+  if (usesTrickle(config.mode) &&
+      !trickleAllowsTransmission(suppressionEnabled(config.mode), scheduler.consistencyCount, 1)) {
     emit("TRICKLE_TX_SUPPRESSED", &scheduler.packet, "C_GE_K");
     scheduler.waitingIntervalEnd = true;
     scheduler.transmitAt = scheduler.intervalEndAt;
     return;
   }
-  if (config.mode == Mode::Trickle) {
-    emit("TRICKLE_TX_ALLOWED", &scheduler.packet, "C_LT_K");
+  if (usesTrickle(config.mode)) {
+    emit("TRICKLE_TX_ALLOWED", &scheduler.packet,
+         suppressionEnabled(config.mode) ? "C_LT_K" : "SUPPRESSION_DISABLED");
   }
   startBurst();
 }
@@ -568,6 +626,13 @@ void emitReadiness(const String& commandId) {
           : 0;
   document["payload_length"] = kPayloadLength;
   document["measurement_timing_version"] = 2;
+  document["method_design_version"] = 3;
+  document["suppression_enabled"] = suppressionEnabled(config.mode);
+  document["supported_modes"] = "basic_flooding,trickle_no_suppression,trickle";
+  document["trickle_imin_ms"] = kIminMs;
+  document["trickle_imax_ms"] = kImaxMs;
+  document["trickle_k"] = 1;
+  document["burst_duration_ms"] = kBurstMs;
   document["manufacturer_id"] = kManufacturerId;
   document["rx_burst_gap_ms"] = config.rxBurstGapMs;
   document["observation_window_open"] = observationWindowOpen;
@@ -627,7 +692,7 @@ void handleCommand(const String& line) {
       return;
     }
     if (requestedMode != "trickle" && requestedMode != "basic" &&
-        requestedMode != "basic_flooding") {
+        requestedMode != "basic_flooding" && requestedMode != "trickle_no_suppression") {
       respond(command, commandId, false, "INVALID_MODE");
       return;
     }

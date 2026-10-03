@@ -1,9 +1,11 @@
 import 'dart:math';
+import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pkmproject/database_schema.dart';
 import 'package:pkmproject/models/trickle_state.dart';
 import 'package:pkmproject/services/database_helper.dart';
+import 'package:pkmproject/services/experiment_logger.dart';
 import 'package:pkmproject/services/trickle_scheduler.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
@@ -30,6 +32,232 @@ void main() {
   tearDown(() async {
     await db.close();
   });
+
+  Future<void> prepareDiagnosticTables() async {
+    await db.execute(createExperimentSessionsTableSql);
+    await db.execute(createExperimentTrialsTableSql);
+    await db.execute(createExperimentEventsTableSql);
+    await db.execute(
+      'CREATE UNIQUE INDEX event_key_test ON experiment_events(event_key)',
+    );
+    await ExperimentLogger(database: db).ensureSession(deviceId: 'test-source');
+  }
+
+  for (final enabled in [true, false]) {
+    test(
+      'late boundary suppression=$enabled records missed once without late TX',
+      () async {
+        await prepareDiagnosticTables();
+        final engine = TrickleScheduler(
+          database: db,
+          random: Random(7),
+          suppressionEnabled: enabled,
+        );
+        const start = 4402060;
+        const transmit = 4409966;
+        const end = 4410060;
+        final state = await engine.reset(
+          messageId: 'boundary',
+          nowMs: start,
+          reason: 'new_state',
+        );
+        await db.update(
+          'trickle_states',
+          {'transmit_at': transmit},
+          where: 'message_id = ?',
+          whereArgs: [state.messageId],
+        );
+        final decision = await engine.handleQueueEvent(
+          messageId: state.messageId,
+          nowMs: end,
+        );
+        expect(decision.type, TrickleTransmitDecisionType.intervalAdvanced);
+        expect(decision.shouldAdvertise, isFalse);
+        expect(decision.shouldSuppress, isFalse);
+        expect(decision.state.intervalMs, 16000);
+        expect(decision.state.consistencyCount, 0);
+        expect(decision.nextEligibleAt, greaterThan(end));
+        await engine.handleQueueEvent(
+          messageId: state.messageId,
+          nowMs: end + 1,
+        );
+        final events = await db.query(
+          'experiment_events',
+          where: 'event_type = ?',
+          whereArgs: [ExperimentEventTypes.trickleTxMissed],
+        );
+        expect(events, hasLength(1));
+        final detail =
+            jsonDecode(events.single['detail_json'] as String) as Map;
+        expect(detail['transmit_at'], transmit);
+        expect(detail['lateness_ms'], 94);
+        expect(detail['decision'], 'missed');
+        expect(detail['suppression_enabled'], enabled);
+        expect(events.single['elapsed_realtime_ms'], end);
+        expect(
+          (await engine.handleQueueEvent(
+            messageId: state.messageId,
+            nowMs: decision.state.transmitAt,
+          )).shouldAdvertise,
+          isTrue,
+        );
+      },
+    );
+
+    test(
+      'last millisecond suppression=$enabled still makes an on-time decision',
+      () async {
+        await prepareDiagnosticTables();
+        final engine = TrickleScheduler(
+          database: db,
+          random: Random(7),
+          suppressionEnabled: enabled,
+        );
+        final state = await engine.reset(
+          messageId: 'on-time',
+          nowMs: now,
+          reason: 'new_state',
+        );
+        await engine.recordConsistentObservation(
+          messageId: state.messageId,
+          observationId: 'heard',
+          observerKey: 'peer',
+          nowMs: now + 1,
+        );
+        final decision = await engine.handleQueueEvent(
+          messageId: state.messageId,
+          nowMs: state.intervalEndAt - 1,
+        );
+        expect(decision.shouldAdvertise, !enabled);
+        expect(decision.shouldSuppress, enabled);
+        await engine.handleQueueEvent(
+          messageId: state.messageId,
+          nowMs: state.intervalEndAt + 1,
+        );
+        expect(
+          await db.query(
+            'experiment_events',
+            where: 'event_type = ?',
+            whereArgs: [ExperimentEventTypes.trickleTxMissed],
+          ),
+          isEmpty,
+        );
+      },
+    );
+  }
+
+  test(
+    'RX normalization cannot silently erase an expired pending opportunity',
+    () async {
+      await prepareDiagnosticTables();
+      final state = await scheduler.reset(
+        messageId: 'rx-advance',
+        nowMs: now,
+        reason: 'new_state',
+      );
+      await scheduler.recordConsistentObservation(
+        messageId: state.messageId,
+        observationId: 'late-rx',
+        observerKey: 'peer',
+        nowMs: state.intervalEndAt + 1,
+      );
+      expect(
+        await db.query(
+          'experiment_events',
+          where: 'event_type = ?',
+          whereArgs: [ExperimentEventTypes.trickleTxMissed],
+        ),
+        hasLength(1),
+      );
+      expect((await scheduler.stateFor(state.messageId))!.consistencyCount, 1);
+    },
+  );
+
+  for (final enabled in [true, false]) {
+    test(
+      'shared engine suppression=$enabled preserves timing, c, reset and cleanup',
+      () async {
+        final engine = TrickleScheduler(
+          database: db,
+          random: Random(19),
+          suppressionEnabled: enabled,
+        );
+        var state = await engine.reset(
+          messageId: 'ablation',
+          nowMs: now,
+          reason: 'new_state',
+        );
+        expect(state.intervalMs, 8000);
+        expect(state.transmitAt - now, inInclusiveRange(4000, 7999));
+        expect(
+          (await engine.handleQueueEvent(
+            messageId: state.messageId,
+            nowMs: state.transmitAt - 1,
+          )).shouldAdvertise,
+          isFalse,
+        );
+        expect(
+          await engine.recordConsistentObservation(
+            messageId: state.messageId,
+            observationId: 'peer-1',
+            observerKey: 'parallel-relay',
+            nowMs: now + 100,
+          ),
+          isTrue,
+        );
+        expect(
+          await engine.recordConsistentObservation(
+            messageId: state.messageId,
+            observationId: 'peer-1',
+            observerKey: 'parallel-relay',
+            nowMs: now + 101,
+          ),
+          isFalse,
+        );
+        final decision = await engine.handleQueueEvent(
+          messageId: state.messageId,
+          nowMs: state.transmitAt,
+        );
+        expect(decision.state.consistencyCount, 1);
+        expect(decision.shouldAdvertise, !enabled);
+        expect(
+          (await engine.handleQueueEvent(
+            messageId: state.messageId,
+            nowMs: state.transmitAt + 1,
+          )).shouldAdvertise,
+          isFalse,
+        );
+        for (final interval in [16000, 32000, 64000, 128000, 256000, 256000]) {
+          state = await engine.advanceInterval(
+            messageId: state.messageId,
+            nowMs: state.intervalEndAt,
+          );
+          expect(state.intervalMs, interval);
+          expect(state.consistencyCount, 0);
+          expect(
+            state.transmitAt - state.intervalStartedAt,
+            inInclusiveRange(interval ~/ 2, interval - 1),
+          );
+        }
+        expect(
+          (await engine.handleQueueEvent(
+            messageId: state.messageId,
+            nowMs: state.transmitAt,
+          )).shouldAdvertise,
+          isTrue,
+        );
+        state = await engine.reset(
+          messageId: state.messageId,
+          nowMs: state.intervalEndAt,
+          reason: 'new_state',
+        );
+        expect(state.intervalMs, 8000);
+        await engine.deleteState(state.messageId);
+        expect(await engine.stateFor(state.messageId), isNull);
+        expect(await db.query('trickle_observations'), isEmpty);
+      },
+    );
+  }
 
   test('reset starts Imin interval and chooses t in [I/2, I)', () async {
     final state = await scheduler.reset(

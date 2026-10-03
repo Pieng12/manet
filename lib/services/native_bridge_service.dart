@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:pkmproject/config/mesh_config.dart';
@@ -41,6 +43,37 @@ class BleRuntimeState {
 }
 
 class NativeBridgeService {
+  static Future<void> configureResearchPhyTelemetry(
+    Map<String, dynamic> args,
+  ) async {
+    try {
+      await _platform.invokeMethod('configureResearchPhyTelemetry', args);
+    } catch (error) {
+      debugPrint('Optional research PHY telemetry unavailable: $error');
+    }
+  }
+
+  static Future<List<Map<String, dynamic>>> researchPhyEvents(
+    String sessionId,
+    String? trialId,
+  ) async {
+    try {
+      final rows = await _platform.invokeMethod<List>(
+        'getResearchPhyTelemetry',
+        {'sessionId': sessionId, 'trialId': trialId},
+      );
+      return (rows ?? [])
+          .map(
+            (row) =>
+                Map<String, dynamic>.from(jsonDecode(row as String) as Map),
+          )
+          .toList();
+    } catch (error) {
+      debugPrint('Optional research PHY export unavailable: $error');
+      return [];
+    }
+  }
+
   static const MethodChannel _platform = MethodChannel(
     'id.ac.usu.resqmesh/mesh',
   );

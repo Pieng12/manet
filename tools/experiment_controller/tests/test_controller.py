@@ -35,6 +35,7 @@ def physical_config() -> dict:
     value["observation_window_seconds"] = 1
     value["quiet_period_seconds"] = 0
     value["trial_order"] = "blocked"
+    value["modes"] = ["trickle", "basic_flooding", "trickle_no_suppression"]
     return value
 
 
@@ -127,6 +128,10 @@ class FakeNode(NodeTransport):
                 "quiet_period_complete": True,
                 "payload_length": 17,
                 "measurement_timing_version": 2,
+                "method_design_version": 3,
+                "suppression_enabled": self.mode == "trickle",
+                "trickle_imin_ms": 8000, "trickle_imax_ms": 256000,
+                "trickle_k": 1, "burst_duration_ms": 2000,
                 "source_first_advertise_started_at_ms": self.source_started_at_ms,
                 "source_first_advertise_message_key": "100:200" if self.source_started_at_ms else None,
                 "manufacturer_id": 0xFFFF,
@@ -165,6 +170,17 @@ class FakeNode(NodeTransport):
         base_timestamp = source.get("observation_ended_at_ms", time.time_ns() // 1_000_000) - int(self.config["observation_window_seconds"] * 1000)
         if self.source_started_at_ms is not None:
             base_timestamp = self.source_started_at_ms
+        # Synthetic software fixture, not a measured experiment dataset.
+        if self.node_id == 'android-source' and self.mode.startswith('trickle') and any(
+                e.get('event_type') == 'SOURCE_FIRST_ADVERTISE_STARTED' for e in values):
+            values.extend([
+                event(self.node_id, session_id, trial_id, 'TRICKLE_INTERVAL_STARTED', timestamp=base_timestamp - 5000),
+                event(self.node_id, session_id, trial_id, 'TRICKLE_TX_OPPORTUNITY', timestamp=base_timestamp),
+            ])
+            values[-2].update(interval_ms=8000, interval_started_at_monotonic_ms=10000,
+                              transmit_at_monotonic_ms=15000, monotonic_ms=10000)
+            values[-1].update(consistency_count=0, k=1, suppression_enabled=self.mode == 'trickle',
+                              reason='ALLOWED', monotonic_ms=15000)
         sequence = 0
         for value in values:
             timestamp = int(value.get("timestamp_ms", 1000) or 1000)
@@ -214,6 +230,7 @@ def standard_provider(outcome_by_attempt=None):
             values.append(event(node.node_id, session_id, trial_id, "TRICKLE_CONSISTENT_HEARD"))
             values.append(event(node.node_id, session_id, trial_id, "TRICKLE_TX_SUPPRESSED"))
             values[-1]["monotonic_ms"] = 14000
+            values[-1].update(consistency_count=1, k=1, suppression_enabled=True)
         return values
 
     return provide
@@ -485,9 +502,9 @@ class ControllerTest(unittest.TestCase):
         self.assertTrue(smoke_matches_config(report, value))
         self.assertFalse(smoke_matches_config(report, changed))
 
-    def test_default_matrix_contains_90_trials(self) -> None:
+    def test_default_matrix_contains_135_trials(self) -> None:
         value = physical_config()
-        self.assertEqual(90, len(build_plan(value)))
+        self.assertEqual(135, len(build_plan(value)))
         randomized = value | {"trial_order": "randomized", "random_seed": 7}
         self.assertEqual(build_plan(randomized), build_plan(randomized))
         self.assertNotEqual(build_plan(value), build_plan(randomized))
@@ -602,7 +619,7 @@ class ControllerTest(unittest.TestCase):
             self.assertFalse(raised.exception.summary["complete"])
             self.assertTrue((Path(temporary) / "attempt_summary.csv").exists())
 
-    def test_smoke_report_requires_all_six_conditions(self) -> None:
+    def test_smoke_report_requires_all_nine_conditions(self) -> None:
         value = physical_config()
         value["valid_trials_per_condition"] = 1
         value["max_attempts_per_condition"] = 1
@@ -611,7 +628,7 @@ class ControllerTest(unittest.TestCase):
             controller.run()
             report = controller.smoke_report()
             self.assertTrue(report["passed"])
-            self.assertEqual(6, len(report["conditions"]))
+            self.assertEqual(9, len(report["conditions"]))
             self.assertTrue((Path(temporary) / "smoke_report.csv").exists())
 
     def test_smoke_report_exposes_invalid_trial_reasons(self) -> None:

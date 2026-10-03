@@ -99,6 +99,25 @@ void main() {
     'ack_enabled': true,
   };
 
+  test(
+    'no-suppression method is persisted and reported by the scheduler owner',
+    () async {
+      await commands.execute('configure_session', {
+        ...configureArgs(),
+        'mode': 'trickle_no_suppression',
+      });
+      expect(RelayQueueService().mode, ForwardingMode.trickleNoSuppression);
+      final status = await commands.execute('readiness', {
+        'command_id': 'ablation-ready',
+      });
+      expect(status['mode'], 'trickle_no_suppression');
+      expect(status['suppression_enabled'], isFalse);
+      expect(status['method_design_version'], 3);
+      expect(status['trickle_imin_ms'], 8000);
+      expect(status['trickle_imax_ms'], 256000);
+    },
+  );
+
   test('ADB command IDs are idempotent and create one SOS per trial', () async {
     final configured = await commands.execute(
       'configure_session',

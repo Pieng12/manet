@@ -391,6 +391,15 @@ class MeshBackgroundService : Service() {
                         result.success(true)
                     }
                     "getRangeRxTelemetry" -> result.success(RangeRxTelemetry.snapshot(this))
+                    "configureResearchPhyTelemetry" -> {
+                        ResearchRxTelemetry.configure(this, call.argument<String>("sessionId") ?: "",
+                            call.argument<String>("trialId") ?: "", call.argument<String>("nodeId") ?: "",
+                            call.argument<String>("mode") ?: "", call.argument<Number>("clockOffsetMs")?.toDouble(),
+                            call.argument<Number>("until")?.toLong() ?: 0)
+                        result.success(true)
+                    }
+                    "getResearchPhyTelemetry" -> result.success(ResearchRxTelemetry.snapshot(this,
+                        call.argument<String>("sessionId") ?: "", call.argument<String>("trialId")))
                     "setRangeScreenAwake" -> result.success(false)
                     "setResearchRxBurstGapMs" -> {
                         val value = call.argument<Number>("rxBurstGapMs")?.toLong() ?: 0L

@@ -126,6 +126,15 @@ class MainActivity : FlutterActivity() {
                         result.success(true)
                     }
                     "getRangeRxTelemetry" -> result.success(RangeRxTelemetry.snapshot(this))
+                    "configureResearchPhyTelemetry" -> {
+                        ResearchRxTelemetry.configure(this, call.argument<String>("sessionId") ?: "",
+                            call.argument<String>("trialId") ?: "", call.argument<String>("nodeId") ?: "",
+                            call.argument<String>("mode") ?: "", call.argument<Number>("clockOffsetMs")?.toDouble(),
+                            call.argument<Number>("until")?.toLong() ?: 0)
+                        result.success(true)
+                    }
+                    "getResearchPhyTelemetry" -> result.success(ResearchRxTelemetry.snapshot(this,
+                        call.argument<String>("sessionId") ?: "", call.argument<String>("trialId")))
                     "setRangeScreenAwake" -> {
                         if (call.argument<Boolean>("enabled") == true) window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                         else window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)

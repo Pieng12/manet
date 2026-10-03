@@ -186,7 +186,7 @@ class BleRelayService {
       nextEligibleAt: now,
       preemptCurrent: true,
     );
-    if (_relayQueue.mode == ForwardingMode.trickle) {
+    if (_relayQueue.mode.usesTrickle) {
       await _logTrickleReset(
         message: message,
         reason: 'local_source_event',
@@ -890,6 +890,32 @@ class BleRelayService {
           },
         ),
       );
+      if (duplicateRecord.trickleRecorded) {
+        await _runPostCommitEffect(
+          'consistent_observation_log',
+          () => _experimentLogger.logEvent(
+            eventType: ExperimentEventTypes.trickleConsistentHeard,
+            deviceId: SyncService().deviceId,
+            messageId: existing.id,
+            senderCrc: packet.senderCrc,
+            protocolTimestampMs: packet.timestampMs,
+            packetType: 'sos',
+            status: packet.status.name,
+            observationId: observationId,
+            eventTimestampMs: rxAtMs,
+            elapsedRealtimeMs: receivedElapsedRealtimeMs,
+            detail: {
+              'observer_key': _trickleObserverKey(
+                packet,
+                deviceAddress,
+                observerKey: observerKey,
+              ),
+              'c_before': duplicateRecord.consistencyCount! - 1,
+              'c_after': duplicateRecord.consistencyCount,
+            },
+          ),
+        );
+      }
       return BleProcessingResult.duplicate;
     }
 
@@ -972,9 +998,9 @@ class BleRelayService {
             packetType: 'sos',
             status: packet.status.name,
             detail: {
-              if (_relayQueue.mode == ForwardingMode.trickle)
+              if (_relayQueue.mode.usesTrickle)
                 'trickle_observation_recorded': duplicateRecord.trickleRecorded,
-              if (_relayQueue.mode == ForwardingMode.trickle &&
+              if (_relayQueue.mode.usesTrickle &&
                   !duplicateRecord.trickleRecorded)
                 'trickle_observation_ignored_reason':
                     'duplicate_or_delayed_old_interval_observation',
@@ -1108,7 +1134,7 @@ class BleRelayService {
         throw StateError('Simulated SOS post-commit failure');
       }
     });
-    if (_relayQueue.mode == ForwardingMode.trickle) {
+    if (_relayQueue.mode.usesTrickle) {
       await _runPostCommitEffect(
         'trickle_reset_log',
         () => _logTrickleReset(
@@ -1324,7 +1350,7 @@ class BleRelayService {
     String? observationId,
     String? observerKey,
   }) async {
-    if (_relayQueue.mode != ForwardingMode.trickle) return;
+    if (!_relayQueue.mode.usesTrickle) return;
     final state = await _relayQueue.trickleStateFor(message.id);
     final detail = {
       'reset_reason': reason,
@@ -1444,8 +1470,7 @@ class BleRelayService {
   }
 
   Future<void> _recoverQueues() async {
-    final preRecoveryTrickleStateIds =
-        _relayQueue.mode == ForwardingMode.trickle
+    final preRecoveryTrickleStateIds = _relayQueue.mode.usesTrickle
         ? (await _relayQueue.allTrickleStates())
               .map((state) => state.messageId)
               .toSet()
@@ -1466,7 +1491,7 @@ class BleRelayService {
         detail: {'queue_size': sosRecovered},
       );
     }
-    if (_relayQueue.mode == ForwardingMode.trickle) {
+    if (_relayQueue.mode.usesTrickle) {
       final states = await _relayQueue.allTrickleStates();
       for (final state in states) {
         final persistedStateFound = preRecoveryTrickleStateIds.contains(

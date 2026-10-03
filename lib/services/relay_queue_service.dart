@@ -43,9 +43,13 @@ class SosQueueStoreResult {
 }
 
 class LogicalDuplicateRecordResult {
-  const LogicalDuplicateRecordResult({required this.trickleRecorded});
+  const LogicalDuplicateRecordResult({
+    required this.trickleRecorded,
+    this.consistencyCount,
+  });
 
   final bool trickleRecorded;
+  final int? consistencyCount;
 }
 
 class _TrickleSosPreparation {
@@ -94,6 +98,7 @@ class RelayQueueService {
   static ForwardingMode modeFromPersistedValue(String value) {
     return switch (value.toLowerCase()) {
       'trickle' => ForwardingMode.trickle,
+      'trickle_no_suppression' => ForwardingMode.trickleNoSuppression,
       'basic' || 'basic_flooding' => ForwardingMode.basicFlooding,
       _ => throw ArgumentError('Unknown forwarding mode: $value'),
     };
@@ -236,6 +241,7 @@ class RelayQueueService {
         ackTimestampMs: canonicalAckTimestamp,
       );
       final trickleScheduler = TrickleScheduler(
+        suppressionEnabled: mode.suppressionEnabled,
         database: txn,
         random: _random,
         clock: _clock,
@@ -336,6 +342,7 @@ class RelayQueueService {
 
       final existingRows = await _messageRowsForSenderInExecutor(txn, message);
       final trickleScheduler = TrickleScheduler(
+        suppressionEnabled: mode.suppressionEnabled,
         database: txn,
         random: _random,
         clock: _clock,
@@ -376,7 +383,7 @@ class RelayQueueService {
 
       var sosNextEligibleAt = nextEligibleAt;
       _TrickleSosPreparation? tricklePreparation;
-      if (mode == ForwardingMode.trickle) {
+      if (mode.usesTrickle) {
         tricklePreparation = await _prepareTrickleForStoredSos(
           trickleScheduler,
           message: message,
@@ -560,12 +567,13 @@ class RelayQueueService {
 
       var restored = 0;
       final trickleScheduler = TrickleScheduler(
+        suppressionEnabled: mode.suppressionEnabled,
         database: txn,
         random: _random,
         clock: _clock,
       );
       for (final message in latestBySender.values) {
-        final nextEligibleAt = mode == ForwardingMode.trickle
+        final nextEligibleAt = mode.usesTrickle
             ? (await trickleScheduler.ensureState(
                 messageId: message.id,
                 nowMs: now,
@@ -782,9 +790,10 @@ WHERE id = ?
     required String observerKey,
     required int nowMs,
   }) async {
-    if (mode != ForwardingMode.trickle) return false;
+    if (!mode.usesTrickle) return false;
     final db = await _db;
     return TrickleScheduler(
+      suppressionEnabled: mode.suppressionEnabled,
       database: db,
       random: _random,
       clock: _clock,
@@ -814,12 +823,13 @@ WHERE id = ?
       );
 
       var trickleRecorded = false;
-      if (mode == ForwardingMode.trickle && countAsTrickleConsistency) {
+      if (mode.usesTrickle && countAsTrickleConsistency) {
         final effectiveObservationId = observationId?.trim().isNotEmpty == true
             ? observationId!.trim()
             : '$messageId|$observerKey|$nowMs';
         trickleRecorded =
             await TrickleScheduler(
+              suppressionEnabled: mode.suppressionEnabled,
               database: txn,
               random: _random,
               clock: _clock,
@@ -840,7 +850,16 @@ WHERE id = ?
         );
       }
 
-      return LogicalDuplicateRecordResult(trickleRecorded: trickleRecorded);
+      final state = trickleRecorded
+          ? await TrickleScheduler(
+              database: txn,
+              clock: _clock,
+            ).stateFor(messageId)
+          : null;
+      return LogicalDuplicateRecordResult(
+        trickleRecorded: trickleRecorded,
+        consistencyCount: state?.consistencyCount,
+      );
     });
   }
 
@@ -853,9 +872,10 @@ WHERE id = ?
     final db = await _db;
     return db.transaction((txn) async {
       TrickleInconsistencyResult? result;
-      if (mode == ForwardingMode.trickle) {
+      if (mode.usesTrickle) {
         result =
             await TrickleScheduler(
+              suppressionEnabled: mode.suppressionEnabled,
               database: txn,
               random: _random,
               clock: _clock,
@@ -904,6 +924,7 @@ WHERE id = ?
   }) async {
     final db = await _db;
     final decision = await TrickleScheduler(
+      suppressionEnabled: mode.suppressionEnabled,
       database: db,
       random: _random,
       clock: _clock,
@@ -936,6 +957,7 @@ WHERE id = ?
     final db = await _db;
     if (item.isSos) {
       await TrickleScheduler(
+        suppressionEnabled: mode.suppressionEnabled,
         database: db,
         clock: _clock,
       ).deleteState(item.messageId);

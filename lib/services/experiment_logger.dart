@@ -7,6 +7,7 @@ import 'package:pkmproject/models/experiment_event.dart';
 import 'package:pkmproject/models/message_identity.dart';
 import 'package:pkmproject/models/experiment_session.dart';
 import 'package:pkmproject/models/sos_message.dart';
+import 'package:pkmproject/models/trickle_state.dart';
 import 'package:pkmproject/services/database_helper.dart';
 import 'package:pkmproject/services/research_session_service.dart';
 import 'package:sqflite/sqflite.dart';
@@ -88,6 +89,8 @@ class ExperimentEventTypes {
   static const trickleInconsistentHeard = 'TRICKLE_INCONSISTENT_HEARD';
   static const trickleReset = 'TRICKLE_RESET';
   static const trickleTxAllowed = 'TRICKLE_TX_ALLOWED';
+  static const trickleTxOpportunity = 'TRICKLE_TX_OPPORTUNITY';
+  static const trickleTxMissed = 'TRICKLE_TX_MISSED';
   static const trickleTxSuppressed = 'TRICKLE_TX_SUPPRESSED';
   static const trickleIntervalDoubled = 'TRICKLE_INTERVAL_DOUBLED';
   static const trickleStateRecovered = 'TRICKLE_STATE_RECOVERED';
@@ -113,6 +116,82 @@ class ExperimentLogger {
   final DatabaseHelper _databaseHelper;
 
   Future<Database> get _db async => _database ?? _databaseHelper.database;
+
+  static Future<void> logMissedTrickleOpportunityInDb(
+    DatabaseExecutor db, {
+    required TrickleState state,
+    required int nowMs,
+    required int wallMs,
+    required bool suppressionEnabled,
+    required int k,
+  }) async {
+    try {
+      final tables = await db.rawQuery(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN "
+        "('experiment_sessions', 'experiment_trials', 'experiment_events')",
+      );
+      if (tables.length != 3) return;
+      final sessions = await db.query(
+        'experiment_sessions',
+        where: 'ended_at IS NULL',
+        orderBy:
+            "CASE WHEN session_kind = 'RESEARCH' THEN 0 ELSE 1 END, started_at DESC",
+        limit: 1,
+      );
+      if (sessions.isEmpty) return;
+      final session = ExperimentSession.fromDbMap(sessions.first);
+      final trials = await db.query(
+        'experiment_trials',
+        where: 'session_id = ? AND status = ?',
+        whereArgs: [session.sessionId, 'RUNNING'],
+        orderBy: 'started_at DESC',
+        limit: 1,
+      );
+      final detail = {
+        'decision': 'missed',
+        'reason': 'SCHEDULER_LATE',
+        'I': state.intervalMs,
+        'c': state.consistencyCount,
+        'k': k,
+        'suppression_enabled': suppressionEnabled,
+        'interval_started_at': state.intervalStartedAt,
+        'transmit_at': state.transmitAt,
+        'interval_end_at': state.intervalEndAt,
+        'handled_at': nowMs,
+        'lateness_ms': nowMs - state.transmitAt,
+      };
+      final event = ExperimentEvent(
+        sessionId: session.sessionId,
+        trialId: trials.isEmpty ? null : trials.first['trial_id'] as String,
+        eventType: ExperimentEventTypes.trickleTxMissed,
+        messageId: state.messageId,
+        timestampMs: wallMs,
+        eventTimestampMs: wallMs,
+        elapsedRealtimeMs: nowMs,
+        packetType: 'sos',
+        nodeRole: session.nodeRole,
+        forwardingMode: session.forwardingMode,
+        eventKey:
+            'TRICKLE_TX_MISSED|${state.messageId}|${state.monotonicBootId}|${state.intervalStartedAt}',
+        detailJson: jsonEncode(detail),
+      );
+      final inserted = await db.insert(
+        'experiment_events',
+        event.toDbMap(),
+        conflictAlgorithm: ConflictAlgorithm.ignore,
+      );
+      if (inserted > 0 &&
+          session.sessionKind == 'RESEARCH' &&
+          trials.isNotEmpty) {
+        debugPrint(
+          'RESQMESH_EVENT ${jsonEncode({'kind': 'event', ...event.toDbMap(), 'detail': detail, 'node_id': session.deviceId, 'device_id': session.deviceId, 'mode': session.forwardingMode, 'role': session.nodeRole, 'hypothesis': session.hypothesis, 'clock_sync_valid': session.clockOffsetMs != null, 'clock_offset_ms': session.clockOffsetMs})}',
+        );
+      }
+    } catch (error) {
+      // Diagnostic failure must not block durable SOS/ACK processing.
+      debugPrint('Trickle missed-opportunity diagnostic unavailable: $error');
+    }
+  }
 
   Future<ExperimentSession> ensureSession({
     required String deviceId,
@@ -233,6 +312,13 @@ class ExperimentLogger {
     String? burstId,
   }) async {
     final session = await ensureSession(deviceId: deviceId);
+    if (eventType.startsWith('TRICKLE_')) {
+      detail = {
+        ...?detail,
+        'suppression_enabled': session.forwardingMode == 'trickle',
+        'k': MeshConfig.trickleRedundancyConstant,
+      };
+    }
     final trial = await ResearchSessionService(
       database: await _db,
     ).currentTrial(sessionId: session.sessionId);

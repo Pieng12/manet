@@ -379,7 +379,10 @@ class _ResearchMonitorScreenState extends State<ResearchMonitorScreen>
       children: [
         _section('Experiment Configuration', [
           _textField(_sessionNameController, 'Experiment Name'),
-          _kv('Forwarding Mode', MeshConfig.forwardingMode.logValue),
+          _kv(
+            'Forwarding Mode',
+            _session?.forwardingMode ?? MeshConfig.forwardingMode.logValue,
+          ),
           _dropdown(
             label: 'Node Role',
             value: _nodeRole,
@@ -553,7 +556,10 @@ class _ResearchMonitorScreenState extends State<ResearchMonitorScreen>
         _earliestNextEligibleAt == null ? '-' : _time(_earliestNextEligibleAt!),
       ),
       _kv('Pending Relay Work', _pendingRelayWork ? 'Yes' : 'No'),
-      _kv('Forwarding Mode', MeshConfig.forwardingMode.logValue),
+      _kv(
+        'Forwarding Mode',
+        _session?.forwardingMode ?? MeshConfig.forwardingMode.logValue,
+      ),
       _kv('Device Manufacturer', _session?.deviceManufacturer ?? '-'),
       _kv('Device Model', _session?.deviceModel ?? '-'),
       _kv('Android Release', _session?.androidVersion ?? '-'),

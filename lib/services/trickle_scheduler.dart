@@ -3,6 +3,7 @@ import 'dart:math';
 import 'package:pkmproject/config/mesh_config.dart';
 import 'package:pkmproject/models/trickle_state.dart';
 import 'package:pkmproject/services/experiment_clock.dart';
+import 'package:pkmproject/services/experiment_logger.dart';
 import 'package:sqflite/sqflite.dart';
 
 class TrickleScheduler {
@@ -12,6 +13,7 @@ class TrickleScheduler {
     Duration imin = MeshConfig.trickleImin,
     Duration imax = MeshConfig.trickleImax,
     int redundancyConstant = MeshConfig.trickleRedundancyConstant,
+    this.suppressionEnabled = true,
     ClockSource? clock,
   }) : _db = database,
        _random = random ?? Random(),
@@ -26,6 +28,7 @@ class TrickleScheduler {
   final int _imaxMs;
   final int _redundancyConstant;
   final ClockSource _clock;
+  final bool suppressionEnabled;
 
   int get iminMs => _iminMs;
   int get imaxMs => _imaxMs;
@@ -87,6 +90,17 @@ class TrickleScheduler {
     );
     if (nowMs < current.intervalEndAt) return current;
 
+    if (current.phase == TricklePhase.waitingTransmit) {
+      await ExperimentLogger.logMissedTrickleOpportunityInDb(
+        _db,
+        state: current,
+        nowMs: nowMs,
+        wallMs: _clock.wallTimeMs(),
+        suppressionEnabled: suppressionEnabled,
+        k: _redundancyConstant,
+      );
+    }
+
     var intervalMs = current.intervalMs;
     var intervalStartedAt = current.intervalStartedAt;
     var intervalEndAt = current.intervalEndAt;
@@ -107,7 +121,7 @@ class TrickleScheduler {
       nowMs: intervalStartedAt,
       resetReason: current.lastResetReason,
     );
-    return _upsert(state);
+    return _upsert(state.copyWith(updatedAt: nowMs));
   }
 
   Future<bool> recordConsistentObservation({
@@ -124,6 +138,8 @@ class TrickleScheduler {
           imin: Duration(milliseconds: _iminMs),
           imax: Duration(milliseconds: _imaxMs),
           redundancyConstant: _redundancyConstant,
+          suppressionEnabled: suppressionEnabled,
+          clock: _clock,
         ).recordConsistentObservation(
           messageId: messageId,
           observationId: observationId,
@@ -207,7 +223,8 @@ WHERE message_id = ?
       );
       await _upsert(nextState);
       return TrickleTransmitDecision(
-        type: state.consistencyCount < _redundancyConstant
+        type:
+            !suppressionEnabled || state.consistencyCount < _redundancyConstant
             ? TrickleTransmitDecisionType.allowTransmit
             : TrickleTransmitDecisionType.suppressTransmit,
         state: nextState,

@@ -8,6 +8,14 @@ darurat normal.
 Research metadata disimpan di SQLite. Metadata session/trial tidak pernah
 dimasukkan ke payload BLE 17 byte.
 
+Controller kini mendukung `basic_flooding`, `trickle_no_suppression`, dan
+`trickle` lewat command `configure_session`; tab menampilkan mode session
+yang aktif, bukan sekadar default build. Kedua varian Trickle memakai mesin
+yang sama dengan flag suppression. Lihat [135 trial](three_method_experiment.md)
+untuk manifest, sembilan kondisi, event kesempatan/counter, actual RX PHY,
+Excel dengan grafik/perbandingan, dan prosedur perangkat fisik. Telemetry
+penelitian bersifat diagnostik dan tidak menjadi syarat durable processing.
+
 Tab **UJI JARAK** adalah pilot terpisah untuk satu orang, ESP sumber dan Android
 penerima. Penyimpanan `resqmesh_range_pilot.db`/`resqmesh_range_rx.db` terpisah
 dari database protokol versi 14. Tab membaca seluruh canonical RX melalui cursor,

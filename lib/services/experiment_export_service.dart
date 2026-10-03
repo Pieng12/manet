@@ -6,6 +6,7 @@ import 'package:pkmproject/models/experiment_event.dart';
 import 'package:pkmproject/models/experiment_session.dart';
 import 'package:pkmproject/models/experiment_trial.dart';
 import 'package:pkmproject/services/experiment_logger.dart';
+import 'package:pkmproject/services/native_bridge_service.dart';
 import 'package:pkmproject/services/research_session_service.dart';
 
 class ExperimentExportService {
@@ -39,7 +40,13 @@ class ExperimentExportService {
     final payload = {
       'session': session == null ? null : _sessionJson(session),
       'trials': trials.map(_trialJson).toList(),
-      'events': events.map(_eventJson).toList(),
+      'events': [
+        ...events.map(_eventJson),
+        ...await NativeBridgeService.researchPhyEvents(
+          effectiveSessionId,
+          trialId,
+        ),
+      ],
     };
     await file.writeAsString(
       const JsonEncoder.withIndent('  ').convert(payload),
@@ -176,6 +183,7 @@ class ExperimentExportService {
       'trickle_imax_ms': session.trickleImaxMs,
       'trickle_imax_doublings': session.trickleImaxDoublings,
       'trickle_k': session.trickleK,
+      'suppression_enabled': session.forwardingMode == 'trickle',
       'sos_advertise_burst_ms': session.sosAdvertiseBurstMs,
       'trial_timeout_seconds': session.trialTimeoutSeconds,
       'session_code': session.sessionCode,

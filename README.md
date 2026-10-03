@@ -7,6 +7,13 @@ menjadi gateway ke server hanya saat mode gateway diaktifkan secara eksplisit.
 
 ## Status Project
 
+Rancangan eksperimen terbaru: **135 trial valid**, tiga metode
+`basic_flooding`, `trickle_no_suppression`, `trickle`, masing-masing H1/H2/H3
+sebanyak 15 trial. Varian Trickle menggunakan mesin yang sama; hanya flag
+suppression berbeda. Panduan build, smoke 9 kondisi, manifest acak seimbang,
+validasi PHY, metrik dan Excel: [eksperimen tiga metode](docs/three_method_experiment.md).
+Dataset 90 trial sebelumnya tetap arsip terpisah, bukan bagian dari 135 trial.
+
 Project berada pada tahap implementasi dan pengujian skripsi. Fitur inti yang
 sudah tersedia:
 
@@ -303,7 +310,7 @@ atau build ID berbeda ditolak sebelum trial.
 Lihat [firmware ESP32-C3](firmware/esp32c3/README.md),
 [controller eksperimen](tools/experiment_controller/README.md), dan
 [checklist smoke test fisik](docs/physical_smoke_test.md). Jangan menjalankan
-matrix 90 trial sebelum smoke H1/H2/H3 untuk kedua mode valid.
+matrix 135 trial sebelum smoke H1/H2/H3 untuk ketiga mode valid.
 
 Testbed utama memakai satu `android-source`, relay `esp-r1a`, `esp-r1b`,
 `esp-r2a`, `esp-r2b`, dan `esp-destination`. Salin template menjadi
@@ -316,8 +323,9 @@ build/config/topology yang sama.
 ## Cara Memulai Sesi Eksperimen
 
 Jalankan aplikasi dalam mode yang ingin diuji. Mode forwarding tidak dipilih
-manual di Research Monitor; nilainya selalu berasal dari
-`RESQMESH_FORWARDING_MODE`. Session penelitian menyimpan konfigurasi forwarding
+manual di Research Monitor; controller memilih melalui `configure_session`,
+atau `RESQMESH_FORWARDING_MODE` sebagai default. Monitor menampilkan mode session
+aktif. Session penelitian menyimpan konfigurasi forwarding
 aktual, metadata perangkat, timeout trial workflow, dan timestamp mulai. Trial
 ditutup sebagai success, failed dengan failure reason, atau invalid; denominator
 DSR hanya memakai result eksplisit `SUCCESS` dan `FAILED_DELIVERY`.

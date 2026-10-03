@@ -77,6 +77,17 @@ keluar sebagai JSON dengan `kind=event`; respons command memakai
 ignored, interval/suppression Trickle, burst requested/started/ended/failed,
 relay started, dan destination first receive.
 
+Tiga mode diterima oleh firmware yang sama: `basic_flooding`,
+`trickle_no_suppression`, dan `trickle`. Kedua varian Trickle memakai satu
+scheduler (Imin 8 s, Imax absolut 256 s, k=1, burst 2 s); hanya predicate
+suppression berbeda. Counter c tetap dihitung pada no-suppression. Basic tetap
+menunggu 2 s + jitter 300-1500 ms setelah burst 2 s. Readiness melaporkan
+`method_design_version=3`, parameter dan flag suppression; event
+`TRICKLE_TX_OPPORTUNITY` berbeda dari sukses burst. RX PHY aktual dicatat sebagai
+`BLE_RX_PHY_OBSERVED` dengan observation ID, tanpa mengubah payload/protokol.
+Coding S2/S8 tidak disimpulkan dari label Coded. Lihat
+[prosedur 135 trial](../../docs/three_method_experiment.md); hop tetap filter logis.
+
 `firmware_build_id` pada readiness berasal dari SHA commit pendek yang
 disuntikkan otomatis oleh `build_id.py` saat PlatformIO membangun binary dan
 tidak berubah saat `configure_session`. Field `build_id` command hanya menjadi

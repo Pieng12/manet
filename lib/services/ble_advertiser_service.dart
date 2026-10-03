@@ -22,7 +22,21 @@ class BleAdvertiserService {
   static final BleAdvertiserService _instance =
       BleAdvertiserService._internal();
   factory BleAdvertiserService() => _instance;
-  BleAdvertiserService._internal();
+  BleAdvertiserService._internal()
+    : _relayQueue = RelayQueueService(),
+      _experimentLogger = ExperimentLogger(),
+      _clock = ExperimentClock.instance,
+      _readMessage = DatabaseHelper().getMessageById;
+
+  BleAdvertiserService.forTesting({
+    required RelayQueueService relayQueue,
+    required ExperimentLogger experimentLogger,
+    required ClockSource clock,
+    required Future<SOSMessage?> Function(String) readMessage,
+  }) : _relayQueue = relayQueue,
+       _experimentLogger = experimentLogger,
+       _clock = clock,
+       _readMessage = readMessage;
 
   static const String kResqMeshServiceUuidString =
       "000021FE-0000-1000-8000-00805F9B34FB";
@@ -36,10 +50,10 @@ class BleAdvertiserService {
   );
   static const Duration minTransientRetryDelay = Duration(seconds: 15);
 
-  final DatabaseHelper _dbHelper = DatabaseHelper();
-  final RelayQueueService _relayQueue = RelayQueueService();
-  final ExperimentLogger _experimentLogger = ExperimentLogger();
-  final ClockSource _clock = ExperimentClock.instance;
+  final RelayQueueService _relayQueue;
+  final ExperimentLogger _experimentLogger;
+  final ClockSource _clock;
+  final Future<SOSMessage?> Function(String) _readMessage;
   final _isAdvertisingController = StreamController<bool>.broadcast();
 
   Stream<bool> get onAdvertisingChanged => _isAdvertisingController.stream;
@@ -64,6 +78,9 @@ class BleAdvertiserService {
   Timer? _slotTimer;
   bool _isSchedulerOwner = false;
   bool _isSelecting = false;
+  bool _pendingTrickleTick = false;
+  List<Future<void> Function()>? _schedulerDiagnostics;
+  Future<void> Function()? _pendingQueueWakeDiagnostic;
   bool _researchObservationPaused = false;
   Timer? _queueWakeTimer;
   RelaySchedulerState _schedulerState = RelaySchedulerState.stopped;
@@ -84,6 +101,8 @@ class BleAdvertiserService {
 
   void releaseSchedulerOwnership() {
     _isSchedulerOwner = false;
+    _pendingTrickleTick = false;
+    _pendingQueueWakeDiagnostic = null;
     _cancelQueueWakeTimer();
   }
 
@@ -200,11 +219,29 @@ class BleAdvertiserService {
     if (_queueWakeTimer == null) return;
     _queueWakeTimer?.cancel();
     _queueWakeTimer = null;
-    _experimentLogger.logEvent(
-      eventType: ExperimentEventTypes.queueWakeCancelled,
-      deviceId: 'unknown',
-      detail: {'scheduler_state': _schedulerState.name},
+    final state = _schedulerState.name;
+    _schedulerDiagnostic(
+      (wall, monotonic) => _experimentLogger.logEvent(
+        eventType: ExperimentEventTypes.queueWakeCancelled,
+        deviceId: 'unknown',
+        eventTimestampMs: wall,
+        elapsedRealtimeMs: monotonic,
+        detail: {'scheduler_state': state},
+      ),
     );
+  }
+
+  Future<void> _schedulerDiagnostic(
+    Future<void> Function(int? wall, int? monotonic) record,
+  ) {
+    if (!_relayQueue.mode.usesTrickle) return record(null, null);
+    final wall = _clock.wallTimeMs();
+    final monotonic = _clock.monotonicTimeMs();
+    // Defer diagnostics, not protocol writes, through selection/native request.
+    final pending = _schedulerDiagnostics;
+    if (pending == null) return record(wall, monotonic);
+    pending.add(() => record(wall, monotonic));
+    return Future<void>.value();
   }
 
   Future<void> _publishPendingRelayWork() async {
@@ -243,38 +280,77 @@ class BleAdvertiserService {
     final now = _clock.monotonicTimeMs();
     final delayMs = earliest <= now ? 0 : earliest - now;
     _setSchedulerState(RelaySchedulerState.waitingNextSlot);
+    final schedulerState = _schedulerState.name;
+    void armWakeTimer() {
+      final delay = _relayQueue.mode.usesTrickle
+          ? remainingQueueWakeDelay(
+              deadlineMs: earliest,
+              nowMs: _clock.monotonicTimeMs(),
+            )
+          : Duration(milliseconds: delayMs);
+      _queueWakeTimer = Timer(delay, () async {
+        if (_relayQueue.mode.usesTrickle) {
+          _queueWakeTimer = null;
+          final wall = _clock.wallTimeMs();
+          final monotonic = _clock.monotonicTimeMs();
+          _pendingQueueWakeDiagnostic = () => _experimentLogger.logEvent(
+            eventType: ExperimentEventTypes.queueWakeTriggered,
+            deviceId: 'unknown',
+            eventTimestampMs: wall,
+            elapsedRealtimeMs: monotonic,
+            detail: {'next_eligible_at': earliest},
+          );
+        } else {
+          await _experimentLogger.logEvent(
+            eventType: ExperimentEventTypes.queueWakeTriggered,
+            deviceId: 'unknown',
+            detail: {'next_eligible_at': earliest},
+          );
+        }
+        await advertiseLatestOrStop(preemptCurrent: true);
+      });
+    }
+
+    if (_relayQueue.mode.usesTrickle) armWakeTimer();
     if (delayMs > 0) {
-      await _experimentLogger.logEvent(
-        eventType: ExperimentEventTypes.waitingNextEligible,
+      await _schedulerDiagnostic(
+        (wall, monotonic) async => _experimentLogger.logEvent(
+          eventType: ExperimentEventTypes.waitingNextEligible,
+          deviceId: 'unknown',
+          eventTimestampMs: wall,
+          elapsedRealtimeMs: monotonic,
+          detail: {
+            'next_eligible_at': earliest,
+            'delay_ms': delayMs,
+            'queue_size': await _relayQueue.queueSize(),
+          },
+        ),
+      );
+    }
+    await _schedulerDiagnostic(
+      (wall, monotonic) async => _experimentLogger.logEvent(
+        eventType: earliest <= now
+            ? ExperimentEventTypes.queueWakeTriggered
+            : ExperimentEventTypes.queueWakeScheduled,
         deviceId: 'unknown',
+        eventTimestampMs: wall,
+        elapsedRealtimeMs: monotonic,
         detail: {
           'next_eligible_at': earliest,
           'delay_ms': delayMs,
+          'scheduler_state': schedulerState,
           'queue_size': await _relayQueue.queueSize(),
         },
-      );
-    }
-    await _experimentLogger.logEvent(
-      eventType: earliest <= now
-          ? ExperimentEventTypes.queueWakeTriggered
-          : ExperimentEventTypes.queueWakeScheduled,
-      deviceId: 'unknown',
-      detail: {
-        'next_eligible_at': earliest,
-        'delay_ms': delayMs,
-        'scheduler_state': _schedulerState.name,
-        'queue_size': await _relayQueue.queueSize(),
-      },
+      ),
     );
+    if (!_relayQueue.mode.usesTrickle) armWakeTimer();
+  }
 
-    _queueWakeTimer = Timer(Duration(milliseconds: delayMs), () async {
-      await _experimentLogger.logEvent(
-        eventType: ExperimentEventTypes.queueWakeTriggered,
-        deviceId: 'unknown',
-        detail: {'next_eligible_at': earliest},
-      );
-      await advertiseLatestOrStop(preemptCurrent: true);
-    });
+  static Duration remainingQueueWakeDelay({
+    required int deadlineMs,
+    required int nowMs,
+  }) {
+    return Duration(milliseconds: deadlineMs > nowMs ? deadlineMs - nowMs : 0);
   }
 
   bool get _isBlockedSchedulerState =>
@@ -355,7 +431,7 @@ class BleAdvertiserService {
 
   Future<void> pauseResearchObservationWindow() async {
     _researchObservationPaused = true;
-    await stopAdvertising();
+    await stopAdvertising(stopReason: 'OBSERVATION_WINDOW_ENDED');
     _setSchedulerState(RelaySchedulerState.stopped);
   }
 
@@ -429,8 +505,17 @@ class BleAdvertiserService {
       return;
     }
 
-    if (_isSelecting) return;
+    if (_isSelecting) {
+      if (_relayQueue.mode.usesTrickle) _pendingTrickleTick = true;
+      return;
+    }
     _isSelecting = true;
+    if (_relayQueue.mode.usesTrickle) {
+      _schedulerDiagnostics = [];
+      final wakeDiagnostic = _pendingQueueWakeDiagnostic;
+      _pendingQueueWakeDiagnostic = null;
+      if (wakeDiagnostic != null) _schedulerDiagnostics!.add(wakeDiagnostic);
+    }
     _setSchedulerState(RelaySchedulerState.selecting);
 
     try {
@@ -498,7 +583,28 @@ class BleAdvertiserService {
       }
       await _startQueuedSos(queued!, continueScheduling: continueScheduling);
     } finally {
+      final diagnostics = _schedulerDiagnostics;
+      _schedulerDiagnostics = null;
       _isSelecting = false;
+      if (_pendingTrickleTick) {
+        _pendingTrickleTick = false;
+        if (continueScheduling &&
+            _isSchedulerOwner &&
+            !_researchObservationPaused &&
+            !_isAdvertising) {
+          _queueWakeTimer?.cancel();
+          _queueWakeTimer = Timer(Duration.zero, () => advertiseLatestOrStop());
+        }
+      }
+      if (diagnostics != null) {
+        for (final record in diagnostics) {
+          try {
+            await record();
+          } catch (error) {
+            print('[BleAdvertiserService] Scheduler diagnostic failed: $error');
+          }
+        }
+      }
     }
   }
 
@@ -517,7 +623,7 @@ class BleAdvertiserService {
     }
   }
 
-  Future<void> stopAdvertising() async {
+  Future<void> stopAdvertising({String? stopReason}) async {
     _ackRestoreTimer?.cancel();
     _cancelQueueWakeTimer();
     _stopSlotTimer();
@@ -531,7 +637,7 @@ class BleAdvertiserService {
       print("[BleAdvertiserService] Native stop failed: $e");
     }
 
-    await _logCurrentBurstEnded();
+    await _logCurrentBurstEnded(stopReason: stopReason);
 
     _isAdvertising = false;
     _currentAdvertisedMessageId = null;
@@ -554,7 +660,7 @@ class BleAdvertiserService {
         return _QueuedAdvertisement(item: item, payload: item.payloadBase64);
       }
 
-      final message = await _dbHelper.getMessageById(item.messageId);
+      final message = await _readMessage(item.messageId);
       if (message == null ||
           message.ackReceivedAt != null ||
           message.localState == 'acked' ||
@@ -570,27 +676,49 @@ class BleAdvertiserService {
   }
 
   Future<void> _logSchedulerSelection(RelayQueueItem item) async {
-    await _experimentLogger.logEvent(
-      eventType: ExperimentEventTypes.schedulerPacketSelected,
-      deviceId: 'unknown',
-      messageId: item.isSos ? item.messageId : null,
-      detail: {
-        'packet_type': item.packetType,
-        'relay_count': item.relayCount,
-        'queue_state': item.queueState,
-        'forwarding_mode': _relayQueue.mode.logValue,
-        'ack_queue_size': await _relayQueue.queueSizeByType('ack'),
-        'sos_queue_size': await _relayQueue.queueSizeByType('sos'),
-      },
+    await _schedulerDiagnostic(
+      (wall, monotonic) async => _experimentLogger.logEvent(
+        eventType: ExperimentEventTypes.schedulerPacketSelected,
+        deviceId: 'unknown',
+        messageId: item.isSos ? item.messageId : null,
+        eventTimestampMs: wall,
+        elapsedRealtimeMs: monotonic,
+        detail: {
+          'packet_type': item.packetType,
+          'relay_count': item.relayCount,
+          'queue_state': item.queueState,
+          'forwarding_mode': _relayQueue.mode.logValue,
+          'ack_queue_size': await _relayQueue.queueSizeByType('ack'),
+          'sos_queue_size': await _relayQueue.queueSizeByType('sos'),
+        },
+      ),
     );
   }
 
   Future<void> _logTrickleDecision(
     SOSMessage message,
-    TrickleTransmitDecision decision,
-  ) async {
+    TrickleTransmitDecision decision, {
+    int? decisionWallMs,
+  }) async {
     final state = decision.state;
+    final decisionAtMs =
+        decisionWallMs ??
+        _clock.wallTimeMs() - (_clock.monotonicTimeMs() - state.updatedAt);
     final detail = {
+      'suppression_enabled': _relayQueue.mode.suppressionEnabled,
+      'decision': switch (decision.type) {
+        TrickleTransmitDecisionType.allowTransmit => 'allowed',
+        TrickleTransmitDecisionType.suppressTransmit => 'suppressed',
+        _ => 'waiting',
+      },
+      'reason': switch (decision.type) {
+        TrickleTransmitDecisionType.allowTransmit =>
+          _relayQueue.mode.suppressionEnabled
+              ? 'C_LT_K'
+              : 'SUPPRESSION_DISABLED',
+        TrickleTransmitDecisionType.suppressTransmit => 'C_GE_K',
+        _ => 'INTERVAL_WAIT',
+      },
       'I': state.intervalMs,
       'Imin': MeshConfig.trickleImin.inMilliseconds,
       'Imax': MeshConfig.trickleImax.inMilliseconds,
@@ -603,6 +731,21 @@ class BleAdvertiserService {
       'next_eligible_at': decision.nextEligibleAt,
       'reset_reason': state.lastResetReason,
     };
+    if (decision.type == TrickleTransmitDecisionType.allowTransmit ||
+        decision.type == TrickleTransmitDecisionType.suppressTransmit) {
+      await _experimentLogger.logEvent(
+        eventType: ExperimentEventTypes.trickleTxOpportunity,
+        deviceId: 'unknown',
+        messageId: message.id,
+        senderCrc: message.senderCrc,
+        protocolTimestampMs: message.updatedAt,
+        packetType: 'sos',
+        status: message.status.name,
+        elapsedRealtimeMs: state.updatedAt,
+        eventTimestampMs: decisionAtMs,
+        detail: detail,
+      );
+    }
     final eventType = switch (decision.type) {
       TrickleTransmitDecisionType.allowTransmit =>
         ExperimentEventTypes.trickleTxAllowed,
@@ -619,6 +762,8 @@ class BleAdvertiserService {
       messageId: message.id,
       senderCrc: message.senderCrc,
       hopCount: message.hopCount,
+      elapsedRealtimeMs: state.updatedAt,
+      eventTimestampMs: decisionAtMs,
       packetType: 'sos',
       status: message.status.name,
       detail: detail,
@@ -630,6 +775,8 @@ class BleAdvertiserService {
         messageId: message.id,
         senderCrc: message.senderCrc,
         hopCount: message.hopCount,
+        eventTimestampMs: decisionAtMs,
+        elapsedRealtimeMs: state.updatedAt,
         packetType: 'sos',
         status: message.status.name,
         detail: detail,
@@ -647,12 +794,21 @@ class BleAdvertiserService {
     final now = _clock.monotonicTimeMs();
     final originalNextEligibleAt = queued.item.nextEligibleAt;
     TrickleTransmitDecision? trickleDecision;
-    if (_relayQueue.mode == ForwardingMode.trickle) {
+    if (_relayQueue.mode.usesTrickle) {
       trickleDecision = await _relayQueue.handleTrickleQueueEvent(
         item: queued.item,
         nowMs: now,
       );
-      await _logTrickleDecision(message, trickleDecision);
+      final decision = trickleDecision;
+      await _schedulerDiagnostic(
+        (wall, monotonic) => _logTrickleDecision(
+          message,
+          decision,
+          decisionWallMs: wall == null
+              ? null
+              : wall - (monotonic! - decision.state.updatedAt),
+        ),
+      );
       if (!trickleDecision.shouldAdvertise) {
         await _scheduleNextQueueWake();
         return;
@@ -674,32 +830,39 @@ class BleAdvertiserService {
     );
     final payloadHash = packet?.identity;
     _currentAdvertisedMessageId = message.id;
-    await _experimentLogger.logEvent(
-      eventType: ExperimentEventTypes.bleAdvertiseRequested,
-      deviceId: 'unknown',
-      messageId: message.id,
-      senderCrc: message.senderCrc,
-      hopCount: message.hopCount,
-      hopOut: message.hopCount,
-      payloadHash: payloadHash,
-      protocolTimestampMs: packet?.timestampMs,
-      packetType: 'sos',
-      status: message.status.name,
+    await _schedulerDiagnostic(
+      (wall, monotonic) => _experimentLogger.logEvent(
+        eventType: ExperimentEventTypes.bleAdvertiseRequested,
+        deviceId: 'unknown',
+        messageId: message.id,
+        senderCrc: message.senderCrc,
+        hopCount: message.hopCount,
+        hopOut: message.hopCount,
+        payloadHash: payloadHash,
+        protocolTimestampMs: packet?.timestampMs,
+        packetType: 'sos',
+        status: message.status.name,
+        eventTimestampMs: wall,
+        elapsedRealtimeMs: monotonic,
+      ),
     );
-    await _experimentLogger.logEvent(
-      eventType: ExperimentEventTypes.advertiseBurstRequested,
-      deviceId: 'unknown',
-      messageId: message.id,
-      senderCrc: message.senderCrc,
-      hopOut: message.hopCount,
-      protocolTimestampMs: packet?.timestampMs,
-      packetType: 'sos',
-      status: message.status.name,
-      messageKey: packet?.messageKey.value,
-      stateIdentity: packet?.stateIdentity.value,
-      burstId: burstId,
-      elapsedRealtimeMs: now,
-      detail: {'target_duration_ms': burstDuration.inMilliseconds},
+    await _schedulerDiagnostic(
+      (wall, monotonic) => _experimentLogger.logEvent(
+        eventType: ExperimentEventTypes.advertiseBurstRequested,
+        deviceId: 'unknown',
+        messageId: message.id,
+        senderCrc: message.senderCrc,
+        hopOut: message.hopCount,
+        protocolTimestampMs: packet?.timestampMs,
+        packetType: 'sos',
+        status: message.status.name,
+        messageKey: packet?.messageKey.value,
+        stateIdentity: packet?.stateIdentity.value,
+        burstId: burstId,
+        eventTimestampMs: wall,
+        elapsedRealtimeMs: monotonic ?? now,
+        detail: {'target_duration_ms': burstDuration.inMilliseconds},
+      ),
     );
 
     try {
@@ -1063,7 +1226,19 @@ class BleAdvertiserService {
     _currentBurstStatus = status;
   }
 
-  Future<void> _logCurrentBurstEnded() async {
+  static String burstStopReason({
+    String? requestedReason,
+    required int actualDurationMs,
+    int? targetDurationMs,
+  }) {
+    if (requestedReason != null) return requestedReason;
+    if (targetDurationMs != null && actualDurationMs >= targetDurationMs) {
+      return 'TARGET_DURATION_REACHED';
+    }
+    return 'STOP_REQUESTED';
+  }
+
+  Future<void> _logCurrentBurstEnded({String? stopReason}) async {
     final burstId = _currentBurstId;
     final startedMonotonic = _currentBurstStartedMonotonicMs;
     if (burstId == null || startedMonotonic == null) return;
@@ -1086,6 +1261,11 @@ class BleAdvertiserService {
         'started_wall_ms': _currentBurstStartedWallMs,
         'target_duration_ms': _currentBurstTargetDurationMs,
         'actual_duration_ms': endedMonotonic - startedMonotonic,
+        'stop_reason': burstStopReason(
+          requestedReason: stopReason,
+          actualDurationMs: endedMonotonic - startedMonotonic,
+          targetDurationMs: _currentBurstTargetDurationMs,
+        ),
       },
     );
     _currentBurstId = null;

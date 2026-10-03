@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .excel_report import WORKBOOK_NAME, write_analysis_workbook
+from .comparisons import descriptive_comparisons
 
 
 METRIC_EVENT_TYPES = {
@@ -19,6 +20,8 @@ METRIC_EVENT_TYPES = {
     "SOURCE_FIRST_ADVERTISE_STARTED",
     "TRICKLE_CONSISTENT_HEARD",
     "TRICKLE_TX_SUPPRESSED",
+    "TRICKLE_TX_OPPORTUNITY",
+    "TRICKLE_TX_ALLOWED",
 }
 
 
@@ -127,6 +130,7 @@ def research_event_integrity_errors(
 ) -> set[str]:
     errors: set[str] = set()
     errors.update(trickle_timing_errors(events, record))
+    errors.update(method_decision_errors(events, record))
     if record.get("observation_window_basis") == "SOURCE_FIRST_ADVERTISE_STARTED":
         starts = [
             value for event in events
@@ -205,7 +209,7 @@ def research_event_integrity_errors(
 def trickle_timing_errors(
     events: list[dict[str, Any]], record: dict[str, Any]
 ) -> set[str]:
-    if record.get("mode") != "trickle":
+    if record.get("mode") not in {"trickle", "trickle_no_suppression"}:
         return set()
     errors: set[str] = set()
     by_node: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -244,7 +248,19 @@ def trickle_timing_errors(
                 except (TypeError, ValueError):
                     errors.add(f"TRICKLE_TIMING_METADATA_INVALID:{node}")
                     interval = None
-            elif kind in {"ADVERTISE_BURST_REQUESTED", "ADVERTISE_BURST_STARTED", "TRICKLE_TX_ALLOWED", "TRICKLE_TX_SUPPRESSED"}:
+            elif kind == "TRICKLE_TX_MISSED":
+                try:
+                    detail = json.loads(event.get("detail_json") or "{}")
+                    started = event.get("interval_started_at_monotonic_ms", detail.get("interval_started_at"))
+                    duration = event.get("interval_ms", detail.get("I"))
+                    handled = event.get("monotonic_ms", event.get("elapsed_realtime_ms", detail.get("handled_at")))
+                    if started is None or duration is None or handled is None:
+                        raise ValueError("missing timing")
+                    if ((int(handled) - int(started)) & 0xFFFFFFFF) < int(duration):
+                        errors.add(f"TRICKLE_MISSED_BEFORE_INTERVAL_END:{node}")
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    errors.add(f"TRICKLE_MISSED_METADATA_INVALID:{node}")
+            elif kind in {"ADVERTISE_BURST_REQUESTED", "ADVERTISE_BURST_STARTED", "TRICKLE_TX_OPPORTUNITY", "TRICKLE_TX_ALLOWED", "TRICKLE_TX_SUPPRESSED"}:
                 if interval is None:
                     if strict or has_interval:
                         errors.add(f"TRICKLE_TRANSMIT_WITHOUT_INTERVAL:{node}")
@@ -262,6 +278,69 @@ def trickle_timing_errors(
                 # A native success callback may finish after the decision's interval boundary.
                 if kind != "ADVERTISE_BURST_STARTED" and age >= interval["duration"]:
                     errors.add(f"TRICKLE_DECISION_AFTER_INTERVAL:{node}")
+    if record.get("method_design_version", 0) >= 3:
+        intervals: dict[tuple[Any, ...], list[tuple[int, int]]] = defaultdict(list)
+        accounted: set[tuple[Any, ...]] = set()
+        for event in events:
+            try:
+                detail = json.loads(event.get("detail_json") or "{}")
+                start = event.get("interval_started_at_monotonic_ms", detail.get("interval_started_at"))
+                duration = event.get("interval_ms", detail.get("I"))
+                if start is None or duration is None:
+                    continue
+                group = (event.get("node_id", event.get("device_id")),
+                         event.get("message_id") or canonical_message_key(event.get("message_key")))
+                if event.get("event_type") == "TRICKLE_INTERVAL_STARTED":
+                    intervals[group].append((int(start), int(duration)))
+                elif event.get("event_type") in {"TRICKLE_TX_OPPORTUNITY", "TRICKLE_TX_ALLOWED",
+                                                  "TRICKLE_TX_SUPPRESSED", "TRICKLE_TX_MISSED"}:
+                    accounted.add((*group, int(start)))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+        for group, values in intervals.items():
+            ordered = sorted(set(values))
+            for (start, duration), (next_start, next_duration) in zip(ordered, ordered[1:]):
+                if next_start >= start + duration and next_duration == min(duration * 2, 256000):
+                    if (*group, start) not in accounted:
+                        errors.add(f"TRICKLE_OPPORTUNITY_UNACCOUNTED:{group[0]}")
+    return errors
+
+
+def method_decision_errors(events: list[dict[str, Any]], record: dict[str, Any]) -> set[str]:
+    errors: set[str] = set()
+    mode = record.get("mode")
+    decisions = {"TRICKLE_TX_OPPORTUNITY", "TRICKLE_TX_ALLOWED", "TRICKLE_TX_SUPPRESSED"}
+    for event in events:
+        kind = event.get("event_type")
+        if kind not in decisions:
+            continue
+        node = event.get("node_id", event.get("device_id"))
+        if mode == "basic_flooding":
+            errors.add(f"BASIC_USED_TRICKLE_DECISION:{node}")
+            continue
+        if mode == "trickle_no_suppression" and kind == "TRICKLE_TX_SUPPRESSED":
+            errors.add(f"SUPPRESSION_DISABLED_BUT_SUPPRESSED:{node}")
+        if record.get("method_design_version", 0) < 3:
+            continue
+        try:
+            detail = json.loads(event.get("detail_json") or "{}")
+            c = int(event.get("consistency_count", detail.get("c")))
+            k = int(event.get("k", detail.get("k")))
+            enabled = event.get("suppression_enabled", detail.get("suppression_enabled"))
+            if enabled is not (mode == "trickle") or k != 1 or c < 0:
+                raise ValueError("parameters")
+            allow = not enabled or c < k
+            observed_allow = (event.get("reason", detail.get("decision")) in {"ALLOWED", "allowed"}
+                              if kind == "TRICKLE_TX_OPPORTUNITY" else kind == "TRICKLE_TX_ALLOWED")
+            if allow != observed_allow:
+                errors.add(f"TRICKLE_DECISION_MISMATCH:{node}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            errors.add(f"METHOD_DECISION_METADATA_INVALID:{node}")
+    if record.get("method_design_version", 0) >= 3 and mode in {"trickle", "trickle_no_suppression"}:
+        source = record.get("source_node_id")
+        if not any(e.get("event_type") == "TRICKLE_TX_OPPORTUNITY" and
+                   e.get("node_id", e.get("device_id")) == source for e in events):
+            errors.add("SOURCE_TRANSMISSION_OPPORTUNITY_MISSING")
     return errors
 
 
@@ -443,6 +522,41 @@ def latency_diagnostics(
     return diagnostics
 
 
+def creation_latency_diagnostics(
+    events: list[dict[str, Any]],
+    *,
+    source_node: str | None,
+    destination_nodes: set[str],
+    expected_hop: int,
+    message_key: str | None,
+) -> dict[str, int | None]:
+    diagnostics = dict.fromkeys(("sos_created_at_ms", "source_wait_before_first_advertise_ms",
+                                 "sos_creation_to_destination_ms"))
+    if not source_node or not message_key:
+        return diagnostics
+    matching = [e for e in events if canonical_message_key(e.get("message_key")) == message_key
+                and e.get("packet_type", "sos") == "sos"]
+    created = [t for e in matching if e.get("event_type") == "SOS_CREATED"
+               and e.get("node_id", e.get("device_id")) == source_node
+               if (t := _timestamp(e)) is not None]
+    if not created:
+        return diagnostics
+    created_at = min(created)
+    diagnostics["sos_created_at_ms"] = created_at
+    for field, kind in (("source_wait_before_first_advertise_ms", "SOURCE_FIRST_ADVERTISE_STARTED"),
+                        ("sos_creation_to_destination_ms", "DESTINATION_FIRST_VALID_RECEIVE")):
+        times = [t for e in matching if e.get("event_type") == kind
+                 and e.get("within_observation_window") is not False
+                 and (e.get("node_id", e.get("device_id")) == source_node
+                      if kind == "SOURCE_FIRST_ADVERTISE_STARTED"
+                      else e.get("node_id", e.get("device_id")) in destination_nodes
+                      and _hop(e) == expected_hop)
+                 if (t := _timestamp(e)) is not None]
+        if times and min(times) >= created_at:
+            diagnostics[field] = min(times) - created_at
+    return diagnostics
+
+
 def summarize_trial(
     trial_id: str,
     events: list[dict[str, Any]],
@@ -481,6 +595,7 @@ def summarize_trial(
     )
     invalid_reasons = {str(item) for item in record.get("invalid_reasons", [])}
     invalid_reasons.update(research_event_integrity_errors(events, record))
+    invalid_reasons.update(method_decision_errors(events, record))
     for key in (
         "source_node_id",
         "destination_node_ids",
@@ -586,6 +701,11 @@ def summarize_trial(
         expected_hop=expected_hop_value,
         message_key=expected_message_key,
     )
+    # SOS_CREATED precedes t0, so use the full event set only for these supporting durations.
+    diagnostics.update(creation_latency_diagnostics(
+        events, source_node=source_node, destination_nodes=destinations,
+        expected_hop=expected_hop_value, message_key=expected_message_key,
+    ))
 
     if invalid_reasons:
         result = "INVALID"
@@ -595,6 +715,7 @@ def summarize_trial(
         result = "SUCCESS" if destination_events else "FAILED_DELIVERY"
     return {
         "trial_id": trial_id,
+        "block": record.get("block"),
         "mode": record.get("mode", next((event.get("mode") for event in events if event.get("mode")), None)),
         "hypothesis": record.get("hypothesis", next((event.get("hypothesis") for event in events if event.get("hypothesis")), None)),
         "result": result,
@@ -612,6 +733,15 @@ def summarize_trial(
         "duplicates": duplicates,
         "ldr": duplicates / denominator if denominator else None,
         "transmission_bursts": len(burst_starts),
+        "transmission_opportunities": sum(e.get("event_type") == "TRICKLE_TX_OPPORTUNITY" for e in metric_events),
+        "transmission_allowed": sum(e.get("event_type") == "TRICKLE_TX_ALLOWED" for e in metric_events),
+        "transmission_suppressed": sum(e.get("event_type") == "TRICKLE_TX_SUPPRESSED" for e in metric_events),
+        "transmission_missed": sum(e.get("event_type") == "TRICKLE_TX_MISSED" for e in metric_events),
+        "missed_opportunities_total": sum(e.get("event_type") == "TRICKLE_TX_MISSED" for e in events),
+        "other_cancellations": sum(e.get("event_type") == "ADVERTISE_BURST_CANCELLED" for e in metric_events),
+        "suppression_rate": (sum(e.get("event_type") == "TRICKLE_TX_SUPPRESSED" for e in metric_events)
+                             / sum(e.get("event_type") == "TRICKLE_TX_OPPORTUNITY" for e in metric_events)
+                             if any(e.get("event_type") == "TRICKLE_TX_OPPORTUNITY" for e in metric_events) else None),
         "e2e_latency_ms": latency_ms,
         **diagnostics,
     }
@@ -637,9 +767,22 @@ def aggregate(summaries: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "hypothesis": hypothesis,
                 "valid_trials": len(valid),
                 "success_trials": success,
+                "failed_delivery_trials": len(valid) - success,
+                "invalid_trials": len(rows) - len(valid),
                 "dsr": success / len(valid) if valid else None,
                 "ldr": duplicates / ldr_denominator if ldr_denominator else None,
+                "ldr_mean_per_trial": statistics.mean([r["ldr"] for r in valid if r["ldr"] is not None]) if any(r["ldr"] is not None for r in valid) else None,
                 "transmission_overhead": overhead / len(valid) if valid else None,
+                "actual_bursts": overhead,
+                "transmission_opportunities": sum(r.get("transmission_opportunities", 0) for r in valid),
+                "transmission_allowed": sum(r.get("transmission_allowed", 0) for r in valid),
+                "transmission_suppressed": sum(r.get("transmission_suppressed", 0) for r in valid),
+                "transmission_missed": sum(r.get("transmission_missed", 0) for r in valid),
+                "missed_opportunities_total": sum(r.get("missed_opportunities_total", 0) for r in valid),
+                "other_cancellations": sum(r.get("other_cancellations", 0) for r in valid),
+                "suppression_rate": (sum(r.get("transmission_suppressed", 0) for r in valid)
+                                     / sum(r.get("transmission_opportunities", 0) for r in valid)
+                                     if sum(r.get("transmission_opportunities", 0) for r in valid) else None),
                 **{f"e2e_{key}": value for key, value in stats.items()},
             }
         )
@@ -695,6 +838,7 @@ def merge_directory(
     _write_csv(output_dir / "events.csv", events)
     _write_csv(output_dir / "trial_summary.csv", summaries)
     _write_csv(output_dir / "aggregate_by_mode_hop.csv", aggregates)
+    _write_csv(output_dir / "method_comparisons.csv", descriptive_comparisons(aggregates))
     _write_csv(output_dir / "invalid_trials.csv", invalid)
     attempts = [
         {

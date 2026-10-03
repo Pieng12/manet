@@ -3,6 +3,12 @@
 Dokumen ini menjelaskan cara menjalankan sesi eksperimen ResQMesh setelah event
 log dan export data tersedia.
 
+Rancangan terbaru memakai tiga metode, 9 kondisi dan 135 trial valid.
+Panduan operasional yang berlaku: [eksperimen tiga metode](three_method_experiment.md).
+Data dua metode/90 trial lama tetap arsip. `trickle_no_suppression` memakai
+mesin Trickle dan seluruh aturan protokol yang sama, tetapi mengabaikan c<k
+sebagai syarat suppression; tidak mengaktifkan hard TTL/hop/relay count.
+
 ## Konfigurasi Build
 
 Mode offline BLE:
@@ -273,10 +279,12 @@ dicampur dengan event reader serial.
 
 Target setiap kondisi adalah 15 trial valid. `SUCCESS` dan
 `FAILED_DELIVERY` masuk penyebut DSR; `INVALID` disimpan untuk audit lalu
-diganti attempt baru sampai target atau batas 45 attempt. Urutan `blocked` atau
-`randomized` beserta seed disimpan di manifest dan dipakai kembali saat resume.
+diganti attempt baru sampai target atau batas 45 attempt. Urutan baru
+`balanced_randomized` terdiri dari 15 blok masing-masing seluruh 9 kondisi
+sekali. Seed dan urutan disimpan di manifest dan dipakai kembali saat resume.
 
-Batch harus didahului smoke Trickle H1-H3 dan Basic H1-H3. Smoke menghasilkan
+Batch harus didahului smoke ketiga metode pada H1-H3. Zero suppression sah,
+bukan syarat kegagalan smoke. Smoke menghasilkan
 `smoke_report.json`/`.csv`, sedangkan merger menghasilkan `events.json`,
 `events.csv`, `trial_summary.csv`, `aggregate_by_mode_hop.csv`,
 `invalid_trials.csv`, dan `attempt_summary.csv`.

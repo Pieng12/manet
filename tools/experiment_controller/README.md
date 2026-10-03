@@ -4,6 +4,12 @@ Controller mengatur satu Android dan lima ESP32-C3 melalui ADB dan serial JSON.
 Satu firmware yang sama digunakan pada seluruh ESP32; role dan topology H1-H3
 dikirim saat `configure_session`.
 
+Rancangan aktif adalah **135 trial valid**, tiga metode (`basic_flooding`,
+`trickle_no_suppression`, `trickle`) pada H1/H2/H3. Gunakan folder session baru;
+lihat [panduan lengkap](../../docs/three_method_experiment.md). `plan --config
+... --output ...` membuat manifest offline tanpa membuka ADB/COM. Default
+`balanced_randomized` menyimpan 15 blok, seed, dan urutan seluruh sembilan kondisi.
+
 ## Persiapan Windows
 
 ```powershell
@@ -54,7 +60,9 @@ py tools/experiment_controller/run.py run --config experiment.local.json --outpu
 py tools/experiment_controller/run.py merge --input experiment_output/raw --manifest experiment_output/manifest.json --output experiment_output/merged
 ```
 
-`smoke` menjalankan tepat enam kondisi: Trickle H1-H3 dan Basic Flooding H1-H3.
+`smoke` menjalankan tepat sembilan kondisi: ketiga metode pada H1-H3.
+Session smoke memakai suffix `-smoke`, terpisah dari command/trial main.
+Zero suppression sah; keputusan yang bertentangan dengan c/k/flag tidak sah.
 Batch menolak berjalan jika `smoke_report.json` gagal atau fingerprint
 build/config/topology berbeda. Override darurat harus eksplisit:
 
@@ -83,6 +91,7 @@ Output merger:
 - `events.json` dan `events.csv`
 - `trial_summary.csv`
 - `aggregate_by_mode_hop.csv`
+- `method_comparisons.csv` (dua perbandingan deskriptif per hop)
 - `invalid_trials.csv`
 - `attempt_summary.csv`
 
@@ -94,6 +103,39 @@ Perintah `smoke` otomatis membuat workbook di
 `<output>/merged/resqmesh_analysis.xlsx`. Perintah `merge` juga selalu membuat
 workbook yang sama di direktori output yang diberikan.
 
+Sheet `Method Parameters` menampilkan `N/A` untuk parameter yang tidak dipakai
+oleh scheduler SOS: Imin/Imax/doublings/k pada Basic; basic wait dan jitter
+300-1500 ms pada kedua varian Trickle; k sebagai batas suppression pada varian
+tanpa suppression. Trickle tetap memilih t secara acak dalam `[I/2, I)`.
+`Manifest Metadata` mempertahankan konfigurasi asli untuk audit; proyeksi tabel
+ini tidak mengubah fingerprint, manifest, atau penjadwalan. Nilai kosong berarti
+data tidak tersedia, berbeda dari `N/A`. `delivery_success` kosong untuk attempt
+INVALID/belum selesai, bukan 0; hanya FAILED_DELIVERY yang valid diberi 0.
+Jumlah allowed decision tidak harus sama dengan burst sukses: keputusan pertama
+sumber bisa terjadi sebelum t0, sedangkan awal burst suksesnya menjadi t0.
+
+Penjelasan, satuan, dan judul grafik workbook memakai bahasa Indonesia; nama
+kolom, event, metode, serta data mentah tetap dipertahankan. `Trial Order`
+menampilkan urutan dan nomor blok dari manifest, bukan membuat pengacakan baru.
+Smoke menggunakan `blocked`; batch utama menggunakan 15 blok acak, masing-masing
+sembilan kombinasi metode-hop. `Latency Diagnostics` juga menampilkan
+`source_wait_before_first_advertise_ms` dan `sos_creation_to_destination_ms` dari
+event SOS_CREATED, termasuk event sebelum t0. Kedua durasi ini diagnostik tambahan,
+bukan pengganti E2E utama. Nilai kosong jika bukti atau koreksi jam tidak tersedia.
+`Burst Diagnostics` menampilkan durasi aktual, target, dan alasan penghentian jika
+tercatat. Log lama tidak diubah untuk mengarang alasan yang tidak tercatat.
+Penghentian Android saat jendela berakhir mencatat `OBSERVATION_WINDOW_ENDED`
+pada detail ADVERTISE_BURST_ENDED; penghitung burst sukses tidak berubah.
+
+Kesempatan Trickle yang belum diputuskan ketika interval sudah berakhir dicatat
+sebagai `TRICKLE_TX_MISSED` dengan alasan `SCHEDULER_LATE`, sebelum interval
+dinormalisasi. Ini bukan suppression, allowed decision, atau burst sukses;
+`missed_opportunities_total` juga mencakup kejadian sebelum t0. Pemeriksaan timing
+menolak perpindahan interval yang teramati tanpa keputusan/missed event untuk
+interval sebelumnya (`TRICKLE_OPPORTUNITY_UNACCOUNTED`). Log lama tidak ditulis
+ulang untuk mengarang keputusan yang hilang. Timer Trickle memakai deadline
+absolut setelah logging, bukan mengulang jeda yang dihitung sebelum logging.
+
 Setelah perubahan controller, APK, atau firmware, commit perubahan terlebih
 dahulu lalu build dan flash ulang semua node dengan build ID commit yang sama.
 Smoke lama tidak boleh dipakai sebagai gate bagi build baru.
@@ -103,5 +145,5 @@ Smoke lama tidak boleh dipakai sebagai gate bagi build baru.
 - `CODE VERIFIED`: hanya setelah test source lulus.
 - `BUILD VERIFIED`: hanya setelah APK, native Android, dan firmware dibangun.
 - `DEVICE SERIAL VERIFIED`: readiness serial telah dibuktikan pengguna.
-- `DEVICE SMOKE TEST NOT RUN`: smoke enam kondisi belum dijalankan pada device.
-- `PHYSICAL MULTI-HOP NOT RUN`: H1-H3 fisik belum dijalankan.
+- `DEVICE SMOKE TEST NOT RUN`: smoke sembilan kondisi build baru belum dijalankan pada device.
+- `PHYSICAL MULTI-HOP NOT RUN`: validasi build baru dengan filter hop logis belum dijalankan.

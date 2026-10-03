@@ -20,7 +20,7 @@ from .log_merge import merge_directory
 
 
 def load_config(path: Path) -> dict[str, Any]:
-    return json.loads(path.read_text(encoding="utf-8"))
+    return json.loads(path.read_text(encoding="utf-8-sig"))
 
 
 def build_nodes(config: dict[str, Any]) -> list[NodeTransport]:
@@ -68,7 +68,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="ResQMesh physical experiment controller")
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("discover")
-    for name in ("readiness", "smoke", "run"):
+    for name in ("plan", "readiness", "smoke", "run"):
         command = subparsers.add_parser(name)
         command.add_argument("--config", type=Path, required=True)
         command.add_argument("--output", type=Path, default=Path("experiment_output"))
@@ -94,7 +94,17 @@ def main() -> int:
     except ConfigError as error:
         print(json.dumps({"ok": False, "error": str(error)}, indent=2))
         return 2
+    if args.command == "plan":
+        controller = ExperimentController(config, [], args.output)
+        controller._save_manifest()
+        print(json.dumps({"manifest": str(controller.manifest_path),
+                          "planned_trials": len(controller.manifest["trial_order"]),
+                          "target_valid_trials": controller.manifest["target_valid_trials"],
+                          "measured_trials": 0}, indent=2))
+        return 0
     if args.command == "smoke":
+        # Different command/trial IDs from the main run, even with the same fingerprint.
+        config = {**config, "session_id": f"{config.get('session_id', 'three-methods')}-smoke"}
         config["valid_trials_per_condition"] = 1
         config["max_attempts_per_condition"] = 1
         config["trial_order"] = "blocked"

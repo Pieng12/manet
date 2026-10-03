@@ -169,6 +169,9 @@ class BleWakeUpReceiver : BroadcastReceiver() {
         RangeRxTelemetry.bestEffort {
             RangeRxTelemetry.record(context, storeResult.observationId, receivedAt, primaryPhy, secondaryPhy, legacy)
         }
+        RangeRxTelemetry.bestEffort {
+            ResearchRxTelemetry.record(context, storeResult.observationId, receivedAt, receivedElapsedRealtimeMs, primaryPhy, secondaryPhy, legacy)
+        }
         if (!storeResult.shouldScheduleWorker) {
             Log.i(TAG, "BLE burst observation already processed; worker recovery not scheduled")
             return
