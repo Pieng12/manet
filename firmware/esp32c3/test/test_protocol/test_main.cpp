@@ -4,6 +4,7 @@
 
 #include "Protocol.h"
 #include "RadioConfig.h"
+#include "TrickleTiming.h"
 
 using namespace resqmesh;
 
@@ -155,10 +156,36 @@ void test_s8_options_do_not_silently_fallback() {
   TEST_ASSERT_EQUAL_UINT16(400, kRadioIntervalUnits);
 }
 
+void test_trickle_first_opportunity_is_in_second_half() {
+  for (uint32_t randomValue = 0; randomValue < 8000; randomValue++) {
+    const uint32_t offset = trickleTransmitOffset(8000, randomValue);
+    TEST_ASSERT_TRUE(offset >= 4000);
+    TEST_ASSERT_TRUE(offset < 8000);
+  }
+}
+
+void test_trickle_rejects_17ms_burst_and_stale_zero_deadline() {
+  TEST_ASSERT_FALSE(trickleTransmitDue(10017, 10000, 8000, 0));
+  TEST_ASSERT_FALSE(trickleTransmitDue(14000, 10000, 8000, 15000));
+  TEST_ASSERT_TRUE(trickleTransmitDue(15000, 10000, 8000, 15000));
+  TEST_ASSERT_FALSE(trickleTransmitDue(18000, 10000, 8000, 15000));
+}
+
+void test_trickle_deadlines_survive_millis_wraparound() {
+  const uint32_t started = UINT32_MAX - 2000;
+  const uint32_t transmit = started + 4000;
+  TEST_ASSERT_FALSE(trickleTransmitDue(started + 17, started, 8000, transmit));
+  TEST_ASSERT_TRUE(trickleTransmitDue(transmit, started, 8000, transmit));
+  TEST_ASSERT_FALSE(trickleTransmitDue(started + 8000, started, 8000, transmit));
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_extended_manufacturer_boundary_for_sos_and_ack);
   RUN_TEST(test_s8_options_do_not_silently_fallback);
+  RUN_TEST(test_trickle_first_opportunity_is_in_second_half);
+  RUN_TEST(test_trickle_rejects_17ms_burst_and_stale_zero_deadline);
+  RUN_TEST(test_trickle_deadlines_survive_millis_wraparound);
   RUN_TEST(test_round_trip_signed_coordinates_and_hop);
   RUN_TEST(test_exact_epoch_boundaries);
   RUN_TEST(test_company_id_is_removed_from_manufacturer_data);

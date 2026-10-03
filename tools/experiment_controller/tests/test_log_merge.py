@@ -14,6 +14,8 @@ from resqmesh_controller.log_merge import (
     merge_directory,
     numeric_stats,
     summarize_trial,
+    research_event_integrity_errors,
+    trickle_timing_errors,
 )
 
 
@@ -68,6 +70,50 @@ def delivery_events(*, source_time: int = 1000, destination_time: int = 1300) ->
 
 
 class LogMergeTest(unittest.TestCase):
+    def test_legacy_17ms_burst_is_flagged_from_interval_and_raw_monotonic_time(self) -> None:
+        events = [
+            trial_event('ADVERTISE_BURST_REQUESTED', monotonic_ms=9990, timestamp_ms=9990),
+            trial_event('TRICKLE_INTERVAL_STARTED', monotonic_ms=10000, timestamp_ms=10000, reason='NEW_MESSAGE'),
+            trial_event('ADVERTISE_BURST_STARTED', monotonic_ms=10017, timestamp_ms=10017),
+        ]
+        errors = trickle_timing_errors(events, valid_record())
+        self.assertIn('TRICKLE_TRANSMIT_WITHOUT_INTERVAL:R1', errors)
+        self.assertIn('TRICKLE_TRANSMIT_BEFORE_HALF_INTERVAL:R1', errors)
+
+    def test_explicit_interval_origin_avoids_using_delayed_log_time(self) -> None:
+        events = [
+            trial_event('TRICKLE_INTERVAL_STARTED', timestamp_ms=11000, monotonic_ms=11000,
+                        interval_ms=8000, interval_started_at_monotonic_ms=10000,
+                        transmit_at_monotonic_ms=14000),
+            trial_event('ADVERTISE_BURST_REQUESTED', timestamp_ms=14000, monotonic_ms=14000),
+            trial_event('ADVERTISE_BURST_STARTED', timestamp_ms=14017, monotonic_ms=14017),
+        ]
+        self.assertEqual(set(), trickle_timing_errors(events, valid_record()))
+        events[0]['transmit_at_monotonic_ms'] = 18000
+        self.assertIn('TRICKLE_TRANSMIT_TIME_INVALID:R1', trickle_timing_errors(events, valid_record()))
+
+    def test_basic_flooding_is_not_subject_to_trickle_half_interval(self) -> None:
+        events = [trial_event('ADVERTISE_BURST_STARTED', monotonic_ms=17, timestamp_ms=17)]
+        self.assertEqual(set(), trickle_timing_errors(events, valid_record(mode='basic_flooding')))
+
+    def test_new_firmware_requires_interval_timing_metadata(self) -> None:
+        events = [trial_event('TRICKLE_INTERVAL_STARTED', monotonic_ms=10000, timestamp_ms=10000),
+                  trial_event('TRICKLE_TX_SUPPRESSED', monotonic_ms=14000, timestamp_ms=14000)]
+        errors = trickle_timing_errors(events, valid_record(require_trickle_timing_metadata=True,
+                                                           event_sequence_node_ids=['R1']))
+        self.assertIn('TRICKLE_TIMING_METADATA_MISSING:R1', errors)
+
+    def test_aligned_window_uses_corrected_source_time_and_exact_duration(self) -> None:
+        events = delivery_events()
+        events[0]['clock_offset_ms'] = 2000
+        record = valid_record(observation_window_basis='SOURCE_FIRST_ADVERTISE_STARTED',
+                              observation_started_at_ms=3000, observation_ended_at_ms=4000)
+        self.assertEqual(set(), research_event_integrity_errors(events, record))
+        record['observation_started_at_ms'] = 2990
+        errors = research_event_integrity_errors(events, record)
+        self.assertIn('OBSERVATION_WINDOW_SOURCE_START_MISMATCH', errors)
+        self.assertIn('OBSERVATION_WINDOW_DURATION_MISMATCH', errors)
+
     def test_state_identity_normalizes_protocol_seconds_to_milliseconds(self) -> None:
         self.assertEqual(
             "2110340604:1790450822000:1:0:0",

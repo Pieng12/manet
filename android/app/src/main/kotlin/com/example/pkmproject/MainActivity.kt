@@ -121,6 +121,16 @@ class MainActivity : FlutterActivity() {
                     "configureBleRadio" -> {
                         result.success(NativeBleRadio.configure(this, call.argument<String>("mode") ?: CodedRadioPolicy.CODED))
                     }
+                    "configureRangeTelemetry" -> {
+                        RangeRxTelemetry.configure(this, call.argument<String>("runId") ?: "", call.argument<Number>("until")?.toLong() ?: 0)
+                        result.success(true)
+                    }
+                    "getRangeRxTelemetry" -> result.success(RangeRxTelemetry.snapshot(this))
+                    "setRangeScreenAwake" -> {
+                        if (call.argument<Boolean>("enabled") == true) window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                        else window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                        result.success(true)
+                    }
                     "getDeviceMetadata" -> {
                         result.success(deviceMetadata())
                     }

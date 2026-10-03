@@ -3,13 +3,16 @@
 #include <NimBLEDevice.h>
 #include <Preferences.h>
 #include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
 #include <freertos/semphr.h>
 
 #include <array>
+#include <atomic>
 #include <string>
 
 #include "Protocol.h"
 #include "CodedRadio.h"
+#include "TrickleTiming.h"
 
 #ifndef RESQMESH_FIRMWARE_BUILD_ID
 #error "RESQMESH_FIRMWARE_BUILD_ID must be injected by the PlatformIO build"
@@ -57,6 +60,7 @@ struct SchedulerState {
   bool waitingIntervalEnd = false;
   bool advertising = false;
   bool firstAdvertiseStarted = false;
+  uint64_t firstAdvertiseStartedAtMs = 0;
   uint32_t burstEndsAt = 0;
   String burstId;
 };
@@ -77,8 +81,21 @@ String serialBuffer;
 ObservationTracker observationTracker(kDefaultRxBurstGapMs);
 SemaphoreHandle_t serialOutputMutex = nullptr;
 
+struct ReceivedPacket {
+  Packet packet;
+  int rssi;
+  char advertiser[18];
+  uint32_t receivedAt;
+  uint32_t generation;
+};
+
+QueueHandle_t receivedPackets = nullptr;
+std::atomic<uint32_t> receiveGeneration{0};
+std::atomic<uint32_t> receiveOverflow{0};
+std::atomic<bool> receiveEnabled{false};
+
 bool due(uint32_t now, uint32_t deadline) {
-  return static_cast<int32_t>(now - deadline) >= 0;
+  return deadlineReached(now, deadline);
 }
 
 const char* roleName(Role role) {
@@ -118,7 +135,8 @@ uint64_t wallTimeMs() {
 void emit(const char* eventType, const Packet* packet = nullptr,
           const char* reason = nullptr, int rssi = 0,
           const String& observationId = String(),
-          const String& burstId = String()) {
+          const String& burstId = String(),
+          const uint32_t* physicalReceivedAt = nullptr) {
   if (serialOutputMutex != nullptr) {
     xSemaphoreTake(serialOutputMutex, portMAX_DELAY);
   }
@@ -135,11 +153,22 @@ void emit(const char* eventType, const Packet* packet = nullptr,
       strcmp(eventType, "SERVICE_STARTED") == 0) {
     radio.telemetry(document["radio"].to<JsonObject>());
   }
-  document["monotonic_ms"] = millis();
-  if (wallClockValid) document["timestamp_ms"] = wallTimeMs();
+  const uint32_t eventTime =
+      physicalReceivedAt != nullptr ? *physicalReceivedAt : millis();
+  document["monotonic_ms"] = eventTime;
+  if (wallClockValid) document["timestamp_ms"] = wallOffsetMs + eventTime;
   document["clock_sync_valid"] = wallClockValid;
   if (wallClockValid) document["clock_offset_ms"] = 0;
   if (reason != nullptr) document["reason"] = reason;
+  if (config.mode == Mode::Trickle && scheduler.hasPacket &&
+      (strncmp(eventType, "TRICKLE_", 8) == 0 ||
+       strncmp(eventType, "ADVERTISE_BURST_", 16) == 0)) {
+    document["interval_ms"] = scheduler.intervalMs;
+    document["interval_started_at_monotonic_ms"] = scheduler.intervalStartedAt;
+    document["transmit_at_monotonic_ms"] = scheduler.transmitAt;
+    document["interval_end_at_monotonic_ms"] = scheduler.intervalEndAt;
+    document["consistency_count"] = scheduler.consistencyCount;
+  }
   if (!observationId.isEmpty()) document["observation_id"] = observationId;
   if (!burstId.isEmpty()) document["burst_id"] = burstId;
   if (rssi != 0) document["rssi"] = rssi;
@@ -224,6 +253,10 @@ void resumeScanner() {
 }
 
 void clearProtocolState() {
+  receiveEnabled.store(false);
+  receiveGeneration.fetch_add(1);
+  receiveOverflow.store(0);
+  if (receivedPackets != nullptr) xQueueReset(receivedPackets);
   if (scheduler.advertising && advertising != nullptr) advertising->stop();
   resumeScanner();
   scheduler = SchedulerState();
@@ -244,8 +277,9 @@ void cancelActiveBurst(const char* reason) {
 void chooseTrickleTransmit(uint32_t now, const char* reason) {
   scheduler.intervalStartedAt = now;
   scheduler.intervalEndAt = now + scheduler.intervalMs;
-  const uint32_t half = scheduler.intervalMs / 2;
-  scheduler.transmitAt = now + half + random(0, scheduler.intervalMs - half);
+  scheduler.transmitAt = now + trickleTransmitOffset(
+      scheduler.intervalMs,
+      random(0, scheduler.intervalMs - scheduler.intervalMs / 2));
   scheduler.consistencyCount = 0;
   scheduler.waitingIntervalEnd = false;
   emit("TRICKLE_INTERVAL_STARTED", &scheduler.packet, reason);
@@ -262,7 +296,8 @@ void scheduleNewState(const char* reason) {
   }
 }
 
-void storeForRelay(const Packet& incoming, const char* reason) {
+void storeForRelay(const Packet& incoming, const char* reason,
+                   const uint32_t* receivedAt = nullptr) {
   scheduler.packet = incoming;
   if (config.role == Role::Relay) {
     scheduler.packet.hop =
@@ -273,7 +308,8 @@ void storeForRelay(const Packet& incoming, const char* reason) {
   persistPacket();
   emit("BLE_PACKET_ACCEPTED", &incoming, reason);
   if (config.role == Role::Destination) {
-    emit("DESTINATION_FIRST_VALID_RECEIVE", &incoming);
+    emit("DESTINATION_FIRST_VALID_RECEIVE", &incoming, nullptr, 0,
+         String(), String(), receivedAt);
     return;
   }
   if (config.role == Role::Relay) {
@@ -293,13 +329,13 @@ void recordConsistent(const Packet& incoming, const String& observationId) {
 }
 
 void processPacket(const Packet& incoming, int rssi,
-                   const String& advertiser) {
-  const uint32_t now = millis();
+                   const String& advertiser, uint32_t now) {
   const ObservationDecision decision = observationTracker.observe(
       config.nodeId.c_str(), advertiser.c_str(), stateIdentity(incoming), now);
   if (!decision.isNew) return;
   const String observation(decision.observationId.c_str());
-  emit("BLE_PACKET_RECEIVED", &incoming, nullptr, rssi, observation);
+  emit("BLE_PACKET_RECEIVED", &incoming, nullptr, rssi, observation,
+       String(), &now);
 
   if (!config.protocolActive || config.role == Role::Source ||
       !due(now, quietUntil)) {
@@ -339,12 +375,14 @@ void processPacket(const Packet& incoming, int rssi,
          observation);
     return;
   }
-  storeForRelay(incoming, sameMessage ? "NEW_STATE" : "NEW_MESSAGE");
+  storeForRelay(incoming, sameMessage ? "NEW_STATE" : "NEW_MESSAGE", &now);
 }
 
 class ScanCallbacks : public NimBLEScanCallbacks {
   void onResult(const NimBLEAdvertisedDevice* device) override {
-    if (!observationWindowOpen) return;
+    const uint32_t generation = receiveGeneration.load();
+    if (!receiveEnabled.load()) return;
+    const uint32_t receivedAt = millis();
     if (!device->haveManufacturerData()) return;
     const std::string data = device->getManufacturerData();
     std::array<uint8_t, kPayloadLength> payload{};
@@ -355,12 +393,46 @@ class ScanCallbacks : public NimBLEScanCallbacks {
     }
     Packet packet;
     if (!decode(payload.data(), payload.size(), packet)) return;
-    processPacket(packet, device->getRSSI(), String(device->getAddress().toString().c_str()));
+    ReceivedPacket received{};
+    received.packet = packet;
+    received.rssi = device->getRSSI();
+    received.receivedAt = receivedAt;
+    received.generation = generation;
+    const std::string address = device->getAddress().toString();
+    snprintf(received.advertiser, sizeof(received.advertiser), "%s", address.c_str());
+    // The NimBLE task never reads or mutates scheduler/configuration state.
+    if (xQueueSend(receivedPackets, &received, 0) != pdTRUE) {
+      receiveOverflow.fetch_add(1);
+    }
   }
 };
 
+void drainReceivedPackets() {
+  const uint32_t dropped = receiveOverflow.exchange(0);
+  if (dropped > 0 && observationWindowOpen) {
+    emit("EXPERIMENT_CONFIG_VIOLATION", nullptr, "RX_QUEUE_OVERFLOW");
+  }
+  ReceivedPacket received;
+  for (size_t count = 0;
+       count < 64 && xQueueReceive(receivedPackets, &received, 0) == pdTRUE;
+       count++) {
+    if (!observationWindowOpen || received.generation != receiveGeneration.load()) {
+      continue;
+    }
+    processPacket(received.packet, received.rssi, String(received.advertiser),
+                  received.receivedAt);
+  }
+}
+
 void startBurst() {
   if (!scheduler.hasPacket || advertising == nullptr) return;
+  // Recheck after scheduler logging; its serial output can cross an interval end.
+  if (config.mode == Mode::Trickle &&
+      (scheduler.waitingIntervalEnd ||
+       !trickleTransmitDue(millis(), scheduler.intervalStartedAt,
+                           scheduler.intervalMs, scheduler.transmitAt))) {
+    return;
+  }
   scheduler.burstId = config.nodeId + "-" + String(millis()) + "-" +
                       String(++burstSequence);
   std::array<uint8_t, kPayloadLength> payload{};
@@ -389,12 +461,14 @@ void startBurst() {
     return;
   }
   scheduler.advertising = true;
-  scheduler.burstEndsAt = millis() + kBurstMs;
+  const uint32_t succeededAt = millis();
+  scheduler.burstEndsAt = succeededAt + kBurstMs;
   emit("ADVERTISE_BURST_STARTED", &scheduler.packet, nullptr, 0, String(),
-       scheduler.burstId);
+       scheduler.burstId, &succeededAt);
   if (!scheduler.firstAdvertiseStarted && config.role == Role::Source) {
+    scheduler.firstAdvertiseStartedAtMs = wallOffsetMs + succeededAt;
     emit("SOURCE_FIRST_ADVERTISE_STARTED", &scheduler.packet, nullptr, 0,
-         String(), scheduler.burstId);
+         String(), scheduler.burstId, &succeededAt);
   }
   scheduler.firstAdvertiseStarted = true;
   emit("BLE_RELAY_STARTED", &scheduler.packet, nullptr, 0, String(),
@@ -428,11 +502,16 @@ void tickScheduler() {
     if (due(now, scheduler.burstEndsAt)) finishBurst();
     return;
   }
-  if (!due(now, scheduler.transmitAt)) return;
-
-  if (config.mode == Mode::Trickle && scheduler.waitingIntervalEnd) {
+  if (config.mode == Mode::Trickle && due(now, scheduler.intervalEndAt)) {
     scheduler.intervalMs = min(scheduler.intervalMs * 2, kImaxMs);
     chooseTrickleTransmit(now, "INTERVAL_ADVANCED");
+    return;
+  }
+  if (!due(now, scheduler.transmitAt)) return;
+  if (config.mode == Mode::Trickle &&
+      (scheduler.waitingIntervalEnd ||
+       !trickleTransmitDue(now, scheduler.intervalStartedAt,
+                           scheduler.intervalMs, scheduler.transmitAt))) {
     return;
   }
   if (config.mode == Mode::Trickle && scheduler.consistencyCount >= 1) {
@@ -440,6 +519,9 @@ void tickScheduler() {
     scheduler.waitingIntervalEnd = true;
     scheduler.transmitAt = scheduler.intervalEndAt;
     return;
+  }
+  if (config.mode == Mode::Trickle) {
+    emit("TRICKLE_TX_ALLOWED", &scheduler.packet, "C_LT_K");
   }
   startBurst();
 }
@@ -459,6 +541,11 @@ void emitReadiness(const String& commandId) {
   document["session_id"] = config.sessionId;
   document["trial_id"] = config.trialId;
   document["role"] = roleName(config.role);
+  if (scheduler.firstAdvertiseStartedAtMs != 0 && config.role == Role::Source) {
+    document["source_first_advertise_started_at_ms"] =
+        scheduler.firstAdvertiseStartedAtMs;
+    document["source_first_advertise_message_key"] = messageKey(scheduler.packet);
+  }
   document["mode"] = modeName(config.mode);
   document["protocol_active"] = config.protocolActive;
   document["expected_hop_in"] = config.expectedHopIn;
@@ -480,6 +567,7 @@ void emitReadiness(const String& commandId) {
           ? static_cast<double>(epochEndSeconds() + 1 - nowSeconds) / 86400.0
           : 0;
   document["payload_length"] = kPayloadLength;
+  document["measurement_timing_version"] = 2;
   document["manufacturer_id"] = kManufacturerId;
   document["rx_burst_gap_ms"] = config.rxBurstGapMs;
   document["observation_window_open"] = observationWindowOpen;
@@ -585,13 +673,17 @@ void handleCommand(const String& line) {
     observationWindowOpen = true;
     persistConfig();
     emit("TRIAL_WINDOW_STARTED");
+    receiveEnabled.store(true);
     respond(command, commandId, true);
     return;
   }
   if (command == "end_observation_window") {
     if (observationWindowOpen) {
+      receiveEnabled.store(false);
+      drainReceivedPackets();
       cancelActiveBurst("OBSERVATION_WINDOW_ENDED");
       observationWindowOpen = false;
+      receiveGeneration.fetch_add(1);
       emit("TRIAL_WINDOW_ENDED");
     }
     respond(command, commandId, true);
@@ -665,6 +757,8 @@ void loadPersistentState() {
 
 void setup() {
   serialOutputMutex = xSemaphoreCreateMutex();
+  receivedPackets = xQueueCreate(64, sizeof(ReceivedPacket));
+  configASSERT(receivedPackets != nullptr);
   Serial.setRxBufferSize(kSerialRxBufferBytes);
   Serial.begin(115200);
   delay(300);
@@ -695,6 +789,7 @@ void loop() {
       serialBuffer += value;
     }
   }
+  drainReceivedPackets();
   tickScheduler();
   delay(5);
 }

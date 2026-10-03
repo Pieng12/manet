@@ -126,6 +126,23 @@ def research_event_integrity_errors(
     record: dict[str, Any],
 ) -> set[str]:
     errors: set[str] = set()
+    errors.update(trickle_timing_errors(events, record))
+    if record.get("observation_window_basis") == "SOURCE_FIRST_ADVERTISE_STARTED":
+        starts = [
+            value for event in events
+            if event.get("event_type") == "SOURCE_FIRST_ADVERTISE_STARTED"
+            and event.get("node_id", event.get("device_id")) == record.get("source_node_id")
+            and canonical_message_key(event.get("message_key")) == canonical_message_key(record.get("message_key"))
+            if (value := _timestamp(event)) is not None
+        ]
+        if not starts or record.get("observation_started_at_ms") != min(starts):
+            errors.add("OBSERVATION_WINDOW_SOURCE_START_MISMATCH")
+        try:
+            duration = int(record["observation_ended_at_ms"]) - int(record["observation_started_at_ms"])
+        except (KeyError, TypeError, ValueError):
+            duration = None
+        if duration != record.get("observation_window_ms") or duration is None:
+            errors.add("OBSERVATION_WINDOW_DURATION_MISMATCH")
     if record.get("require_event_sequence") is True:
         for node_id in record.get("event_sequence_node_ids", []):
             node_events = [
@@ -182,6 +199,69 @@ def research_event_integrity_errors(
             burst_id = event.get("burst_id")
             if burst_id in (None, "") or (node_id, burst_id) not in terminal_bursts:
                 errors.add(f"BURST_TERMINAL_EVENT_MISSING:{node_id}")
+    return errors
+
+
+def trickle_timing_errors(
+    events: list[dict[str, Any]], record: dict[str, Any]
+) -> set[str]:
+    if record.get("mode") != "trickle":
+        return set()
+    errors: set[str] = set()
+    by_node: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for event in events:
+        if event.get("packet_type", "sos") == "sos":
+            by_node[str(event.get("node_id", event.get("device_id")))].append(event)
+    strict_nodes = set(record.get("event_sequence_node_ids", []))
+    strict = record.get("require_trickle_timing_metadata") is True
+    for node, values in by_node.items():
+        interval: dict[str, Any] | None = None
+        inferred_i = 8000
+        has_interval = any(e.get("event_type") == "TRICKLE_INTERVAL_STARTED" for e in values)
+        values.sort(key=lambda e: (int(e.get("event_timestamp_ms", e.get("timestamp_ms", 0)) or 0),
+                                   int(e.get("event_sequence", e.get("id", 0)) or 0)))
+        for event in values:
+            kind = event.get("event_type")
+            if kind == "TRICKLE_INTERVAL_STARTED":
+                try:
+                    detail = json.loads(event.get("detail_json") or "{}")
+                    duration = event.get("interval_ms", detail.get("I"))
+                    started = event.get("interval_started_at_monotonic_ms", detail.get("interval_started_at"))
+                    transmit = event.get("transmit_at_monotonic_ms", detail.get("transmit_at"))
+                    if duration is not None and started is not None and transmit is not None:
+                        duration, started, transmit = int(duration), int(started), int(transmit)
+                        offset = (transmit - started) & 0xFFFFFFFF
+                        if not 8000 <= duration <= 256000 or not duration // 2 <= offset < duration:
+                            errors.add(f"TRICKLE_TRANSMIT_TIME_INVALID:{node}")
+                        interval = {"duration": duration, "started": started, "clock": "monotonic"}
+                    else:
+                        if strict and node in strict_nodes:
+                            errors.add(f"TRICKLE_TIMING_METADATA_MISSING:{node}")
+                        inferred_i = min(inferred_i * 2, 256000) if event.get("reason") == "INTERVAL_ADVANCED" else 8000
+                        interval = {"duration": inferred_i,
+                                    "started": event.get("monotonic_ms", event.get("timestamp_ms")),
+                                    "clock": "monotonic" if "monotonic_ms" in event else "wall"}
+                except (TypeError, ValueError):
+                    errors.add(f"TRICKLE_TIMING_METADATA_INVALID:{node}")
+                    interval = None
+            elif kind in {"ADVERTISE_BURST_REQUESTED", "ADVERTISE_BURST_STARTED", "TRICKLE_TX_ALLOWED", "TRICKLE_TX_SUPPRESSED"}:
+                if interval is None:
+                    if strict or has_interval:
+                        errors.add(f"TRICKLE_TRANSMIT_WITHOUT_INTERVAL:{node}")
+                    continue
+                observed = (event.get("monotonic_ms", event.get("elapsed_realtime_ms"))
+                            if interval["clock"] == "monotonic" else event.get("timestamp_ms"))
+                if observed is None:
+                    # Dart decision events have the chosen time in detail_json, not a native clock sample.
+                    if strict and node in strict_nodes:
+                        errors.add(f"TRICKLE_TIMING_METADATA_MISSING:{node}")
+                    continue
+                age = (int(observed) - int(interval["started"])) & 0xFFFFFFFF
+                if age < interval["duration"] // 2:
+                    errors.add(f"TRICKLE_TRANSMIT_BEFORE_HALF_INTERVAL:{node}")
+                # A native success callback may finish after the decision's interval boundary.
+                if kind != "ADVERTISE_BURST_STARTED" and age >= interval["duration"]:
+                    errors.add(f"TRICKLE_DECISION_AFTER_INTERVAL:{node}")
     return errors
 
 

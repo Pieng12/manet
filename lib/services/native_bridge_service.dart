@@ -114,6 +114,22 @@ class NativeBridgeService {
     return Map<String, dynamic>.from(result ?? {});
   }
 
+  static Future<void> configureRangeTelemetry(String runId, int until) async {
+    await _platform.invokeMethod('configureRangeTelemetry', {
+      'runId': runId,
+      'until': until,
+    });
+  }
+
+  static Future<Map<String, dynamic>> getRangeRxTelemetry() async {
+    final value = await _platform.invokeMethod<Map>('getRangeRxTelemetry');
+    return Map<String, dynamic>.from(value ?? {});
+  }
+
+  static Future<void> setRangeScreenAwake(bool enabled) async {
+    await _platform.invokeMethod('setRangeScreenAwake', {'enabled': enabled});
+  }
+
   static Future<bool> hasPendingRelayWork() async {
     try {
       return await _platform.invokeMethod<bool>('hasPendingRelayWork') ?? false;

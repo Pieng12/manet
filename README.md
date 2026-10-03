@@ -32,6 +32,16 @@ sudah tersedia:
 - Firmware ESP32-C3 generik berbasis PlatformIO/NimBLE dan controller Python
   untuk readiness, smoke test, resume trial, serta penggabungan log lintas-node.
 
+## Pilot Uji Jarak Coded
+
+Research Monitor menyediakan tab **UJI JARAK** untuk satu ESP sumber dan Android
+penerima: posisi sumber, GPS HP, estimasi jarak horizontal, RSSI/PHY RX aktual,
+dan pengamatan 60 detik. Script laptop mengirim selama 20 menit dan memverifikasi
+penghentian ESP; arsip serta workbook pilot terpisah dari smoke dan 90 trial.
+Ikuti [panduan lengkap](docs/coded_range_test.md). Membutuhkan APK baru, bukan
+firmware baru. Tidak mengubah payload, algoritma/scheduler atau metrik penelitian;
+validasi fisik pilot ini masih harus dilakukan pada perangkat.
+
 ## Arsitektur
 
 ```text
@@ -363,3 +373,13 @@ memeriksa dukungan HCI V2 sebelum menerima `coded_s8_required`; mode biasa
 Panduan build, instalasi dan matriks validasi perangkat:
 [Extended Coded Windows](docs/coded_radio_windows.md). Eksperimen baru memerlukan
 APK/firmware baru dan sesi/output baru; data legacy tidak ditulis ulang.
+
+## Timing Pengukuran v2
+
+Firmware memproses RX dan scheduler hanya pada loop, sehingga task scan tidak
+dapat memulai relay memakai deadline lama. Kesempatan Trickle tetap `[I/2, I)`.
+Jendela metrik controller dimulai pada callback sukses TX pertama sumber,
+bukan sebelum trigger SOS. APK/firmware harus melaporkan
+`measurement_timing_version=2`; smoke baru wajib sebelum batch baru.
+Rumus metrik, Basic Flooding, payload 17 byte dan dataset lama tidak diubah.
+Lihat [protokol eksperimen](docs/experiment_protocol.md).

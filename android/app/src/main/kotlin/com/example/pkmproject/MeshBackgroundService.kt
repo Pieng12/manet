@@ -386,6 +386,12 @@ class MeshBackgroundService : Service() {
                     "configureBleRadio" -> {
                         result.success(NativeBleRadio.configure(this, call.argument<String>("mode") ?: CodedRadioPolicy.CODED))
                     }
+                    "configureRangeTelemetry" -> {
+                        RangeRxTelemetry.configure(this, call.argument<String>("runId") ?: "", call.argument<Number>("until")?.toLong() ?: 0)
+                        result.success(true)
+                    }
+                    "getRangeRxTelemetry" -> result.success(RangeRxTelemetry.snapshot(this))
+                    "setRangeScreenAwake" -> result.success(false)
                     "setResearchRxBurstGapMs" -> {
                         val value = call.argument<Number>("rxBurstGapMs")?.toLong() ?: 0L
                         NativeBleConfig.setRxBurstGapMs(this, value)

@@ -141,11 +141,41 @@ void main() {
     expect(epoch['representable_end'], isNotNull);
     expect(epoch['remaining_days'], greaterThan(0));
     expect(epoch['valid'], isTrue);
+    expect(result['measurement_timing_version'], 2);
     expect(
       result['rx_burst_gap_ms'],
       MeshConfig.defaultRxBurstGap.inMilliseconds,
     );
   });
+
+  test(
+    'status exposes only the current trial physical source callback',
+    () async {
+      await commands.execute('configure_session', configureArgs());
+      await commands.execute('start_trial', {
+        'command_id': 'start-status',
+        'session_id': 'session-external',
+        'trial_id': 'trial-status',
+        'trial_code': 'H2-STATUS',
+      });
+      final initial = await commands.execute('get_status', const {});
+      expect(initial['source_first_advertise_started_at_ms'], isNull);
+      for (final trialId in ['previous-trial', 'trial-status']) {
+        await db.insert('experiment_events', {
+          'session_id': 'session-external',
+          'trial_id': trialId,
+          'event_type': ExperimentEventTypes.sourceFirstAdvertiseStarted,
+          'timestamp_ms': 9000,
+          'event_timestamp_ms': trialId == 'trial-status' ? 1234 : 1000,
+          'message_key': trialId == 'trial-status' ? '100:200' : 'old:state',
+        });
+      }
+      final result = await commands.execute('get_status', const {});
+      expect(result['source_first_advertise_started_at_ms'], 1234);
+      expect(result['source_first_advertise_message_key'], '100:200');
+      expect(result['trial_id'], 'trial-status');
+    },
+  );
 
   test(
     'explicit coded radio configuration is recorded and preserves readiness metadata',

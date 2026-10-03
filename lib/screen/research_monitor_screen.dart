@@ -14,6 +14,7 @@ import 'package:pkmproject/services/research_metrics_service.dart';
 import 'package:pkmproject/services/research_session_service.dart';
 import 'package:pkmproject/sync_service.dart';
 import 'package:pkmproject/widgets/resq_ui.dart';
+import 'package:pkmproject/widgets/range_test_tab.dart';
 
 class ResearchMonitorScreen extends StatefulWidget {
   const ResearchMonitorScreen({super.key});
@@ -63,7 +64,7 @@ class _ResearchMonitorScreenState extends State<ResearchMonitorScreen>
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 5, vsync: this);
+    _tabController = TabController(length: 6, vsync: this);
     _refresh();
     _refreshTimer = Timer.periodic(const Duration(seconds: 2), (_) {
       _refresh();
@@ -152,6 +153,7 @@ class _ResearchMonitorScreenState extends State<ResearchMonitorScreen>
             Tab(icon: Icon(Icons.assignment), text: 'TRIAL'),
             Tab(icon: Icon(Icons.timeline), text: 'EVENTS'),
             Tab(icon: Icon(Icons.memory), text: 'SYSTEM'),
+            Tab(icon: Icon(Icons.route), text: 'UJI JARAK'),
           ],
         ),
       ),
@@ -165,6 +167,7 @@ class _ResearchMonitorScreenState extends State<ResearchMonitorScreen>
                 _buildTrialTab(),
                 _buildEventsTab(),
                 _buildSystemTab(),
+                const RangeTestTab(),
               ],
             ),
     );

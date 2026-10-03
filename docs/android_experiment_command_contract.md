@@ -16,6 +16,28 @@ adb logcat -s ResQMeshCommand:I
 Semua command mutasi wajib memiliki `command_id` unik. Pengulangan
 `command_id` yang sama mengembalikan hasil tersimpan dan tidak mengulang efek.
 
+## Range Pilot Diagnostics
+
+Command pilot berikut menggunakan `command_id` unik dan tidak mengambil alih
+scheduler BLE. Gunakan [tools/range_test.ps1](../tools/range_test.ps1) untuk
+quoting Android shell yang benar dan penantian respons **final**, bukan hanya
+`accepted:true` dari receiver.
+
+| Command | Argumen | Hasil |
+| --- | --- | --- |
+| `configure_range_test` | `run_id`, `session_id`, `trial_id`, `source_sender_crc` (long), `source_timestamp_ms` (long), optional koordinat sumber | Profil prepared, identitas SOS aktif/hop 1 dikunci |
+| `configure_range_test` | `run_id`, `action=start` | Running 20 menit setelah posisi sumber dan baseline PHY aktual lolos |
+| `configure_range_test` | `run_id`, `action=finish` | Pengamatan aktif dibatalkan sebelum koleksi; tidak menghentikan ESP dari HP |
+| `get_range_test_status` | `command_id` | Status ringkas, baseline, last RX/GPS, jumlah data, trial asal dan maksimal 5 trial belum final |
+| `export_range_test` | `command_id` | `run_id`, `json_path` untuk arsip lengkap pada storage aplikasi |
+
+Data panjang tidak dimasukkan ke respons logcat: seluruh event, track GPS, titik,
+dan diagnostik berada di file export. Source CRC/timestamp/type/hop dicocokkan
+terhadap canonical BLE_PACKET_RECEIVED, termasuk logical duplicate. Timer titik
+dimiliki UI foreground; isolate command hanya membaca/mengarsipkan state.
+Database protokol tetap versi 14; pilot menggunakan database terpisah.
+Langkah lengkap tersedia pada [panduan uji jarak](coded_range_test.md).
+
 ## Configure Session
 
 ```powershell
@@ -60,4 +82,11 @@ mode, session, trial, ukuran queue, error native terakhir, serta
 `protocol_epoch` yang berisi ID, awal, akhir representasi, sisa hari, dan
 validitas. `start_trial` dan `trigger_sos` gagal dengan
 `PROTOCOL_EPOCH_OUT_OF_RANGE` jika epoch 24-bit sudah tidak valid.
+
+Readiness/get_status juga memuat `measurement_timing_version=2`.
+Untuk SOURCE, `source_first_advertise_started_at_ms` dan
+`source_first_advertise_message_key` berasal dari event canonical callback
+sukses pada session/trial saat ini. Nilainya null sebelum callback, bukan waktu
+enqueue, trigger, atau request advertising. Controller mengoreksi clock ini
+untuk mengunci awal jendela observasi dan tetap mengekspor semua event mentah.
 

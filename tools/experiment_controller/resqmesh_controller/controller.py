@@ -159,6 +159,8 @@ class ExperimentController:
         epoch = result.get("protocol_epoch", result)
         if result.get("ok") is not True:
             errors.append("ok=false")
+        if result.get("measurement_timing_version") != 2:
+            errors.append("measurement_timing_version=2 required; update APK/firmware")
         node_config = next(item for item in self.config["nodes"] if item["node_id"] == node.node_id)
         requested_radio = node_config.get("radio_mode", self.config.get("radio_mode"))
         radio = result.get("radio")
@@ -542,6 +544,35 @@ class ExperimentController:
             "events_outside_window": len(events) - len(metric_events),
         }
 
+    def _wait_for_source_start(
+        self, source: NodeTransport, spec: TrialSpec, message_key: str | None
+    ) -> int:
+        deadline = time.monotonic() + 60
+        poll = 0
+        while time.monotonic() < deadline:
+            poll += 1
+            status = source.command("get_status", {
+                "command_id": self._command_id("source-start", spec.trial_id, str(poll)),
+            })
+            if status.get("ok") is not True:
+                raise DeviceError(f"source status failed: {status}")
+            if (status.get("session_id") != self.manifest["session_id"]
+                    or status.get("trial_id") != self._device_trial_id(spec)):
+                raise DeviceError("SOURCE_START_STATUS_SCOPE_MISMATCH")
+            value = status.get("source_first_advertise_started_at_ms")
+            if value is not None:
+                if canonical_message_key(status.get("source_first_advertise_message_key")) != message_key:
+                    raise DeviceError("SOURCE_START_MESSAGE_KEY_MISMATCH")
+                started_at = int(round(float(value) + self.clock_offsets.get(source.node_id, 0.0)))
+                record = self.manifest["trials"][spec.trial_id]
+                tolerance = int(self.config["clock_tolerance_ms"])
+                if not (record["trigger_requested_at_ms"] - tolerance <= started_at
+                        <= time.time_ns() // 1_000_000 + tolerance):
+                    raise DeviceError("SOURCE_START_TIMESTAMP_INVALID")
+                return started_at
+            self.sleep(0.25)
+        raise DeviceError("SOURCE_FIRST_ADVERTISE_STARTED_TIMEOUT")
+
     def run_trial(self, spec: TrialSpec) -> dict[str, Any]:
         previous = self.manifest["trials"].get(spec.trial_id)
         if previous and previous.get("terminal") is True:
@@ -585,6 +616,8 @@ class ExperimentController:
             "rx_burst_gap_ms": int(self.config["rx_burst_gap_ms"]),
             "require_event_sequence": True,
             "require_complete_event_cycles": True,
+            "require_trickle_timing_metadata": True,
+            "observation_window_basis": "SOURCE_FIRST_ADVERTISE_STARTED",
             "event_sequence_node_ids": sorted(
                 node.node_id for node in self.nodes if node.transport == "serial"
             ),
@@ -615,12 +648,7 @@ class ExperimentController:
             observation_window_ms = int(
                 float(self.config["observation_window_seconds"]) * 1000
             )
-            observation_started_at_ms = time.time_ns() // 1_000_000
-            observation_deadline = time.monotonic() + (observation_window_ms / 1000)
-            record["observation_started_at_ms"] = observation_started_at_ms
-            record["observation_ended_at_ms"] = (
-                observation_started_at_ms + observation_window_ms
-            )
+            record["trigger_requested_at_ms"] = time.time_ns() // 1_000_000
             self._save_manifest()
             trigger = sources[0].command(
                 "trigger_sos",
@@ -635,6 +663,17 @@ class ExperimentController:
             if trigger.get("ok") is not True:
                 raise DeviceError(f"trigger failed: {trigger}")
             record["message_key"] = canonical_message_key(trigger.get("message_key"))
+            self._save_manifest()
+            observation_started_at_ms = self._wait_for_source_start(
+                sources[0], spec, record["message_key"]
+            )
+            record["observation_started_at_ms"] = observation_started_at_ms
+            record["observation_ended_at_ms"] = observation_started_at_ms + observation_window_ms
+            # Polling latency never moves the physical start or grants extra observation time.
+            remaining_ms = record["observation_ended_at_ms"] - time.time_ns() // 1_000_000
+            if remaining_ms <= 0:
+                raise DeviceError("SOURCE_START_DISCOVERED_AFTER_OBSERVATION_WINDOW")
+            observation_deadline = time.monotonic() + remaining_ms / 1000
             self._save_manifest()
             self.sleep(max(0.0, observation_deadline - time.monotonic()))
             record["observation_stop_command_at_ms"] = time.time_ns() // 1_000_000

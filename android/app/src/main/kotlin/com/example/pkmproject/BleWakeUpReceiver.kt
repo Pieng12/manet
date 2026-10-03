@@ -81,7 +81,10 @@ class BleWakeUpReceiver : BroadcastReceiver() {
                 deviceAddress,
                 scanResult.rssi,
                 observedWallTimeMs,
-                observedElapsedRealtimeMs
+                observedElapsedRealtimeMs,
+                if (Build.VERSION.SDK_INT >= 26) scanResult.primaryPhy else null,
+                if (Build.VERSION.SDK_INT >= 26) scanResult.secondaryPhy else null,
+                if (Build.VERSION.SDK_INT >= 26) scanResult.isLegacy else null
             )
         }
     }
@@ -128,7 +131,10 @@ class BleWakeUpReceiver : BroadcastReceiver() {
         deviceAddress: String,
         rssi: Int,
         receivedAt: Long,
-        receivedElapsedRealtimeMs: Long
+        receivedElapsedRealtimeMs: Long,
+        primaryPhy: Int?,
+        secondaryPhy: Int?,
+        legacy: Boolean?
     ) {
         var startIndex = -1
         for (i in 0 until rawPayload.size - 1) {
@@ -159,6 +165,10 @@ class BleWakeUpReceiver : BroadcastReceiver() {
             receivedAt,
             receivedElapsedRealtimeMs
         )
+        // Diagnostic sidecar failures must never gate durable inbox processing.
+        RangeRxTelemetry.bestEffort {
+            RangeRxTelemetry.record(context, storeResult.observationId, receivedAt, primaryPhy, secondaryPhy, legacy)
+        }
         if (!storeResult.shouldScheduleWorker) {
             Log.i(TAG, "BLE burst observation already processed; worker recovery not scheduled")
             return

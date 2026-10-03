@@ -113,6 +113,43 @@ Buka Relay Monitor, lalu tekan `Export Experiment Data`. Aplikasi membuat file:
 
 ## Metrik
 
+### Batas waktu pengukuran (measurement timing v2)
+
+Controller mengaktifkan trial pada semua node sebelum membuat SOS. Aktivasi
+ini bukan awal jendela metrik. Awal jendela adalah timestamp fisik callback
+`SOURCE_FIRST_ADVERTISE_STARTED`, setelah koreksi clock sumber. Akhirnya tepat
+60 detik setelah callback tersebut (atau durasi konfigurasi). Waktu tunggu
+Trickle sebelum TX pertama tidak mengurangi durasi pengamatan. Latency tetap
+first valid receive dikurangi first successful advertise; rumus empat metrik
+tidak berubah. Semua event sebelum/sesudah jendela tetap diarsipkan tetapi
+tidak dihitung sebagai overhead/duplicate dalam jendela.
+
+Controller menunggu callback sumber maksimal 60 detik. Callback tidak muncul,
+identitas sesi/trial/pesan berbeda, atau jendela sudah terlewat menghasilkan
+`INVALID`; reset/quiet-period tetap dijalankan. Polling status tidak menggeser
+timestamp awal. Penghentian node lewat command bisa terlambat karena transport;
+filter event memakai batas timestamp eksplisit, bukan waktu command selesai.
+
+Firmware menerima RX ke queue dari task NimBLE; hanya loop yang memproses
+packet, persistence, counter dan scheduler. Waktu fisik RX dipertahankan.
+Overflow queue dicatat sebagai pelanggaran eksperimen, bukan dibuang diam-diam.
+Trickle mencatat `interval_ms`, `interval_started_at_monotonic_ms`,
+`transmit_at_monotonic_ms`, `interval_end_at_monotonic_ms`, dan
+`consistency_count`. Controller/merger memeriksa kesempatan `[I/2, I)` serta
+burst sebelum setengah interval; delay callback native bukan TX tambahan.
+
+Readiness APK dan firmware harus melaporkan `measurement_timing_version=2`.
+Fingerprint pengukuran berubah sehingga smoke report lama tidak dapat dipakai
+untuk menjalankan batch baru. Instal APK dan flash semua ESP dengan build baru,
+jalankan smoke baru, lalu gunakan sesi/output baru untuk batch utama.
+
+Dataset lama tidak ditulis ulang. Audit log `physical-20260927-11` menemukan
+pelanggaran scheduler pada `trickle-H2-A001`, `trickle-H2-A006`,
+`trickle-H3-A008`, dan `trickle-H3-A010` (lima burst relay). Alasannya adalah
+request TX mendahului pembuatan interval, bukan semata latency rendah.
+Jendela lama dimulai sebelum TX pertama dan tidak dapat diperpanjang secara
+retroaktif tanpa bukti RX yang memang direkam untuk seluruh durasi baru.
+
 Hitung metrik dari event export:
 
 - Delivery success rate: `SUCCESS / (SUCCESS + FAILED)` untuk trial valid.

@@ -218,6 +218,8 @@ def research_fingerprint(config: dict[str, Any]) -> str:
         "latitude": config.get("latitude"),
         "longitude": config.get("longitude"),
         "rx_burst_gap_ms": config.get("rx_burst_gap_ms"),
+        "measurement_timing_version": 2,
+        "observation_window_basis": "SOURCE_FIRST_ADVERTISE_STARTED",
     }
     # Preserve historical fingerprints; explicit radio runs cannot mix with legacy runs.
     if "radio_mode" in config:

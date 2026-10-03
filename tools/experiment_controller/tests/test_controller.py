@@ -3,6 +3,7 @@ import json
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from resqmesh_controller import PROTOCOL_EPOCH_ID, PROTOCOL_VERSION
@@ -81,6 +82,7 @@ class FakeNode(NodeTransport):
         self.reported_build_id: str | None = None
         self.reported_rx_burst_gap_ms: int | None = None
         self.reject_configure_while_stale = False
+        self.source_started_at_ms = None
 
     def command(self, name: str, arguments: dict) -> dict:
         self.commands.append((name, dict(arguments)))
@@ -101,7 +103,8 @@ class FakeNode(NodeTransport):
             self.trial_id = arguments["trial_id"]
         elif name == "reset_trial":
             self.trial_id = ""
-        if name == "readiness":
+            self.source_started_at_ms = None
+        if name in {"readiness", "get_status"}:
             return {
                 "ok": True,
                 "command_id": arguments.get("command_id"),
@@ -123,6 +126,9 @@ class FakeNode(NodeTransport):
                 "packet_pending": False,
                 "quiet_period_complete": True,
                 "payload_length": 17,
+                "measurement_timing_version": 2,
+                "source_first_advertise_started_at_ms": self.source_started_at_ms,
+                "source_first_advertise_message_key": "100:200" if self.source_started_at_ms else None,
                 "manufacturer_id": 0xFFFF,
                 "protocol_version": PROTOCOL_VERSION,
                 "rx_burst_gap_ms": self.reported_rx_burst_gap_ms
@@ -141,6 +147,7 @@ class FakeNode(NodeTransport):
                 "ack_enabled": False,
             }
         if name == "trigger_sos":
+            self.source_started_at_ms = time.time_ns() // 1_000_000
             return {
                 "ok": True,
                 "command_id": arguments.get("command_id"),
@@ -153,7 +160,11 @@ class FakeNode(NodeTransport):
 
     def collect_events(self, session_id=None, trial_id=None) -> list[dict]:
         values = self.provider(self, session_id, trial_id)
-        base_timestamp = time.time_ns() // 1_000_000
+        source = next((x for name, x in reversed(self.commands)
+                       if name == "end_observation_window" and x.get("trial_id") == trial_id), {})
+        base_timestamp = source.get("observation_ended_at_ms", time.time_ns() // 1_000_000) - int(self.config["observation_window_seconds"] * 1000)
+        if self.source_started_at_ms is not None:
+            base_timestamp = self.source_started_at_ms
         sequence = 0
         for value in values:
             timestamp = int(value.get("timestamp_ms", 1000) or 1000)
@@ -196,8 +207,13 @@ def standard_provider(outcome_by_attempt=None):
                 )
             )
         if node.node_id == "esp-r1b" and mode == "trickle" and hypothesis in {"H2", "H3"}:
+            interval = event(node.node_id, session_id, trial_id, "TRICKLE_INTERVAL_STARTED")
+            interval.update(interval_ms=8000, interval_started_at_monotonic_ms=10000,
+                            transmit_at_monotonic_ms=14000, monotonic_ms=10000)
+            values.append(interval)
             values.append(event(node.node_id, session_id, trial_id, "TRICKLE_CONSISTENT_HEARD"))
             values.append(event(node.node_id, session_id, trial_id, "TRICKLE_TX_SUPPRESSED"))
+            values[-1]["monotonic_ms"] = 14000
         return values
 
     return provide
@@ -209,6 +225,117 @@ def fake_nodes(config: dict, provider=None) -> list[FakeNode]:
 
 
 class ControllerTest(unittest.TestCase):
+    def test_window_starts_at_physical_source_callback_after_long_trickle_wait(self) -> None:
+        value = physical_config()
+        value['observation_window_seconds'] = 60
+        clock = {'wall': 1791027600000, 'mono': 100.0}
+
+        class DelayedSource(FakeNode):
+            def command(self, name, arguments):
+                if name == 'get_status' and self.node_id == 'android-source':
+                    clock['wall'] += 23200
+                    clock['mono'] += 23.2
+                    self.source_started_at_ms = clock['wall'] - 1200 - 2000
+                return super().command(name, arguments)
+
+        def sleep(seconds):
+            clock['wall'] += round(seconds * 1000)
+            clock['mono'] += seconds
+
+        with tempfile.TemporaryDirectory() as output, \
+                patch('resqmesh_controller.controller.time.time_ns', side_effect=lambda: clock['wall'] * 1000000), \
+                patch('resqmesh_controller.controller.time.monotonic', side_effect=lambda: clock['mono']):
+            nodes = [DelayedSource(item, value, standard_provider()) for item in value['nodes']]
+            controller = ExperimentController(value, nodes, Path(output), sleep=sleep)
+            # Android's local clock is two seconds behind the host.
+            original_sync = controller.synchronize_clocks
+            def sync(spec):
+                original_sync(spec)
+                controller.clock_offsets['android-source'] = 2000
+            controller.synchronize_clocks = sync
+            result = controller.run_trial(build_plan(value)[0])
+            self.assertEqual('SUCCESS', result['result'], result['invalid_reasons'])
+            self.assertEqual(result['trigger_requested_at_ms'] + 22000, result['observation_started_at_ms'])
+            self.assertEqual(result['observation_started_at_ms'] + 60000, result['observation_ended_at_ms'])
+            self.assertEqual(result['observation_ended_at_ms'], result['observation_stop_command_at_ms'])
+            self.assertEqual('SOURCE_FIRST_ADVERTISE_STARTED', result['observation_window_basis'])
+
+    def test_missing_source_callback_times_out_and_still_resets_every_node(self) -> None:
+        value = physical_config()
+        clock = {'mono': 0.0}
+        class SilentSource(FakeNode):
+            def command(self, name, arguments):
+                response = super().command(name, arguments)
+                if name == 'get_status':
+                    response['source_first_advertise_started_at_ms'] = None
+                return response
+        def sleep(seconds):
+            clock['mono'] += seconds
+        with tempfile.TemporaryDirectory() as output, \
+                patch('resqmesh_controller.controller.time.monotonic', side_effect=lambda: clock['mono']):
+            nodes = [SilentSource(item, value, standard_provider()) for item in value['nodes']]
+            controller = ExperimentController(value, nodes, Path(output), sleep=sleep)
+            result = controller.run_trial(build_plan(value)[0])
+            self.assertEqual('INVALID', result['result'])
+            self.assertIn('SOURCE_FIRST_ADVERTISE_STARTED_TIMEOUT', result['invalid_reasons'])
+            self.assertNotIn('observation_started_at_ms', result)
+            self.assertTrue(all(any(name == 'reset_trial' for name, _ in n.commands) for n in nodes))
+
+    def test_readiness_rejects_old_measurement_build_before_trials(self) -> None:
+        value = physical_config()
+        class OldBuild(FakeNode):
+            def command(self, name, arguments):
+                response = super().command(name, arguments)
+                response.pop('measurement_timing_version', None)
+                return response
+        with tempfile.TemporaryDirectory() as output:
+            nodes = [OldBuild(item, value, standard_provider()) for item in value['nodes']]
+            controller = ExperimentController(value, nodes, Path(output), sleep=lambda _: None)
+            with self.assertRaisesRegex(Exception, 'measurement_timing_version'):
+                controller.readiness()
+
+    def test_source_callback_from_wrong_trial_or_message_is_rejected(self) -> None:
+        value = physical_config()
+        for field, invalid_value, reason in [
+            ('trial_id', 'previous-trial', 'SOURCE_START_STATUS_SCOPE_MISMATCH'),
+            ('source_first_advertise_message_key', 'other:state', 'SOURCE_START_MESSAGE_KEY_MISMATCH'),
+        ]:
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as output:
+                class WrongSource(FakeNode):
+                    def command(self, name, arguments):
+                        response = super().command(name, arguments)
+                        if name == 'get_status':
+                            response[field] = invalid_value
+                        return response
+                nodes = [WrongSource(item, value, standard_provider()) for item in value['nodes']]
+                controller = ExperimentController(value, nodes, Path(output), sleep=lambda _: None)
+                result = controller.run_trial(build_plan(value)[0])
+                self.assertEqual('INVALID', result['result'])
+                self.assertIn(reason, result['invalid_reasons'])
+                self.assertTrue(result['reset_verified'])
+
+    def test_early_relay_burst_invalidates_trial_even_when_delivery_succeeds(self) -> None:
+        value = physical_config()
+        def provider(node, session_id, trial_id):
+            events = standard_provider()(node, session_id, trial_id)
+            if node.node_id == 'esp-r1a':
+                interval = event(node.node_id, session_id, trial_id, 'TRICKLE_INTERVAL_STARTED')
+                interval.update(monotonic_ms=10000, interval_ms=8000,
+                                interval_started_at_monotonic_ms=10000,
+                                transmit_at_monotonic_ms=15000)
+                burst = event(node.node_id, session_id, trial_id, 'ADVERTISE_BURST_STARTED')
+                burst.update(monotonic_ms=10017, timestamp_ms=1017)
+                ended = event(node.node_id, session_id, trial_id, 'ADVERTISE_BURST_ENDED')
+                ended['burst_id'] = burst['burst_id']
+                events.extend([interval, burst, ended])
+            return events
+        with tempfile.TemporaryDirectory() as output:
+            controller = ExperimentController(value, fake_nodes(value, provider), Path(output), sleep=lambda _: None)
+            spec = next(s for s in build_plan(value) if s.mode == 'trickle' and s.hypothesis == 'H2')
+            result = controller.run_trial(spec)
+            self.assertEqual('INVALID', result['result'])
+            self.assertIn('TRICKLE_TRANSMIT_BEFORE_HALF_INTERVAL:esp-r1a', result['invalid_reasons'])
+
     def test_radio_configuration_is_sent_and_readiness_saved(self) -> None:
         config = physical_config()
         with tempfile.TemporaryDirectory() as output:

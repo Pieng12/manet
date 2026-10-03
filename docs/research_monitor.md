@@ -8,6 +8,14 @@ darurat normal.
 Research metadata disimpan di SQLite. Metadata session/trial tidak pernah
 dimasukkan ke payload BLE 17 byte.
 
+Tab **UJI JARAK** adalah pilot terpisah untuk satu orang, ESP sumber dan Android
+penerima. Penyimpanan `resqmesh_range_pilot.db`/`resqmesh_range_rx.db` terpisah
+dari database protokol versi 14. Tab membaca seluruh canonical RX melalui cursor,
+termasuk logical duplicate, bukan hanya 200 event yang terlihat di tab EVENTS.
+Lihat [panduan pilot Coded](coded_range_test.md) untuk sesi 20 menit, GPS/PHY
+aktual, pengamatan 60 detik, script USB, dan workbook pilot terpisah. Pilot ini
+tidak menambah trial independen atau mengubah empat metrik di bawah.
+
 ## Workflow
 
 1. Buka `Research Monitor`.

@@ -12,6 +12,7 @@ import 'package:pkmproject/services/native_bridge_service.dart';
 import 'package:pkmproject/services/relay_queue_service.dart';
 import 'package:pkmproject/services/research_session_service.dart';
 import 'package:pkmproject/services/protocol_epoch_readiness.dart';
+import 'package:pkmproject/services/range_test_service.dart';
 import 'package:pkmproject/sync_service.dart';
 import 'package:pkmproject/utils/hash_utils.dart';
 import 'package:sqflite/sqflite.dart';
@@ -31,6 +32,7 @@ class AndroidExperimentCommandService {
     ObservationWindowStarter? startObservationWindow,
     ObservationWindowStopper? stopObservationWindow,
     ClockSource? clock,
+    RangeTestService? rangeService,
     Duration resetQuietPeriod = MeshConfig.sosAdvertiseBurstDuration,
   }) : _database = database,
        _databaseHelper = databaseHelper ?? DatabaseHelper(),
@@ -57,6 +59,7 @@ class AndroidExperimentCommandService {
            stopObservationWindow ??
            BleAdvertiserService().pauseResearchObservationWindow,
        _clock = clock ?? ExperimentClock.instance,
+       _rangeService = rangeService,
        _resetQuietPeriod = resetQuietPeriod;
 
   final Database? _database;
@@ -68,6 +71,14 @@ class AndroidExperimentCommandService {
   final ObservationWindowStarter _startObservationWindow;
   final ObservationWindowStopper _stopObservationWindow;
   final ClockSource _clock;
+  final RangeTestService? _rangeService;
+  RangeTestService get _range =>
+      _rangeService ??
+      RangeTestService(
+        protocol: _database,
+        clock: _clock,
+        observePoints: false,
+      );
   final Duration _resetQuietPeriod;
 
   Future<Database> get _db async => _database ?? _databaseHelper.database;
@@ -116,6 +127,9 @@ class AndroidExperimentCommandService {
         'finalize_trial' => await _finalizeTrial(arguments),
         'export_trial' => await _exportTrial(arguments),
         'reset_trial' => await _resetTrial(arguments),
+        'configure_range_test' => await _range.configure(arguments),
+        'get_range_test_status' => await _rangeStatus(),
+        'export_range_test' => await _range.export(),
         _ => throw ArgumentError('UNKNOWN_COMMAND: $normalized'),
       };
       final response = <String, dynamic>{
@@ -245,6 +259,46 @@ class AndroidExperimentCommandService {
       'ack_enabled': session.ackEnabled,
       'main_experiment': mainExperiment,
     };
+  }
+
+  Future<Map<String, dynamic>> _rangeStatus() async {
+    final range = _range;
+    await range.refresh();
+    final snapshot = await range.snapshot();
+    // Logcat final responses are bounded; raw tracks/events belong in the file export.
+    final value = <String, dynamic>{
+      for (final key in [
+        'run',
+        'baseline_received',
+        'baseline_coded',
+        'last_receive',
+        'last_position',
+        'farthest_observed_m',
+      ])
+        key: snapshot[key],
+      'receive_count': (snapshot['receives'] as List? ?? []).length,
+      'point_count': (snapshot['points'] as List? ?? []).length,
+      'position_count': (snapshot['positions'] as List? ?? []).length,
+      'diagnostic_count': (snapshot['diagnostics'] as List? ?? []).length,
+    };
+    value['unfinished_trials'] = await (await _db).query(
+      'experiment_trials',
+      columns: ['trial_id', 'session_id', 'status', 'result'],
+      where: "status IN ('RUNNING','WINDOW_ENDED') AND finalized_at IS NULL",
+      limit: 5,
+    );
+    final trialId = (snapshot['run'] as Map?)?['trial_id'];
+    final trials = trialId == null
+        ? <Map<String, Object?>>[]
+        : await (await _db).query(
+            'experiment_trials',
+            columns: ['trial_id', 'status', 'result', 'finalized_at'],
+            where: 'trial_id = ?',
+            whereArgs: [trialId],
+            limit: 1,
+          );
+    value['protocol_trial'] = trials.isEmpty ? null : trials.first;
+    return value;
   }
 
   Future<Map<String, dynamic>> _startTrial(Map<String, dynamic> args) async {
@@ -459,6 +513,21 @@ class AndroidExperimentCommandService {
     final trial = await _sessions.currentTrial(sessionId: session?.sessionId);
     final capabilities = await NativeBridgeService.getBleCapabilities();
     final db = await _db;
+    final sourceStarts =
+        session == null || trial == null || session.nodeRole != 'SOURCE'
+        ? <Map<String, Object?>>[]
+        : await db.query(
+            'experiment_events',
+            columns: ['event_timestamp_ms', 'message_key'],
+            where: 'session_id = ? AND trial_id = ? AND event_type = ?',
+            whereArgs: [
+              session.sessionId,
+              trial.trialId,
+              ExperimentEventTypes.sourceFirstAdvertiseStarted,
+            ],
+            orderBy: 'event_timestamp_ms ASC',
+            limit: 1,
+          );
     final queueCount =
         Sqflite.firstIntValue(
           await db.rawQuery('SELECT COUNT(*) FROM relay_queue'),
@@ -473,6 +542,7 @@ class AndroidExperimentCommandService {
       'build_id': MeshConfig.buildId,
       'protocol_version': MeshConfig.protocolVersion,
       'payload_length': MeshConfig.protocolLength,
+      'measurement_timing_version': 2,
       'manufacturer_id': MeshConfig.manufacturerId,
       'radio': capabilities['radio'],
       'clock_valid': epoch.isValid,
@@ -487,6 +557,12 @@ class AndroidExperimentCommandService {
       'mode': session?.forwardingMode,
       'session_id': session?.sessionId,
       'trial_id': trial?.trialId,
+      'source_first_advertise_started_at_ms': sourceStarts.isEmpty
+          ? null
+          : sourceStarts.first['event_timestamp_ms'],
+      'source_first_advertise_message_key': sourceStarts.isEmpty
+          ? null
+          : sourceStarts.first['message_key'],
       'role': session?.nodeRole,
       'protocol_active': session?.protocolActive,
       'rx_burst_gap_ms':
