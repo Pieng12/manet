@@ -31,8 +31,14 @@ company ID secara eksplisit.
 
 Adapter `CodedRadio` memiliki satu advertising instance GAP (0), tidak memakai
 wrapper advertising bersamaan. Interval radio 250 ms (400 x 0.625 ms) identik
-untuk Basic dan Trickle; daya diminta +9 dBm seperti sebelumnya, daya terpilih
+untuk Basic dan Trickle; daya diminta +20 dBm, daya terpilih
 dicatat dari hasil configure. Scheduler dan burst 2 s tidak diubah.
+
+Konfigurasi daya tinggi menggantikan permintaan +9 dBm. Verifikasi
+`radio.tx_power_requested_dbm=20` dan `radio.tx_power_actual_dbm` dari controller
+setelah flash; jangan menganggap daya aktual selalu sama dengan permintaan.
+Semua role dan algoritma memakai konfigurasi radio yang sama. Firmware ini
+tidak menginisialisasi Wi-Fi. Lihat [panduan pilot daya tinggi](../../docs/coded_radio_windows.md#pilot-daya-tinggi).
 
 `configure_session.radio_mode` menerima `coded` (default) atau
 `coded_s8_required`. Mode kedua hanya menggunakan PHY options `0x04` ketika

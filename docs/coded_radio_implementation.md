@@ -25,8 +25,9 @@ upload firmware, instalasi APK, penghapusan dataset atau perubahan config lokal.
   require. Gagal configure/unsupported membuat readiness gagal, tanpa fallback;
   request wajib juga tersimpan di NVS agar restart tidak diam-diam menurunkan
   mode. Kode return GAP/controller tersimpan pada radio.last_error.
-- Radio interval 400 units =250 ms, sama untuk Basic/Trickle. Android meminta
-  TX medium -7 dBm, ESP +9 dBm sesuai maksud power lama. Selected TX power
+- Radio interval 400 units =250 ms, sama untuk Basic/Trickle. Implementasi awal
+  meminta TX medium -7 dBm pada Android dan +9 dBm pada ESP. Revisi daya tinggi
+  2026-10-06 meminta TX high +1 dBm pada Android dan +20 dBm pada ESP. Selected TX power
   dicatat dari callback/configure, tidak diasumsikan dari enum.
 - Telemetry request/configured/coding/acceptance/actual power/error masuk
   readiness, status, Research Monitor, RADIO_CONFIGURED event, manifest dan

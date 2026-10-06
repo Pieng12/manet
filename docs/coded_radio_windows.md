@@ -19,12 +19,14 @@ Dari root repository, PowerShell:
 
 ```powershell
 git branch --show-current
+$BuildId = (git rev-parse --short=12 HEAD).Trim()
+$env:RESQMESH_BUILD_ID = $BuildId
 $env:PLATFORMIO_CORE_DIR = 'D:\pio'
 py -m platformio test -d firmware/esp32c3 -e native
 py -m platformio run -d firmware/esp32c3 -e esp32c3
 flutter analyze
 flutter test
-flutter build apk --debug
+flutter build apk --debug --dart-define=RESQMESH_MODE=offline --dart-define=RESQMESH_BUILD_ID=$BuildId
 adb devices -l
 adb -s <SERIAL_OPPO> install -r build\app\outputs\flutter-apk\app-debug.apk
 py -m platformio device list
@@ -102,6 +104,52 @@ Kriteria radio: requested mode jelas, controller configure/start sukses,
 interval identik kedua algoritma, TX power aktual dicatat bila tersedia,
 scanner pulih setelah gagal TX/burst, application payload tetap17. Simpan
 manifest/radio_readiness, log JSON dan workbook dalam sesi baru.
+
+## Pilot Daya Tinggi
+
+Revisi 2026-10-06 menaikkan permintaan daya ESP32-C3 dari +9 ke +20 dBm
+dan Android dari -7 ke +1 dBm (`AdvertisingSetParameters.TX_POWER_HIGH`).
+Nilai Android ini kompatibel dengan public Extended Advertising API yang
+dipakai HP lama kita; bukan jaminan maksimum hardware semua model HP.
+Controller tetap menentukan daya terpilih, bukan angka yang dipalsukan oleh app.
+
+Interval radio tetap 250 ms, non-connectable/non-scannable, primary/secondary
+Coded, payload 17 byte, durasi burst, Basic, kedua varian Trickle, dedup,
+transaksi SOS/ACK dan rumus metrik tetap sama. S8 tidak dipaksa jika unsupported.
+Firmware tidak menginisialisasi Wi-Fi; tidak ada scan/koneksi Wi-Fi yang perlu
+dimatikan pada jalur sekarang. Daya tinggi tidak berarti kemampuan RX meningkat.
+
+1. Selesaikan dan arsipkan trial aktif sebelum mengganti binary. Jangan mengubah
+   daya di tengah batch, menimpa output lama atau menggabungkan data daya lama
+   dan baru sebagai kondisi eksperimen yang sama.
+2. Bekukan revisi/build ID sebelum dataset formal. Build APK offline dan firmware
+   dari revisi yang sama seperti panduan di atas, lalu install APK dan flash
+   semua ESP yang akan digunakan. Tidak perlu clear data/NVS atau hapus arsip.
+3. Periksa readiness ESP: `radio.ready=true`, `last_error=0`,
+   `tx_power_requested_dbm=20`, dan `tx_power_actual_dbm` terisi. Bila nilai aktual
+   lebih rendah, laporkan nilai tersebut; jangan mengklaim pemancar +20 dBm.
+   Jika konfigurasi/start gagal, hentikan persiapan dan periksa error asli.
+4. Android meminta `tx_power_requested_dbm=1`. Daya aktual baru tersedia sesudah
+   callback advertising sukses; `null` pada HP yang hanya menjadi DESTINATION
+   bukan bukti kegagalan. Uji HP sebagai SOURCE untuk membaca daya aktualnya.
+5. Mulai sesi/output pilot baru. Verifikasi baseline dekat HP -> ESP dan
+   ESP -> HP dengan identitas SOS yang sesuai, callback sukses dan penerimaan
+   PHY aktual Coded. Setelah itu uji titik jarak yang sama, dengan posisi,
+   orientasi antena, interval dan algoritma yang sama untuk perbandingan.
+6. Simpan readiness/radio telemetry, log mentah dan workbook. Laporkan jarak
+   terjauh teramati, bukan jarak maksimum universal. Periksa stabilitas suplai
+   daya dan konsumsi daya pada pengujian panjang; tidak ada jaminan tambahan meter.
+7. Untuk testbed penuh, ulang smoke sembilan kondisi sebelum batch baru 135 trial.
+   Pertahankan setting daya yang sama pada semua metode dan seluruh batch baru.
+
+Daya aktual yang tersedia adalah laporan controller, bukan pengukuran RF dengan
+power meter. Memverifikasi S2/S8 di udara tetap membutuhkan alat yang sesuai.
+Ikuti ketentuan RF setempat dan batas board/modul; jangan menambah penguat eksternal
+atau mengasumsikan daya pada antena sama dengan angka controller.
+
+Referensi: [ESP32-C3 BLE TX characteristics](https://documentation.espressif.com/ESP32-C3_Datasheet_en.pdf),
+[Android TX_POWER_HIGH](https://developer.android.com/reference/android/bluetooth/le/AdvertisingSetParameters),
+[Android callback daya terpilih](https://developer.android.com/reference/android/bluetooth/le/AdvertisingSetCallback).
 
 ## RX PHY dan Pergantian Trial Manual
 

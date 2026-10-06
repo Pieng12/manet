@@ -16,12 +16,14 @@ class RangeTestTab extends StatefulWidget {
     this.locationStream,
     this.capabilities,
     this.screenAwake,
+    this.requestBluetooth,
     this.showMap = true,
   });
   final RangeTestService? service;
   final Future<Stream<RangeFix>> Function()? locationStream;
   final Future<Map<String, dynamic>> Function()? capabilities;
   final Future<void> Function(bool)? screenAwake;
+  final Future<Map<String, dynamic>> Function()? requestBluetooth;
   final bool showMap;
   @override
   State<RangeTestTab> createState() => _RangeTestTabState();
@@ -41,6 +43,9 @@ class _RangeTestTabState extends State<RangeTestTab>
   bool _tiles = true;
   bool? _awakeState;
   bool _startingLocation = false;
+  bool _bluetoothPrompted = false;
+  bool _requestingBluetooth = false;
+  String? _bluetoothRequestState;
   bool get _pilotActive =>
       const ['prepared', 'running'].contains((_data['run'] as Map?)?['status']);
 
@@ -190,6 +195,14 @@ class _RangeTestTabState extends State<RangeTestTab>
           _caps = caps;
           _error = null;
         });
+        if (caps['bluetoothEnabled'] == false &&
+            caps['connectPermission'] == true &&
+            caps['bleSupported'] == true &&
+            !_bluetoothPrompted &&
+            run?['status'] != 'running') {
+          _bluetoothPrompted = true;
+          unawaited(_requestBluetooth());
+        }
         if (_pilotActive && _locationError == null) {
           unawaited(_startLocation());
         } else if (!_pilotActive) {
@@ -216,6 +229,41 @@ class _RangeTestTabState extends State<RangeTestTab>
       }
     }
   }
+
+  Future<void> _requestBluetooth() async {
+    if (_requestingBluetooth || !_foreground || !mounted) return;
+    setState(() => _requestingBluetooth = true);
+    try {
+      final result =
+          await (widget.requestBluetooth ??
+              NativeBridgeService.requestBluetoothEnable)();
+      if (mounted) {
+        setState(() => _bluetoothRequestState = result['state']?.toString());
+      }
+    } catch (_) {
+      if (mounted) setState(() => _bluetoothRequestState = 'failed');
+    } finally {
+      if (mounted) setState(() => _requestingBluetooth = false);
+    }
+  }
+
+  Widget _bluetoothControl() => Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      const Text('Bluetooth mati', style: TextStyle(color: ResqColors.ember)),
+      if (_bluetoothRequestState == 'permission_required')
+        const Text('Izin Nearby devices diperlukan'),
+      if (_bluetoothRequestState == 'unavailable')
+        const Text('Bluetooth tidak tersedia'),
+      if (_bluetoothRequestState == 'failed')
+        const Text('Dialog Bluetooth tidak dapat dibuka'),
+      TextButton.icon(
+        onPressed: _requestingBluetooth ? null : _requestBluetooth,
+        icon: const Icon(Icons.bluetooth),
+        label: const Text('Nyalakan Bluetooth'),
+      ),
+    ],
+  );
 
   Future<void> _sourceDialog() async {
     final run = _data['run'] as Map?;
@@ -278,6 +326,144 @@ class _RangeTestTabState extends State<RangeTestTab>
     }
   }
 
+  Future<void> _startPoint(bool scanner) async {
+    final horizontal = TextEditingController();
+    final height = TextEditingController();
+    final note = TextEditingController();
+    final form = GlobalKey<FormState>();
+    var method = 'tape_measure';
+    double? number(String text) =>
+        double.tryParse(text.trim().replaceAll(',', '.'));
+    String? validate(String? value, {bool signed = false}) {
+      if (value == null || value.trim().isEmpty) return null;
+      final parsed = number(value);
+      return parsed == null || !parsed.isFinite || (!signed && parsed < 0)
+          ? 'Masukkan angka meter yang valid'
+          : null;
+    }
+
+    final measurement = await showDialog<RangePointMeasurement>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Pengamatan titik'),
+        content: SingleChildScrollView(
+          child: Form(
+            key: form,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextFormField(
+                  controller: horizontal,
+                  keyboardType: const TextInputType.numberWithOptions(
+                    decimal: true,
+                  ),
+                  decoration: const InputDecoration(
+                    labelText: 'Jarak horizontal manual (m, opsional)',
+                  ),
+                  validator: validate,
+                ),
+                TextFormField(
+                  controller: height,
+                  keyboardType: const TextInputType.numberWithOptions(
+                    decimal: true,
+                    signed: true,
+                  ),
+                  decoration: const InputDecoration(
+                    labelText: 'Beda tinggi HP - ESP (m, opsional)',
+                  ),
+                  validator: (value) => validate(value, signed: true),
+                ),
+                DropdownButtonFormField<String>(
+                  initialValue: method,
+                  isExpanded: true,
+                  decoration: const InputDecoration(
+                    labelText: 'Metode pengukuran manual',
+                  ),
+                  items: const [
+                    DropdownMenuItem(
+                      value: 'tape_measure',
+                      child: Text('Meteran'),
+                    ),
+                    DropdownMenuItem(
+                      value: 'scaled_plan',
+                      child: Text('Denah berskala'),
+                    ),
+                    DropdownMenuItem(
+                      value: 'manual_estimate',
+                      child: Text('Perkiraan manual'),
+                    ),
+                  ],
+                  onChanged: (value) => method = value ?? method,
+                ),
+                TextFormField(
+                  controller: note,
+                  maxLength: 500,
+                  maxLines: 2,
+                  decoration: const InputDecoration(
+                    labelText: 'Catatan titik (opsional)',
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Batal'),
+          ),
+          FilledButton.icon(
+            icon: const Icon(Icons.play_arrow),
+            label: const Text('Mulai 60 Detik'),
+            onPressed: () {
+              if (!form.currentState!.validate()) return;
+              try {
+                Navigator.pop(
+                  context,
+                  RangePointMeasurement(
+                    horizontalM: number(horizontal.text),
+                    heightDifferenceM: number(height.text),
+                    method: method,
+                    note: note.text,
+                  ),
+                );
+              } catch (_) {
+                ResqFeedback.error(context, 'Pengukuran tidak valid');
+              }
+            },
+          ),
+        ],
+      ),
+    );
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+    horizontal.dispose();
+    height.dispose();
+    note.dispose();
+    if (!mounted || !_foreground || measurement == null) return;
+    await _execute(
+      () =>
+          service.startPoint(scannerActive: scanner, measurement: measurement),
+    );
+  }
+
+  String _meters(dynamic value) =>
+      value is num ? '${value.toStringAsFixed(1)} m' : 'Tidak tersedia';
+
+  String _measurementMethod(dynamic method) => switch (method) {
+    'tape_measure' => 'Meteran',
+    'scaled_plan' => 'Denah berskala',
+    'manual_estimate' => 'Perkiraan manual',
+    _ => 'Tidak diisi',
+  };
+
+  String _gpsQuality(String? quality) => switch (quality) {
+    'not_distinguishable_from_location_uncertainty' =>
+      'Jarak dekat belum dapat dibedakan dari ketidakpastian lokasi',
+    'source_uncertainty_unknown' => 'Ketidakpastian posisi ESP tidak terukur',
+    'gps_estimate' => 'Estimasi GPS; bukan jarak terukur',
+    _ => 'Lokasi tidak tersedia atau tidak layak',
+  };
+
   String _seconds(num ms) => '${mathSeconds(ms)} dtk';
   int mathSeconds(num ms) => (ms / 1000).ceil().clamp(0, 1200);
   Widget _value(String label, String value) => Padding(
@@ -303,11 +489,15 @@ class _RangeTestTabState extends State<RangeTestTab>
   Widget build(BuildContext context) {
     final run = _data['run'] as Map?;
     if (run == null) {
-      return const Center(
-        child: Text(
-          'Pilot belum disiapkan',
-          style: TextStyle(color: ResqColors.field),
-        ),
+      return ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          if (_caps['bluetoothEnabled'] == false) _bluetoothControl(),
+          const Text(
+            'Pilot belum disiapkan',
+            style: TextStyle(color: ResqColors.field),
+          ),
+        ],
       );
     }
     final now = service.clock.wallTimeMs();
@@ -338,6 +528,12 @@ class _RangeTestTabState extends State<RangeTestTab>
             fix.longitude,
           )
         : null;
+    final gpsQuality = RangeGpsDistance.assess(
+      distance,
+      fix?.accuracy,
+      (run['source_accuracy_m'] as num?)?.toDouble(),
+    );
+    final measurementPoint = active ?? points.lastOrNull;
     final center = run['source_latitude'] != null
         ? LatLng(
             (run['source_latitude'] as num).toDouble(),
@@ -359,11 +555,20 @@ class _RangeTestTabState extends State<RangeTestTab>
           ),
         ),
         _value('Sesi', run['run_id'].toString()),
+        if (_caps['bluetoothEnabled'] == false) _bluetoothControl(),
         _value(
-          'Jarak horizontal',
+          'Estimasi horizontal GPS',
           distance == null
               ? 'Tidak tersedia'
               : '${distance.toStringAsFixed(1)} m',
+        ),
+        _value(
+          'Kualitas jarak GPS',
+          _gpsQuality(gpsQuality['gps_distance_quality'] as String?),
+        ),
+        _value(
+          'Jumlah radius akurasi',
+          _meters(gpsQuality['gps_accuracy_radii_sum_m']),
         ),
         _value(
           'Akurasi GPS HP',
@@ -393,7 +598,7 @@ class _RangeTestTabState extends State<RangeTestTab>
           'Akurasi posisi ESP',
           run['source_accuracy_m'] == null
               ? 'Tidak terukur'
-              : '${run['source_accuracy_m']} m',
+              : _meters(run['source_accuracy_m']),
         ),
         _value('Paket terakhir', age == null ? '-' : _seconds(age)),
         _value('RSSI', rx?['rssi'] == null ? '-' : '${rx!['rssi']} dBm'),
@@ -533,6 +738,24 @@ class _RangeTestTabState extends State<RangeTestTab>
             ),
           ),
         const SizedBox(height: 16),
+        if (measurementPoint != null) ...[
+          _value(
+            'Metode manual titik',
+            _measurementMethod(measurementPoint['measurement_method']),
+          ),
+          _value(
+            'Horizontal manual titik',
+            _meters(measurementPoint['measured_horizontal_m']),
+          ),
+          _value(
+            'Beda tinggi HP - ESP',
+            _meters(measurementPoint['height_difference_m']),
+          ),
+          _value(
+            'Jarak 3D dari input manual',
+            _meters(measurementPoint['measured_3d_m']),
+          ),
+        ],
         if (active != null) ...[
           _value(
             'Pengamatan titik',
@@ -557,8 +780,7 @@ class _RangeTestTabState extends State<RangeTestTab>
                     scanner &&
                     (run['ends_at_ms'] as int) - now >=
                         RangeTestService.pointDurationMs
-                ? () =>
-                      _execute(() => service.startPoint(scannerActive: scanner))
+                ? () => _startPoint(scanner)
                 : null,
             icon: const Icon(Icons.play_arrow),
             label: const Text('Mulai Pengamatan'),
@@ -581,12 +803,11 @@ class _RangeTestTabState extends State<RangeTestTab>
                   : 'Pengamatan Berjalan',
             ),
             subtitle: Text(
-              '${point['receive_count']} observasi - ${point['receive_result'] == 'received' ? 'Paket diterima' : 'Tidak ada penerimaan teramati'}${point['reason'] == null ? '' : ' - ${point['reason']}'}',
-            ),
-            trailing: Text(
-              point['farthest_observed_m'] == null
-                  ? '-'
-                  : '${(point['farthest_observed_m'] as num).toStringAsFixed(1)} m',
+              '${point['receive_count']} observasi - ${point['receive_result'] == 'received' ? 'Paket diterima' : 'Tidak ada penerimaan teramati'}${point['reason'] == null ? '' : ' - ${point['reason']}'}'
+              '${point['measured_horizontal_m'] == null ? '' : '\nHorizontal manual: ${_meters(point['measured_horizontal_m'])}'}'
+              '${point['measured_3d_m'] == null ? '' : '\n3D manual: ${_meters(point['measured_3d_m'])}'}'
+              '${point['measurement_method'] == null ? '' : '\n${_measurementMethod(point['measurement_method'])}'}'
+              '${point['point_note'] == null || point['point_note'] == '' ? '' : '\n${point['point_note']}'}',
             ),
           ),
       ],

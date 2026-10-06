@@ -15,6 +15,8 @@ class MemoryPilot extends RangeTestService {
   bool ended = false;
   bool sourceKnown = true;
   bool prepared = false;
+  bool hasRun = true;
+  double? sourceAccuracy;
   Map<String, dynamic>? fix;
   @override
   Future<void> refresh() async {}
@@ -39,6 +41,21 @@ class MemoryPilot extends RangeTestService {
   }
 
   @override
+  Future<void> startPoint({
+    required bool scannerActive,
+    RangePointMeasurement? measurement,
+  }) async {
+    points.add({
+      'status': 'running',
+      'started_at_ms': clock.wallTimeMs(),
+      'planned_end_ms': clock.wallTimeMs() + 60000,
+      'receive_count': 0,
+      'receive_result': 'no_receive_observed',
+      ...?measurement?.toJson(),
+    });
+  }
+
+  @override
   Future<void> cancelPoint(String reason) async {
     for (final point in points) {
       if (point['status'] == 'running') {
@@ -50,18 +67,21 @@ class MemoryPilot extends RangeTestService {
 
   @override
   Future<Map<String, dynamic>> snapshot() async => {
-    'run': {
-      'run_id': 'coded-range-test',
-      'status': ended
-          ? 'finished'
-          : prepared
-          ? 'prepared'
-          : 'running',
-      'source_latitude': sourceKnown ? 3.5 : null,
-      'source_longitude': sourceKnown ? 98.5 : null,
-      'source_position_method': 'manual',
-      'ends_at_ms': 2200000,
-    },
+    'run': hasRun
+        ? {
+            'run_id': 'coded-range-test',
+            'status': ended
+                ? 'finished'
+                : prepared
+                ? 'prepared'
+                : 'running',
+            'source_latitude': sourceKnown ? 3.5 : null,
+            'source_longitude': sourceKnown ? 98.5 : null,
+            'source_position_method': 'manual',
+            'source_accuracy_m': sourceAccuracy,
+            'ends_at_ms': 2200000,
+          }
+        : null,
     'last_receive': null,
     'last_position': fix,
     'receives': [],
@@ -80,13 +100,24 @@ void main() {
     bool scanner = true,
     Future<Stream<RangeFix>> Function()? locations,
     bool map = false,
+    bool? bluetooth,
+    Future<Map<String, dynamic>> Function()? requestBluetooth,
+    Future<Map<String, dynamic>> Function()? capabilities,
   }) async {
     await tester.pumpWidget(
       MaterialApp(
         home: Scaffold(
           body: RangeTestTab(
             service: pilot,
-            capabilities: () async => {'nativeScanActive': scanner},
+            capabilities:
+                capabilities ??
+                () async => {
+                  'nativeScanActive': scanner,
+                  'bluetoothEnabled': ?bluetooth,
+                  'connectPermission': true,
+                  'bleSupported': true,
+                },
+            requestBluetooth: requestBluetooth,
             screenAwake: (_) async {},
             showMap: map,
             locationStream:
@@ -118,6 +149,145 @@ void main() {
       await unmount(tester);
     },
   );
+
+  testWidgets(
+    'Bluetooth consent opens once in preparation without claiming enabled',
+    (tester) async {
+      pilot.prepared = true;
+      var requests = 0;
+      await mount(
+        tester,
+        scanner: false,
+        bluetooth: false,
+        requestBluetooth: () async {
+          requests++;
+          return {'state': 'requested'};
+        },
+      );
+      await tester.pump(const Duration(seconds: 3));
+      expect(requests, 1);
+      expect(find.text('Bluetooth mati'), findsOneWidget);
+      expect(find.text('Paket masih diterima'), findsNothing);
+      await tester.ensureVisible(find.text('Nyalakan Bluetooth'));
+      await tester.tap(find.text('Nyalakan Bluetooth'));
+      await tester.pump();
+      expect(requests, 2);
+      await unmount(tester);
+    },
+  );
+
+  testWidgets('running pilot does not automatically open Bluetooth dialog', (
+    tester,
+  ) async {
+    var requests = 0;
+    await mount(
+      tester,
+      scanner: false,
+      bluetooth: false,
+      requestBluetooth: () async {
+        requests++;
+        return {'state': 'requested'};
+      },
+    );
+    expect(requests, 0);
+    await tester.ensureVisible(find.text('Nyalakan Bluetooth'));
+    await tester.tap(find.text('Nyalakan Bluetooth'));
+    await tester.pump();
+    expect(requests, 1);
+    await unmount(tester);
+  });
+
+  testWidgets('Bluetooth can be requested before script prepares a pilot', (
+    tester,
+  ) async {
+    pilot.hasRun = false;
+    var requests = 0;
+    await mount(
+      tester,
+      scanner: false,
+      bluetooth: false,
+      requestBluetooth: () async {
+        requests++;
+        return {'state': 'requested'};
+      },
+    );
+    expect(find.text('Pilot belum disiapkan'), findsOneWidget);
+    expect(find.text('Nyalakan Bluetooth'), findsOneWidget);
+    expect(requests, 1);
+    await unmount(tester);
+  });
+
+  testWidgets(
+    'native capabilities, not consent request, confirm Bluetooth on',
+    (tester) async {
+      pilot.prepared = true;
+      var enabled = false;
+      var requests = 0;
+      await mount(
+        tester,
+        capabilities: () async => {
+          'bluetoothEnabled': enabled,
+          'nativeScanActive': enabled,
+          'connectPermission': true,
+          'bleSupported': true,
+        },
+        requestBluetooth: () async {
+          requests++;
+          return {'state': 'requested'};
+        },
+      );
+      expect(find.text('Bluetooth mati'), findsOneWidget);
+      enabled = true;
+      await tester.pump(const Duration(seconds: 1));
+      await tester.pump();
+      expect(find.text('Bluetooth mati'), findsNothing);
+      expect(requests, 1);
+      await unmount(tester);
+    },
+  );
+
+  testWidgets('missing connect permission does not open automatic dialog', (
+    tester,
+  ) async {
+    pilot.prepared = true;
+    var requests = 0;
+    await mount(
+      tester,
+      capabilities: () async => {
+        'bluetoothEnabled': false,
+        'nativeScanActive': false,
+        'connectPermission': false,
+        'bleSupported': true,
+      },
+      requestBluetooth: () async {
+        requests++;
+        return {'state': 'permission_required'};
+      },
+    );
+    expect(requests, 0);
+    await tester.ensureVisible(find.text('Nyalakan Bluetooth'));
+    await tester.tap(find.text('Nyalakan Bluetooth'));
+    await tester.pump();
+    expect(find.text('Izin Nearby devices diperlukan'), findsOneWidget);
+    await unmount(tester);
+  });
+
+  testWidgets('Bluetooth request errors remain visible and can be retried', (
+    tester,
+  ) async {
+    pilot.prepared = true;
+    await mount(
+      tester,
+      scanner: false,
+      bluetooth: false,
+      requestBluetooth: () async => throw StateError('permission denied'),
+    );
+    await tester.pump();
+    expect(find.text('Dialog Bluetooth tidak dapat dibuka'), findsOneWidget);
+    expect(find.text('Bluetooth mati'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await unmount(tester);
+  });
 
   testWidgets('GPS stream failure allows retry without claiming out of range', (
     tester,
@@ -156,6 +326,65 @@ void main() {
     await mount(tester, scanner: false);
     expect(find.text('Scanner bermasalah'), findsOneWidget);
     expect(pilot.points.single['reason'], 'SCANNER_UNAVAILABLE');
+    await unmount(tester);
+  });
+
+  testWidgets('nearby GPS estimate is warned, not converted to exact zero', (
+    tester,
+  ) async {
+    pilot.sourceAccuracy = 4.3;
+    pilot.fix = const RangeFix(1000000, 3.50005, 98.50005, 10.7).toJson();
+    await mount(tester);
+    expect(find.text('Estimasi horizontal GPS'), findsOneWidget);
+    expect(find.textContaining('belum dapat dibedakan'), findsOneWidget);
+    expect(find.text('15.0 m'), findsOneWidget);
+    expect(find.text('0.0 m'), findsNothing);
+    await unmount(tester);
+  });
+
+  testWidgets(
+    'point dialog saves manual values without GPS and resets next draft',
+    (tester) async {
+      await mount(tester);
+      await tester.scrollUntilVisible(find.text('Mulai Pengamatan'), 300);
+      await tester.tap(find.text('Mulai Pengamatan'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextFormField).at(0), '3,0');
+      await tester.enterText(find.byType(TextFormField).at(1), '-4');
+      await tester.enterText(find.byType(TextFormField).at(2), 'Dekat tangga');
+      await tester.tap(find.text('Mulai 60 Detik'));
+      await tester.pumpAndSettle();
+      expect(pilot.points.single['measured_horizontal_m'], 3);
+      expect(pilot.points.single['measured_3d_m'], 5);
+      expect(pilot.points.single['point_note'], 'Dekat tangga');
+      await pilot.cancelPoint('USER_CANCELLED');
+      await tester.pump(const Duration(seconds: 1));
+      await tester.scrollUntilVisible(find.text('Mulai Pengamatan'), 300);
+      await tester.tap(find.text('Mulai Pengamatan'));
+      await tester.pumpAndSettle();
+      for (final field in tester.widgetList<TextFormField>(
+        find.byType(TextFormField),
+      )) {
+        expect(field.controller!.text, isEmpty);
+      }
+      await tester.tap(find.text('Batal'));
+      await tester.pumpAndSettle();
+      await unmount(tester);
+    },
+  );
+
+  testWidgets('negative horizontal does not start a point', (tester) async {
+    await mount(tester);
+    await tester.scrollUntilVisible(find.text('Mulai Pengamatan'), 300);
+    await tester.tap(find.text('Mulai Pengamatan'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextFormField).first, '-1');
+    await tester.tap(find.text('Mulai 60 Detik'));
+    await tester.pump();
+    expect(find.text('Masukkan angka meter yang valid'), findsOneWidget);
+    expect(pilot.points, isEmpty);
+    await tester.tap(find.text('Batal'));
+    await tester.pumpAndSettle();
     await unmount(tester);
   });
 
@@ -256,6 +485,12 @@ void main() {
       await tester.scrollUntilVisible(find.text('Mulai Pengamatan'), 300);
       await tester.pump();
       expect(tester.takeException(), isNull);
+      await tester.tap(find.text('Mulai Pengamatan'));
+      await tester.pumpAndSettle();
+      expect(find.text('Mulai 60 Detik'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      await tester.tap(find.text('Batal'));
+      await tester.pumpAndSettle();
       await unmount(tester);
     });
   }

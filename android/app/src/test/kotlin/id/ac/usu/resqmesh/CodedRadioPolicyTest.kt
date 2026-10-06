@@ -1,9 +1,15 @@
 package id.ac.usu.resqmesh
 
+import android.bluetooth.le.AdvertisingSetParameters
 import org.junit.Assert.*
 import org.junit.Test
 
 class CodedRadioPolicyTest {
+    @Test fun highPowerKeepsRadioIntervalAndUnsupportedS8Policy() {
+        assertEquals(AdvertisingSetParameters.TX_POWER_HIGH, CodedRadioPolicy.TX_POWER_DBM)
+        assertEquals(400, CodedRadioPolicy.INTERVAL_UNITS)
+        assertEquals("S8_SELECTION_UNSUPPORTED", CodedRadioPolicy.rejection(30, true, true, true, true, true, "coded_s8_required"))
+    }
     @Test fun codedScanAvoidsBatchReportsThatLosePhyMetadata() {
         assertEquals(0L, CodedRadioPolicy.SCAN_REPORT_DELAY_MS)
     }

@@ -163,6 +163,12 @@ class NativeBridgeService {
     await _platform.invokeMethod('setRangeScreenAwake', {'enabled': enabled});
   }
 
+  // UI-only consent request; callers must read capabilities to verify STATE_ON.
+  static Future<Map<String, dynamic>> requestBluetoothEnable() async {
+    final value = await _platform.invokeMethod<Map>('requestBluetoothEnable');
+    return Map<String, dynamic>.from(value ?? {'state': 'failed'});
+  }
+
   static Future<bool> hasPendingRelayWork() async {
     try {
       return await _platform.invokeMethod<bool>('hasPendingRelayWork') ?? false;

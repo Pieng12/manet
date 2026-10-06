@@ -156,6 +156,13 @@ void test_s8_options_do_not_silently_fallback() {
   TEST_ASSERT_EQUAL_UINT16(400, kRadioIntervalUnits);
 }
 
+void test_high_power_keeps_radio_and_payload_contract() {
+  TEST_ASSERT_EQUAL_INT8(20, kRadioTxPowerDbm);
+  TEST_ASSERT_EQUAL_UINT16(400, kRadioIntervalUnits);
+  TEST_ASSERT_EQUAL_UINT32(17, kPayloadLength);
+  TEST_ASSERT_EQUAL_HEX8(0, codingOption(true, false));
+}
+
 void test_trickle_first_opportunity_is_in_second_half() {
   for (uint32_t randomValue = 0; randomValue < 8000; randomValue++) {
     const uint32_t offset = trickleTransmitOffset(8000, randomValue);
@@ -205,6 +212,7 @@ int main(int, char**) {
   RUN_TEST(test_trickle_suppression_ablation_only_changes_decision);
   RUN_TEST(test_extended_manufacturer_boundary_for_sos_and_ack);
   RUN_TEST(test_s8_options_do_not_silently_fallback);
+  RUN_TEST(test_high_power_keeps_radio_and_payload_contract);
   RUN_TEST(test_trickle_first_opportunity_is_in_second_half);
   RUN_TEST(test_trickle_rejects_17ms_burst_and_stale_zero_deadline);
   RUN_TEST(test_trickle_deadlines_survive_millis_wraparound);

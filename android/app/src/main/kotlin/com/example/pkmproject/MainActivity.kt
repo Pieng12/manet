@@ -118,6 +118,9 @@ class MainActivity : FlutterActivity() {
                     "getBleCapabilities" -> {
                         result.success(bleCapabilities())
                     }
+                    "requestBluetoothEnable" -> {
+                        result.success(NativeBluetoothEnableRequest.request(this))
+                    }
                     "configureBleRadio" -> {
                         result.success(NativeBleRadio.configure(this, call.argument<String>("mode") ?: CodedRadioPolicy.CODED))
                     }

@@ -42,12 +42,17 @@ sudah tersedia:
 ## Pilot Uji Jarak Coded
 
 Research Monitor menyediakan tab **UJI JARAK** untuk satu ESP sumber dan Android
-penerima: posisi sumber, GPS HP, estimasi jarak horizontal, RSSI/PHY RX aktual,
-dan pengamatan 60 detik. Script laptop mengirim selama 20 menit dan memverifikasi
-penghentian ESP; arsip serta workbook pilot terpisah dari smoke dan 90 trial.
-Ikuti [panduan lengkap](docs/coded_range_test.md). Membutuhkan APK baru, bukan
-firmware baru. Tidak mengubah payload, algoritma/scheduler atau metrik penelitian;
-validasi fisik pilot ini masih harus dilakukan pada perangkat.
+penerima: posisi sumber, estimasi horizontal GPS beserta ketidakpastiannya,
+horizontal manual dan beda tinggi per titik, RSSI/PHY RX aktual, serta pengamatan
+60 detik. Jarak 3D manual tidak menggantikan GPS dan tidak disimpulkan dari RSSI.
+Tab ini dapat meminta persetujuan Android untuk menyalakan Bluetooth; Bluetooth
+mati tidak dapat menerima pesan BLE untuk menyalakan dirinya.
+Script laptop mengirim selama 20 menit dan memverifikasi penghentian ESP; arsip
+serta workbook pilot terpisah dari smoke dan pengujian utama.
+Ikuti [panduan lengkap](docs/coded_range_test.md). Perubahan pengukuran/dialog ini
+membutuhkan APK baru saja; perubahan TX power +20 dBm sebelumnya tetap memerlukan
+firmware baru jika belum di-flash. Payload, algoritma/scheduler dan metrik
+penelitian tidak berubah. Validasi fisik fitur baru tetap perlu pada perangkat.
 
 ## Arsitektur
 

@@ -27,6 +27,32 @@ def cell(value: Any) -> Any:
     return value
 
 
+def finite_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def gps_distance_quality(row: dict, run: dict) -> dict:
+    distance = row.get("distance_m")
+    accuracy = (row.get("location") or {}).get("accuracy_m")
+    source_accuracy = run.get("source_accuracy_m")
+    usable = (finite_number(distance) and distance >= 0 and
+              finite_number(accuracy) and 0 <= accuracy <= 20)
+    known_source = finite_number(source_accuracy) and source_accuracy >= 0
+    radii_sum = accuracy + source_accuracy if usable and known_source else None
+    quality = ("unavailable_or_inaccurate" if not usable else
+               "source_uncertainty_unknown" if not known_source else
+               "not_distinguishable_from_location_uncertainty" if distance <= radii_sum else
+               "gps_estimate")
+    descriptions = {
+        "unavailable_or_inaccurate": "Lokasi tidak tersedia atau tidak layak",
+        "source_uncertainty_unknown": "Ketidakpastian posisi ESP tidak terukur",
+        "not_distinguishable_from_location_uncertainty": "Jarak dekat belum dapat dibedakan dari ketidakpastian lokasi",
+        "gps_estimate": "Estimasi GPS; bukan jarak terukur",
+    }
+    return {"gps_distance_quality": quality, "gps_accuracy_radii_sum_m": radii_sum,
+            "gps_distance_explanation": descriptions[quality]}
+
+
 def export_range(directory: Path) -> Path:
     data = json.loads((directory / "range_trial.json").read_text(encoding="utf-8-sig"))
     manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8-sig"))
@@ -54,6 +80,21 @@ def export_range(directory: Path) -> Path:
     overview.update(timestamp_basis="unix_milliseconds_UTC",
                     max_hp_accuracy_m=20, max_rx_location_time_delta_ms=5000,
                     source_position_uncertainty_unknown=run.get("source_accuracy_m") is None)
+    resolved_distances = [r["distance_m"] for r in received if r.get("phase") == "session"
+                          and gps_distance_quality(r, run)["gps_distance_quality"] == "gps_estimate"]
+    completed_received_points = [point for point in data.get("points", [])
+                                 if point.get("status") == "completed" and point.get("receive_count", 0) > 0]
+    for column in ("measured_horizontal_m", "measured_3d_m"):
+        values = [point[column] for point in completed_received_points
+                  if finite_number(point.get(column)) and point[column] >= 0]
+        overview["farthest_received_manual_" + ("horizontal_m" if column == "measured_horizontal_m" else "3d_m")] = max(values, default=None)
+    overview.update(
+        farthest_resolved_gps_estimate_m=max(resolved_distances, default=None),
+        gps_distance_note="Jarak GPS merupakan estimasi horizontal. Ringkasan lama tetap disimpan, bukan bukti jarak aktual atau maksimum universal.",
+        uncertainty_note="Jumlah radius akurasi HP dan ESP adalah penanda kehati-hatian, bukan batas galat pasti atau interval statistik gabungan. Nilai GPS tidak dikurangi atau dinolkan.",
+        manual_measurement_note="Input per titik dipisahkan dari GPS. Metode meteran, denah berskala, dan perkiraan manual harus dibedakan; ringkasan manual hanya dari titik selesai yang menerima paket.",
+        height_note="Beda tinggi adalah HP dikurangi ESP, diisi manual. Jarak 3D dihitung hanya jika horizontal dan beda tinggi diisi; bukan dari GPS, RSSI, atau nomor lantai.",
+    )
     points = [{**common, **row, "source_run_completed": source.get("completed_duration", False),
                "source_stop_confirmed": source.get("stop_confirmed", False)} for row in data.get("points", [])]
     rx = []
@@ -61,7 +102,8 @@ def export_range(directory: Path) -> Path:
         location = row.get("location") or {}
         rx.append({**common, **row, "location_timestamp_ms": location.get("timestamp_ms"),
                    "latitude": location.get("latitude"), "longitude": location.get("longitude"),
-                   "accuracy_m": location.get("accuracy_m"), "coding": "unknown_s2_or_s8"})
+                   "accuracy_m": location.get("accuracy_m"), "coding": "unknown_s2_or_s8",
+                   **gps_distance_quality(row, run)})
     tables = [
         [{"field": key, "value": value} for key, value in overview.items()],
         [{"field": key, "value": value} for key, value in source.items()],

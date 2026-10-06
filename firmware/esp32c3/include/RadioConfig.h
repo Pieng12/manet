@@ -5,7 +5,7 @@
 
 namespace resqmesh {
 constexpr uint16_t kRadioIntervalUnits = 400; // 250 ms, not scheduler/burst time.
-constexpr int8_t kRadioTxPowerDbm = 9;
+constexpr int8_t kRadioTxPowerDbm = 20; // Request ESP32-C3 maximum; log controller-selected power.
 // Bluetooth 5.4 LE Set Extended Advertising Parameters V2 PHY options.
 constexpr uint8_t kPreferS8 = 0x02;
 constexpr uint8_t kRequireS8 = 0x04;

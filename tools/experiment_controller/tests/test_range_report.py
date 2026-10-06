@@ -97,6 +97,84 @@ class RangeReportTests(unittest.TestCase):
                 report.export_range(folder)
             self.assertFalse((folder / "resqmesh_range_analysis.xlsx").exists())
 
+    def test_nearby_gps_uncertainty_is_flagged_without_changing_raw_distance(self):
+        with TemporaryDirectory() as temporary:
+            folder = Path(temporary)
+            data = self.dataset(folder)
+            data["run"]["source_accuracy_m"] = 4.3
+            data["receives"][0]["distance_m"] = 11.6
+            data["receives"][0]["location"]["accuracy_m"] = 10.7
+            (folder / "range_trial.json").write_text(json.dumps(data))
+            raw = (folder / "range_trial.json").read_bytes()
+            workbook = load_workbook(report.export_range(folder))
+            rx = dict(zip([c.value for c in workbook["RX Samples"][1]],
+                          [c.value for c in workbook["RX Samples"][2]]))
+            overview = dict(workbook["Overview"].values)
+            self.assertEqual(11.6, rx["distance_m"])
+            self.assertEqual(15, rx["gps_accuracy_radii_sum_m"])
+            self.assertEqual("not_distinguishable_from_location_uncertainty", rx["gps_distance_quality"])
+            self.assertIn("belum dapat dibedakan", rx["gps_distance_explanation"])
+            self.assertIsNone(overview["farthest_resolved_gps_estimate_m"])
+            self.assertEqual(11.6, overview["farthest_observed_horizontal_m"])
+            self.assertEqual(raw, (folder / "range_trial.json").read_bytes())
+            workbook.close()
+
+    def test_manual_measurements_numeric_and_separate_from_gps(self):
+        with TemporaryDirectory() as temporary:
+            folder = Path(temporary)
+            data = self.dataset(folder)
+            manual = {"measured_horizontal_m": 3, "height_difference_m": -4,
+                      "measured_3d_m": 5, "measurement_method": "tape_measure",
+                      "point_note": "Lantai 1, dekat tangga"}
+            data["points"][0].update(status="completed", **manual)
+            data["receives"][0].update(point_id="p1", **manual)
+            (folder / "range_trial.json").write_text(json.dumps(data))
+            workbook = load_workbook(report.export_range(folder))
+            overview = dict(workbook["Overview"].values)
+            self.assertEqual(3, overview["farthest_received_manual_horizontal_m"])
+            self.assertEqual(5, overview["farthest_received_manual_3d_m"])
+            self.assertEqual(123.4, overview["farthest_observed_horizontal_m"])
+            for sheet in ("Test Points", "RX Samples"):
+                row = dict(zip([c.value for c in workbook[sheet][1]],
+                               [c.value for c in workbook[sheet][2]]))
+                for key, value in manual.items():
+                    self.assertEqual(value, row[key])
+            workbook.close()
+
+    def test_cancelled_and_nonreceiving_points_excluded_from_manual_summary(self):
+        with TemporaryDirectory() as temporary:
+            folder = Path(temporary)
+            data = self.dataset(folder)
+            data["points"] = [
+                {"status": "invalid", "receive_count": 10, "measured_horizontal_m": 1000},
+                {"status": "completed", "receive_count": 0, "measured_horizontal_m": 999},
+            ]
+            (folder / "range_trial.json").write_text(json.dumps(data))
+            workbook = load_workbook(report.export_range(folder))
+            overview = dict(workbook["Overview"].values)
+            self.assertIsNone(overview["farthest_received_manual_horizontal_m"])
+            self.assertIsNone(overview["farthest_received_manual_3d_m"])
+            workbook.close()
+
+    def test_gps_quality_rejects_bad_accuracy_and_preserves_unknown_source(self):
+        self.assertEqual("source_uncertainty_unknown", report.gps_distance_quality(
+            {"distance_m": 12, "location": {"accuracy_m": 5}}, {})["gps_distance_quality"])
+        for value in (21, float("nan"), -1, True):
+            self.assertEqual("unavailable_or_inaccurate", report.gps_distance_quality(
+                {"distance_m": 12, "location": {"accuracy_m": value}},
+                {"source_accuracy_m": 4})["gps_distance_quality"])
+
+    def test_old_archive_does_not_invent_manual_distance_or_height(self):
+        with TemporaryDirectory() as temporary:
+            folder = Path(temporary)
+            self.dataset(folder)
+            workbook = load_workbook(report.export_range(folder))
+            overview = dict(workbook["Overview"].values)
+            self.assertIsNone(overview["farthest_received_manual_horizontal_m"])
+            self.assertIsNone(overview["farthest_received_manual_3d_m"])
+            self.assertIn("diisi manual", overview["height_note"])
+            workbook.close()
+
 
 if __name__ == "__main__":
     unittest.main()

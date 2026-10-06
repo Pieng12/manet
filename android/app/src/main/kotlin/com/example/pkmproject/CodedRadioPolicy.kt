@@ -4,7 +4,7 @@ object CodedRadioPolicy {
     const val CODED = "coded"
     const val S8_REQUIRED = "coded_s8_required"
     const val INTERVAL_UNITS = 400 // 0.625 ms units; independent of scheduler/burst.
-    const val TX_POWER_DBM = -7 // AdvertisingSetParameters.TX_POWER_MEDIUM
+    const val TX_POWER_DBM = 1 // AdvertisingSetParameters.TX_POWER_HIGH; controller reports actual power.
     const val SCAN_REPORT_DELAY_MS = 0L
     fun rejection(sdk: Int, bluetooth: Boolean, permission: Boolean,
                   advertiser: Boolean, coded: Boolean, extended: Boolean, mode: String): String? = when {

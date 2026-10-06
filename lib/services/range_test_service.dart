@@ -68,6 +68,84 @@ class RangeFix {
   }
 }
 
+class RangePointMeasurement {
+  RangePointMeasurement({
+    this.horizontalM,
+    this.heightDifferenceM,
+    this.method = 'tape_measure',
+    this.note = '',
+  }) {
+    if ((horizontalM != null && (!horizontalM!.isFinite || horizontalM! < 0)) ||
+        (heightDifferenceM != null && !heightDifferenceM!.isFinite) ||
+        !const [
+          'tape_measure',
+          'scaled_plan',
+          'manual_estimate',
+        ].contains(method) ||
+        note.length > 500 ||
+        (distance3dM != null && !distance3dM!.isFinite)) {
+      throw ArgumentError('INVALID_POINT_MEASUREMENT');
+    }
+  }
+
+  final double? horizontalM;
+  // Signed HP height minus ESP height; never inferred from GPS or floor number.
+  final double? heightDifferenceM;
+  final String method;
+  final String note;
+
+  double? get distance3dM {
+    if (horizontalM == null || heightDifferenceM == null) return null;
+    final larger = math.max(horizontalM!, heightDifferenceM!.abs());
+    final smaller = math.min(horizontalM!, heightDifferenceM!.abs());
+    if (larger == 0) return 0;
+    return larger * math.sqrt(1 + math.pow(smaller / larger, 2));
+  }
+
+  Map<String, dynamic> toJson() => {
+    'measured_horizontal_m': horizontalM,
+    'height_difference_m': heightDifferenceM,
+    'measured_3d_m': distance3dM,
+    'measurement_method': horizontalM != null || heightDifferenceM != null
+        ? method
+        : null,
+    'point_note': note.trim(),
+  };
+}
+
+/// Accuracy radii are diagnostics, not a guaranteed error bound or correction.
+class RangeGpsDistance {
+  static Map<String, dynamic> assess(
+    double? distance,
+    double? hpAccuracy,
+    double? sourceAccuracy,
+  ) {
+    final knownSource =
+        sourceAccuracy != null &&
+        sourceAccuracy.isFinite &&
+        sourceAccuracy >= 0;
+    final usable =
+        distance != null &&
+        distance.isFinite &&
+        distance >= 0 &&
+        hpAccuracy != null &&
+        hpAccuracy.isFinite &&
+        hpAccuracy >= 0 &&
+        hpAccuracy <= 20;
+    final radiiSum = usable && knownSource ? hpAccuracy + sourceAccuracy : null;
+    return {
+      'gps_accuracy_radii_sum_m': radiiSum,
+      'gps_distance_quality': !usable
+          ? 'unavailable_or_inaccurate'
+          : !knownSource
+          ? 'source_uncertainty_unknown'
+          : distance <= radiiSum!
+          ? 'not_distinguishable_from_location_uncertainty'
+          : 'gps_estimate',
+    };
+  }
+}
+
 /// Pilot storage never owns the BLE scheduler or writes protocol state.
 class RangeTestService {
   RangeTestService({
@@ -504,7 +582,10 @@ class RangeTestService {
     });
   }
 
-  Future<void> startPoint({required bool scannerActive}) async {
+  Future<void> startPoint({
+    required bool scannerActive,
+    RangePointMeasurement? measurement,
+  }) async {
     final run = await latest();
     if (run == null ||
         run['status'] != 'running' ||
@@ -526,6 +607,7 @@ class RangeTestService {
       'status': 'running',
       'monotonic_start_ms': clock.monotonicTimeMs(),
       'monotonic_domain': clock.monotonicDomainId,
+      ...?measurement?.toJson(),
     };
     await (await store).insert('range_points', {
       'point_id': point['point_id'],
@@ -596,6 +678,7 @@ class RangeTestService {
     }
     final id = run['run_id'] as String;
     final rx = await rows('range_receives', id);
+    final points = await rows('range_points', id);
     for (final sample in rx) {
       final time = sample['timestamp_ms'] as int;
       sample['phase'] =
@@ -610,11 +693,41 @@ class RangeTestService {
       sample['location_time_delta_ms'] = sample['location'] == null
           ? null
           : ((sample['location'] as Map)['timestamp_ms'] as int) - time;
+      sample.addAll(
+        RangeGpsDistance.assess(
+          (sample['distance_m'] as num?)?.toDouble(),
+          ((sample['location'] as Map?)?['accuracy_m'] as num?)?.toDouble(),
+          (run['source_accuracy_m'] as num?)?.toDouble(),
+        ),
+      );
+      sample['point_id'] = null;
+      sample['measured_horizontal_m'] = null;
+      sample['height_difference_m'] = null;
+      sample['measured_3d_m'] = null;
+      sample['measurement_method'] = null;
+      sample['point_note'] = null;
+      if (sample['phase'] == 'session') {
+        for (final point in points) {
+          final end = point['ended_at_ms'] ?? clock.wallTimeMs();
+          if (time >= (point['started_at_ms'] as int) && time < (end as int)) {
+            sample['point_id'] = point['point_id'];
+            for (final key in const [
+              'measured_horizontal_m',
+              'height_difference_m',
+              'measured_3d_m',
+              'measurement_method',
+              'point_note',
+            ]) {
+              sample[key] = point[key];
+            }
+            break;
+          }
+        }
+      }
     }
     rx.sort(
       (a, b) => (a['timestamp_ms'] as int).compareTo(b['timestamp_ms'] as int),
     );
-    final points = await rows('range_points', id);
     for (final point in points) {
       final end = point['ended_at_ms'] ?? clock.wallTimeMs();
       final receives = rx
@@ -635,6 +748,9 @@ class RangeTestService {
       point['farthest_observed_m'] = distances.isEmpty
           ? null
           : distances.reduce(math.max);
+      point['gps_distance_quality'] = receives.isEmpty
+          ? 'no_receive_observed'
+          : receives.map((v) => v['gps_distance_quality']).toSet().join(';');
     }
     final positions = await rows('range_positions', id);
     final distances = rx
@@ -655,7 +771,23 @@ class RangeTestService {
       'farthest_observed_m': distances.isEmpty
           ? null
           : distances.reduce(math.max),
+      'farthest_received_manual_horizontal_m': _farthestManual(
+        points,
+        'measured_horizontal_m',
+      ),
+      'farthest_received_manual_3d_m': _farthestManual(points, 'measured_3d_m'),
     };
+  }
+
+  static num? _farthestManual(List<Map<String, dynamic>> points, String key) {
+    final values = points
+        .where(
+          (v) => v['status'] == 'completed' && (v['receive_count'] as int) > 0,
+        )
+        .map((v) => v[key])
+        .whereType<num>()
+        .toList();
+    return values.isEmpty ? null : values.reduce(math.max);
   }
 
   Future<Map<String, dynamic>> export({Directory? directory}) async {

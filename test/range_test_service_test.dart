@@ -211,6 +211,184 @@ void main() {
   });
 
   test(
+    'GPS near-source warning considers both radii without zeroing distance',
+    () {
+      final quality = RangeGpsDistance.assess(11.6, 10.7, 4.3);
+      expect(quality['gps_accuracy_radii_sum_m'], 15);
+      expect(
+        quality['gps_distance_quality'],
+        'not_distinguishable_from_location_uncertainty',
+      );
+      expect(
+        RangeGpsDistance.assess(100, 5, 4)['gps_distance_quality'],
+        'gps_estimate',
+      );
+      expect(
+        RangeGpsDistance.assess(100, 5, null)['gps_distance_quality'],
+        'source_uncertainty_unknown',
+      );
+      expect(
+        RangeGpsDistance.assess(100, 21, 4)['gps_distance_quality'],
+        'unavailable_or_inaccurate',
+      );
+      expect(
+        RangeGpsDistance.assess(double.nan, 5, 4)['gps_distance_quality'],
+        'unavailable_or_inaccurate',
+      );
+    },
+  );
+
+  test('manual 3D requires both values and permits zero and signed height', () {
+    expect(
+      RangePointMeasurement(horizontalM: 3, heightDifferenceM: -4).distance3dM,
+      5,
+    );
+    expect(
+      RangePointMeasurement(horizontalM: 0, heightDifferenceM: 0).distance3dM,
+      0,
+    );
+    expect(
+      RangePointMeasurement(horizontalM: 0, heightDifferenceM: -3).distance3dM,
+      3,
+    );
+    expect(RangePointMeasurement(horizontalM: 3).distance3dM, isNull);
+    expect(RangePointMeasurement(heightDifferenceM: 4).distance3dM, isNull);
+    expect(RangePointMeasurement().toJson()['measurement_method'], isNull);
+  });
+
+  test('manual measurements reject negative horizontal, NaN and infinity', () {
+    for (final value in [-1.0, double.nan, double.infinity]) {
+      expect(
+        () => RangePointMeasurement(horizontalM: value),
+        throwsArgumentError,
+      );
+    }
+    expect(
+      () => RangePointMeasurement(heightDifferenceM: double.infinity),
+      throwsArgumentError,
+    );
+    expect(() => RangePointMeasurement(method: 'rssi'), throwsArgumentError);
+    expect(() => RangePointMeasurement(note: 'x' * 501), throwsArgumentError);
+  });
+
+  test(
+    'point measurements survive reopening without GPS or protocol edits',
+    () async {
+      await start();
+      advance(1);
+      await service.startPoint(
+        scannerActive: true,
+        measurement: RangePointMeasurement(
+          horizontalM: 3,
+          heightDifferenceM: -4,
+          note: 'Lantai 1, dekat tangga',
+        ),
+      );
+      advance(1000);
+      await receive('manual-point');
+      await service.refresh();
+      advance(59000);
+      await service.refresh();
+      final reopened = RangeTestService(
+        storage: pilot,
+        protocol: protocol,
+        clock: clock,
+        enableTelemetry: (_, _) async {},
+        telemetry: () async => {},
+      );
+      final data = await reopened.snapshot();
+      final point = (data['points'] as List).single;
+      final rx = (data['receives'] as List).last;
+      expect(point['status'], 'completed');
+      expect(point['measured_horizontal_m'], 3);
+      expect(point['height_difference_m'], -4);
+      expect(point['measured_3d_m'], 5);
+      expect(rx['point_id'], point['point_id']);
+      expect(rx['measurement_method'], 'tape_measure');
+      expect(rx['point_note'], 'Lantai 1, dekat tangga');
+      expect(rx['distance_m'], isNull);
+      expect(rx['location'], isNull);
+      expect(data['farthest_received_manual_horizontal_m'], 3);
+      expect(data['farthest_received_manual_3d_m'], 5);
+      expect(await protocol.query('experiment_events'), hasLength(2));
+    },
+  );
+
+  test(
+    'GPS raw distance is retained separately from measured horizontal',
+    () async {
+      await start();
+      advance(1);
+      await service.startPoint(
+        scannerActive: true,
+        measurement: RangePointMeasurement(horizontalM: 0.5),
+      );
+      await service.recordFix(RangeFix(clock.wallMs, 0, 0.0001, 12));
+      await receive('nearby');
+      advance(1);
+      await service.refresh();
+      final sample = ((await service.snapshot())['receives'] as List).last;
+      expect(sample['distance_m'], closeTo(11.12, 0.1));
+      expect(sample['measured_horizontal_m'], 0.5);
+      expect(sample['measured_3d_m'], isNull);
+      expect(sample['gps_distance_quality'], 'source_uncertainty_unknown');
+    },
+  );
+
+  test(
+    'cancelled and nonreceiving points never inflate manual receive summary',
+    () async {
+      await start();
+      advance(1);
+      await service.startPoint(
+        scannerActive: true,
+        measurement: RangePointMeasurement(
+          horizontalM: 1000,
+          heightDifferenceM: 100,
+        ),
+      );
+      advance(1);
+      await receive('cancelled-rx');
+      await service.refresh();
+      await service.cancelPoint('APP_BACKGROUND');
+      advance(1);
+      await service.startPoint(
+        scannerActive: true,
+        measurement: RangePointMeasurement(horizontalM: 999),
+      );
+      advance(60000);
+      await service.refresh();
+      final data = await service.snapshot();
+      expect(data['farthest_received_manual_horizontal_m'], isNull);
+      expect(data['farthest_received_manual_3d_m'], isNull);
+    },
+  );
+
+  test(
+    'manual values do not carry into next point or RX outside point window',
+    () async {
+      await start();
+      advance(1);
+      await service.startPoint(
+        scannerActive: true,
+        measurement: RangePointMeasurement(horizontalM: 5),
+      );
+      advance(60000);
+      await receive('at-end');
+      await service.refresh();
+      await service.startPoint(scannerActive: true);
+      advance(1);
+      await receive('next-point');
+      await service.refresh();
+      final data = await service.snapshot();
+      expect((data['points'] as List).last['measured_horizontal_m'], isNull);
+      final rx = data['receives'] as List;
+      expect(rx[1]['measured_horizontal_m'], isNull);
+      expect(rx.last['measured_horizontal_m'], isNull);
+    },
+  );
+
+  test(
     'physical receive time drives GPS distance, not UI refresh time',
     () async {
       await prepare();
