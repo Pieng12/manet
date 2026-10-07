@@ -20,6 +20,8 @@ import 'package:pkmproject/services/native_bridge_service.dart';
 import 'package:pkmproject/services/relay_queue_service.dart';
 import 'package:pkmproject/services/research_session_service.dart';
 import 'package:pkmproject/services/topology_policy.dart';
+import 'package:pkmproject/services/neighbor_runtime.dart';
+import 'package:pkmproject/services/neighbor_transport.dart';
 import 'package:pkmproject/services/workmanager_service.dart';
 import 'package:pkmproject/sync_service.dart';
 import 'package:pkmproject/utils/hash_utils.dart';
@@ -186,6 +188,13 @@ class BleRelayService {
       nextEligibleAt: now,
       preemptCurrent: true,
     );
+    if (NeighborRuntime.instance.statusEnabled) {
+      await NeighborRuntime.instance.log(
+        'INITIAL_FORWARD_PENDING',
+        state: message.stateIdentity,
+        monotonic: now,
+      );
+    }
     if (_relayQueue.mode.usesTrickle) {
       await _logTrickleReset(
         message: message,
@@ -259,6 +268,20 @@ class BleRelayService {
       receivedAtMs: receivedAtMs,
       processingNowMs: processingNowMs,
     );
+    if (payload.length != BlePacket.length) {
+      return _processNeighborFrame(
+        payload,
+        rssi: rssi,
+        receivedAtMs: rxAtMs,
+        receivedElapsedRealtimeMs: receivedElapsedRealtimeMs,
+        observationId: observationId,
+      );
+    }
+    final runtime = NeighborRuntime.instance;
+    await runtime.load();
+    if (runtime.enabled && sourcePath != 'neighbor_inner') {
+      return BleProcessingResult.invalid;
+    }
     final packet = BlePacket.unpack(payload);
     if (packet == null) {
       final claimResult = await _claimProtocolObservation(
@@ -359,6 +382,165 @@ class BleRelayService {
       _log('Retryable BLE processing failure for ${packet.identity}: $e');
       return BleProcessingResult.failedRetryable;
     }
+  }
+
+  Future<BleProcessingResult> _processNeighborFrame(
+    Uint8List payload, {
+    int? rssi,
+    required int receivedAtMs,
+    int? receivedElapsedRealtimeMs,
+    String? observationId,
+  }) async {
+    final runtime = NeighborRuntime.instance;
+    await runtime.load();
+    final frame = NeighborFrame.decode(payload);
+    if (frame == null || !runtime.allows(frame)) {
+      return BleProcessingResult.invalid;
+    }
+    final session = await ResearchSessionService().currentSession();
+    final trial = session == null
+        ? null
+        : await ResearchSessionService().currentTrial(
+            sessionId: session.sessionId,
+          );
+    if (trial == null || session?.protocolActive != true) {
+      return BleProcessingResult.invalid;
+    }
+    if (frame.inner != null &&
+        BlePacket.unpack(frame.inner!)!.isAck &&
+        !session!.ackEnabled) {
+      return BleProcessingResult.invalid;
+    }
+    final observation = 'rn|${frame.burstIdentity}';
+    if (observationId != null && observationId != observation) {
+      return BleProcessingResult.invalid;
+    }
+    final now = _clock.monotonicTimeMs();
+    // Convert validated physical wall time into this isolate's monotonic domain.
+    final observed = now - (_clock.wallTimeMs() - receivedAtMs);
+    final changed =
+        runtime.statusEnabled &&
+        runtime.controller!.observe(frame, observed, now);
+    await runtime.emitChanges(now);
+    if (changed && runtime.statusEnabled) {
+      await runtime.log(
+        'NEIGHBOR_STATUS_UPDATED',
+        frame: frame,
+        receivedAt: receivedAtMs,
+        monotonic: receivedElapsedRealtimeMs,
+        observation: observation,
+        clockDomain: 'android_elapsed_realtime',
+      );
+      final items = await _relayQueue.getAllItems();
+      for (final item in items.where((i) => i.isSos)) {
+        final message = await _dbHelper.getMessageById(item.messageId);
+        final state = await _relayQueue.trickleStateFor(item.messageId);
+        if (message != null &&
+            state != null &&
+            runtime.controller!.repairAllowed(
+              message.stateIdentity,
+              now,
+              state.intervalMs,
+              MeshConfig.trickleIminMs,
+            )) {
+          await _relayQueue.recordTopologyInconsistency(
+            messageId: item.messageId,
+            nowMs: now,
+            observationId: '$observation|repair',
+            completedAtMs: _clock.wallTimeMs(),
+          );
+          await runtime.log(
+            'REPAIR_NEEDED',
+            frame: frame,
+            state: message.stateIdentity,
+            reason: 'NEW_NEIGHBOR_OR_CHANGED_SNAPSHOT',
+          );
+          await _advertiser.advertiseLatestOrStop();
+        }
+      }
+    }
+    if (frame.type == NeighborFrameType.status) {
+      final claim = await _dbHelper.claimBleObservation(
+        observationId: observation,
+        packetType: 'status',
+        receivedAtMs: receivedAtMs,
+        processedAtMs: _clock.wallTimeMs(),
+        sourcePath: 'neighbor_status',
+        trialId: trial.trialId,
+      );
+      if (claim != null && !claim.shouldProcess) {
+        if (claim.isCompleted) {
+          await runtime.log(
+            'STATUS_RECEIVED',
+            frame: frame,
+            receivedAt: claim.firstReceivedAt,
+            monotonic: receivedElapsedRealtimeMs,
+            observation: observation,
+            clockDomain: 'android_elapsed_realtime',
+          );
+        }
+        return claim.isCompleted
+            ? BleProcessingResult.transportDuplicate
+            : BleProcessingResult.transportInProgress;
+      }
+      await runtime.log(
+        'STATUS_RECEIVED',
+        frame: frame,
+        receivedAt: claim?.firstReceivedAt ?? receivedAtMs,
+        monotonic: receivedElapsedRealtimeMs,
+        observation: observation,
+        clockDomain: 'android_elapsed_realtime',
+      );
+      await _dbHelper.completeBleObservation(observation, _clock.wallTimeMs());
+      return BleProcessingResult.accepted;
+    }
+    final packet = BlePacket.unpack(frame.inner!)!;
+    if (packet.isAck && !session!.ackEnabled) {
+      return BleProcessingResult.invalid;
+    }
+    final result = await processIncomingPayload(
+      frame.inner!,
+      rssi: rssi,
+      receivedAtMs: receivedAtMs,
+      receivedElapsedRealtimeMs: receivedElapsedRealtimeMs,
+      observationId: observation,
+      observerKey: 'tx:${frame.transmitter}',
+      sourcePath: 'neighbor_inner',
+    );
+    if (!result.shouldRetryInbox &&
+        result != BleProcessingResult.invalid &&
+        result != BleProcessingResult.stale) {
+      final db = await _dbHelper.database;
+      final rows = await db.query(
+        'processed_ble_observations',
+        where: 'observation_id = ?',
+        whereArgs: [observation],
+        limit: 1,
+      );
+      await runtime.log(
+        'DATA_RECEIVED',
+        frame: frame,
+        state: packet.stateIdentity,
+        receivedAt: rows.isEmpty
+            ? receivedAtMs
+            : rows.first['first_received_at'] as int,
+        monotonic: receivedElapsedRealtimeMs,
+        observation: observation,
+        rssi: rssi,
+        clockDomain: 'android_elapsed_realtime',
+      );
+      if (result == BleProcessingResult.accepted && runtime.statusEnabled) {
+        await runtime.log(
+          'INITIAL_FORWARD_PENDING',
+          frame: frame,
+          state: packet.stateIdentity,
+          receivedAt: receivedAtMs,
+          monotonic: receivedElapsedRealtimeMs,
+          clockDomain: 'android_elapsed_realtime',
+        );
+      }
+    }
+    return result;
   }
 
   Future<_ProtocolObservationClaim> _claimProtocolObservation({

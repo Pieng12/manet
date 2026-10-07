@@ -1,6 +1,7 @@
 package id.ac.usu.resqmesh
 
 import android.content.Context
+import android.content.Intent
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
@@ -31,6 +32,25 @@ class NativeBleInboxWorker(
             return Result.success()
         }
         NativeBleInbox.clearPermissionBlocked(applicationContext)
+
+        // Neighbor evidence belongs to the same isolate that selects DATA/STATUS.
+        val neighborProfile = applicationContext.getSharedPreferences(
+            "FlutterSharedPreferences", Context.MODE_PRIVATE
+        ).getString("flutter.neighbor_transport_profile_v1", null)
+        if (NeighborTransport.requiresSchedulerOwner(neighborProfile)) {
+            return try {
+                val intent = Intent(applicationContext, MeshBackgroundService::class.java)
+                    .setAction(MeshBackgroundService.OWNER_INBOX_DRAIN_ACTION)
+                if (Build.VERSION.SDK_INT >= 26) applicationContext.startForegroundService(intent)
+                else applicationContext.startService(intent)
+                // Keep the inbox durable if the owner cannot start or drain it yet.
+                if (NativeBleInbox.pendingCount(applicationContext) == 0) Result.success()
+                else Result.retry()
+            } catch (error: Exception) {
+                Log.w(TAG, "Owner recovery deferred; inbox retained", error)
+                Result.retry()
+            }
+        }
 
         val completed = CountDownLatch(1)
         val success = AtomicBoolean(false)

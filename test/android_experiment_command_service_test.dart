@@ -8,6 +8,7 @@ import 'package:pkmproject/services/experiment_logger.dart';
 import 'package:pkmproject/services/relay_queue_service.dart';
 import 'package:pkmproject/services/research_session_service.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -19,6 +20,7 @@ void main() {
   var observationStops = 0;
 
   setUp(() async {
+    SharedPreferences.setMockInitialValues({});
     activated = 0;
     observationStarts = 0;
     observationStops = 0;
@@ -48,6 +50,9 @@ void main() {
               'nativeScanActive': true,
               'nativeAdvertisingActive': false,
             };
+          }
+          if (call.method == 'setResearchParticipation') {
+            return <String, Object?>{'ok': true, 'confirmed_enabled': true};
           }
           return true;
         });
@@ -115,6 +120,51 @@ void main() {
       expect(status['method_design_version'], 3);
       expect(status['trickle_imin_ms'], 8000);
       expect(status['trickle_imax_ms'], 256000);
+    },
+  );
+
+  test(
+    'neighbor reset finalizes interrupted trial without replacing completed result',
+    () async {
+      expect(
+        (await commands.execute('configure_session', {
+          ...configureArgs(),
+          'transport_profile': 'neighbor_graph_v1',
+          'topology': 'neighbor_graph_v1',
+          'mode': 'trickle_no_suppression',
+          'allowed_transmitters': [123],
+        }))['ok'],
+        true,
+      );
+      expect(
+        (await commands.execute('start_trial', {
+          'command_id': 'start-new',
+          'session_id': 'session-external',
+          'trial_id': 'interrupted',
+          'trial_code': 'S0-MAIN',
+        }))['ok'],
+        true,
+      );
+      await commands.execute('reset_trial', {
+        'command_id': 'reset-interrupted',
+        'trial_id': 'interrupted',
+      });
+      expect((await db.query('experiment_trials')).single['result'], 'INVALID');
+      expect(
+        (await db.query('experiment_trials')).single['failure_reason'],
+        'RESET_WITHOUT_FINAL_RESULT',
+      );
+      expect(
+        (await commands.execute('configure_session', {
+          ...configureArgs(),
+          'command_id': 'cfg-recovery',
+          'transport_profile': 'neighbor_graph_v1',
+          'topology': 'neighbor_graph_v1',
+          'allowed_transmitters': [123],
+        }))['ok'],
+        true,
+      );
+      expect(await db.query('experiment_events'), isNotEmpty);
     },
   );
 

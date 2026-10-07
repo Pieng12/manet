@@ -55,6 +55,9 @@ class BatchIncompleteError(RuntimeError):
 
 
 def build_plan(config: dict[str, Any]) -> list[TrialSpec]:
+    if config.get("transport_profile") == "neighbor_graph_v1":
+        from .neighbor_experiment import neighbor_plan
+        return neighbor_plan(config)
     target = int(config.get("valid_trials_per_condition", config.get("trials_per_condition", 15)))
     strategy = config.get("trial_order", "balanced_randomized")
     if strategy == "balanced_randomized":
@@ -476,6 +479,9 @@ class ExperimentController:
                 normalized.setdefault("hypothesis", spec.hypothesis)
                 normalized.setdefault("clock_sync_valid", True)
                 normalized.setdefault("clock_offset_ms", self.clock_offsets.get(node.node_id, 0.0))
+                if self.config.get("transport_profile") == "neighbor_graph_v1":
+                    normalized["native_clock_offset_ms"] = normalized.get("clock_offset_ms")
+                    normalized["clock_offset_ms"] = self.clock_offsets.get(node.node_id, 0.0)
                 accepted.append(normalized)
             write_jsonl(
                 self.output_dir / "raw" / spec.trial_id / f"{node.node_id}.jsonl",
@@ -637,7 +643,7 @@ class ExperimentController:
             "attempt": spec.number,
             "source_node_id": source_ids[0],
             "destination_node_ids": sorted(destination_ids),
-            "expected_hop_in": int(spec.hypothesis[1:]),
+            "expected_hop_in": 0 if self.config.get("transport_profile") == "neighbor_graph_v1" else int(spec.hypothesis[1:]),
             "observation_window_ms": int(
                 float(self.config["observation_window_seconds"]) * 1000
             ),
@@ -675,6 +681,7 @@ class ExperimentController:
                 if result.get("ok") is not True:
                     raise DeviceError(f"start failed: {node.node_id}: {result}")
             self.readiness(spec, require_active_trial=True)
+            self.before_trigger(spec)
             sources = [node for node in self.nodes if node.node_id == source_ids[0]]
             observation_window_ms = int(
                 float(self.config["observation_window_seconds"]) * 1000
@@ -706,7 +713,7 @@ class ExperimentController:
                 raise DeviceError("SOURCE_START_DISCOVERED_AFTER_OBSERVATION_WINDOW")
             observation_deadline = time.monotonic() + remaining_ms / 1000
             self._save_manifest()
-            self.sleep(max(0.0, observation_deadline - time.monotonic()))
+            self.observe_until(spec, observation_deadline)
             record["observation_stop_command_at_ms"] = time.time_ns() // 1_000_000
             self._save_manifest()
             for node in self.nodes:
@@ -773,6 +780,7 @@ class ExperimentController:
                 event_count=len(events),
                 ended_at_ms=time.time_ns() // 1_000_000,
             )
+            self.archive_failed_trial(spec, record)
         finally:
             reset_errors: list[str] = []
             for node in self.nodes:
@@ -814,6 +822,15 @@ class ExperimentController:
             if record.get("terminal"):
                 counts[(record["mode"], record["hypothesis"])][record.get("result", "INVALID")] += 1
         return counts
+
+    def before_trigger(self, spec: TrialSpec) -> None:
+        pass
+
+    def archive_failed_trial(self, spec: TrialSpec, record: dict[str, Any]) -> None:
+        pass
+
+    def observe_until(self, spec: TrialSpec, deadline: float) -> None:
+        self.sleep(max(0.0, deadline - time.monotonic()))
 
     def _append_replacement(self, mode: str, hypothesis: str) -> bool:
         attempts = [

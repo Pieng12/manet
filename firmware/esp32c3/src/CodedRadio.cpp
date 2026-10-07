@@ -1,5 +1,6 @@
 #include <NimBLEDevice.h>
 #include <algorithm>
+#include <vector>
 #include "nimble/nimble/host/src/ble_hs_hci_priv.h"
 #include "nimble/nimble/host/include/host/ble_hs_mbuf.h"
 #include "CodedRadio.h"
@@ -38,14 +39,19 @@ bool CodedRadio::configure(bool requireS8) {
 }
 
 bool CodedRadio::start(const std::array<uint8_t, kPayloadLength>& payload) {
+  return start(payload.data(), payload.size());
+}
+
+bool CodedRadio::start(const uint8_t* payload, size_t length) {
+  if (!payload || length > 86 || length < kPayloadLength) return false;
   if (!configured_) return false;
   if (!stop()) return false;
-  const auto manufacturer = manufacturerPayload(payload);
   // Manufacturer AD structure: length, type, company ID exactly once, payload.
-  std::array<uint8_t, kPayloadLength + 4> data{};
-  data[0] = manufacturer.size() + 1;
+  std::vector<uint8_t> data(length + 4);
+  data[0] = length + 3;
   data[1] = 0xff;
-  std::copy(manufacturer.begin(), manufacturer.end(), data.begin() + 2);
+  data[2] = data[3] = 0xff;
+  std::copy(payload, payload + length, data.begin() + 4);
   auto* buffer = ble_hs_mbuf_from_flat(data.data(), data.size());
   if (buffer == nullptr) { lastRc_ = BLE_HS_ENOMEM; return false; }
   // GAP takes ownership of buffer on both success and failure.

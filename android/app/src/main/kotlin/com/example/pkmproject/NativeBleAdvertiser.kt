@@ -30,14 +30,20 @@ object NativeBleAdvertiser {
         val next = (payload ?: this.payload)?.copyOf()
         stopAdvertising()
         this.debugVisible = debugVisible
-        val rejection = NativeBleRadio.rejection(context)
-            ?: if (next?.size != NativeBleConfig.PROTOCOL_LENGTH_BYTES) "INVALID_PAYLOAD_LENGTH" else null
+        val rejection = if (!ResearchParticipation.txEnabled(context)) "PARTICIPATION_DISABLED" else NativeBleRadio.rejection(context)
+            ?: if (next == null || !NeighborTransport.validPayload(next)) "INVALID_PAYLOAD_LENGTH" else null
         if (rejection != null) {
             status = "failed"; error = rejection; NativeBleRadio.lastError = rejection
             callback?.invoke(false, status, error)
             return false
         }
         this.payload = next
+        val adapter = (context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager).adapter
+        if (next!!.size + 4 > adapter.leMaximumAdvertisingDataLength) {
+            status = "failed"; error = "ADVERTISING_CAPACITY_EXCEEDED"
+            callback?.invoke(false, status, error)
+            return false
+        }
         val owner = try {
             (context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager)
                 .adapter?.bluetoothLeAdvertiser

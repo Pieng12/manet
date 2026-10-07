@@ -10,6 +10,7 @@ import 'package:pkmproject/services/ble_protocol.dart';
 import 'package:pkmproject/services/database_helper.dart';
 import 'package:pkmproject/services/experiment_clock.dart';
 import 'package:pkmproject/services/trickle_scheduler.dart';
+import 'package:pkmproject/services/neighbor_runtime.dart';
 import 'package:pkmproject/utils/protocol_timestamp.dart';
 import 'package:pkmproject/utils/sos_state_ordering.dart';
 import 'package:pkmproject/utils/sos_status_priority.dart';
@@ -85,6 +86,9 @@ class RelayQueueService {
   final ForwardingMode? _modeOverride;
   final ClockSource _clock;
   int _consecutiveAckSlots = 0;
+  final Map<String, String> _neighborReasons = {};
+  String? neighborDecisionReason(String messageId) =>
+      _neighborReasons[messageId];
 
   static ForwardingMode? _sessionMode;
 
@@ -99,6 +103,7 @@ class RelayQueueService {
     return switch (value.toLowerCase()) {
       'trickle' => ForwardingMode.trickle,
       'trickle_no_suppression' => ForwardingMode.trickleNoSuppression,
+      'trickle_neighbor_status' => ForwardingMode.trickleNeighborStatus,
       'basic' || 'basic_flooding' => ForwardingMode.basicFlooding,
       _ => throw ArgumentError('Unknown forwarding mode: $value'),
     };
@@ -923,12 +928,42 @@ WHERE id = ?
     required int nowMs,
   }) async {
     final db = await _db;
-    final decision = await TrickleScheduler(
+    var decision = await TrickleScheduler(
       suppressionEnabled: mode.suppressionEnabled,
       database: db,
       random: _random,
       clock: _clock,
     ).handleQueueEvent(messageId: item.messageId, nowMs: nowMs);
+    if (mode == ForwardingMode.trickleNeighborStatus &&
+        decision.shouldAdvertise) {
+      final runtime = NeighborRuntime.instance;
+      await runtime.load();
+      if (!runtime.enabled) {
+        throw StateError('Neighbor mode requires its scoped transport profile');
+      }
+      final rows = await db.query(
+        'sos_messages',
+        where: 'id = ?',
+        whereArgs: [item.messageId],
+        limit: 1,
+      );
+      if (rows.isNotEmpty) {
+        final state = SOSMessage.fromDbMap(rows.first).stateIdentity;
+        final reason = runtime.controller!.decision(
+          state,
+          nowMs,
+          firstForwardPending: item.relayCount == 0,
+        );
+        _neighborReasons[item.messageId] = reason;
+        if (reason == 'ALL_OBSERVED_HAVE') {
+          decision = TrickleTransmitDecision(
+            type: TrickleTransmitDecisionType.suppressTransmit,
+            state: decision.state,
+            nextEligibleAt: decision.nextEligibleAt,
+          );
+        }
+      }
+    }
     if (!decision.shouldAdvertise) {
       await db.update(
         'relay_queue',

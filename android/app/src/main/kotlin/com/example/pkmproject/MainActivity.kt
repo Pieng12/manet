@@ -129,6 +129,15 @@ class MainActivity : FlutterActivity() {
                         result.success(true)
                     }
                     "getRangeRxTelemetry" -> result.success(RangeRxTelemetry.snapshot(this))
+                    "requestResearchCommand" -> {
+                        val intent = android.content.Intent(this, MeshBackgroundService::class.java)
+                            .setAction(MeshBackgroundService.RESEARCH_COMMAND_ACTION)
+                            .putExtra("research_command_json", call.argument<String>("json") ?: "{}")
+                        if (android.os.Build.VERSION.SDK_INT >= 26) startForegroundService(intent) else startService(intent)
+                        result.success(true)
+                    }
+                    "setResearchParticipation" -> result.success(ResearchParticipation.set(this,
+                        call.argument<Boolean>("enabled") == true, call.argument<Boolean>("rxOnly") == true))
                     "configureResearchPhyTelemetry" -> {
                         ResearchRxTelemetry.configure(this, call.argument<String>("sessionId") ?: "",
                             call.argument<String>("trialId") ?: "", call.argument<String>("nodeId") ?: "",

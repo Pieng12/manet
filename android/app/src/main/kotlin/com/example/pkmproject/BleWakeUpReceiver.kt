@@ -136,6 +136,8 @@ class BleWakeUpReceiver : BroadcastReceiver() {
         secondaryPhy: Int?,
         legacy: Boolean?
     ) {
+        val envelope = NeighborTransport.decode(rawPayload)
+        if (rawPayload.size >= 2 && rawPayload[0] == 0x52.toByte() && rawPayload[1] == 0x4e.toByte() && envelope == null) return
         var startIndex = -1
         for (i in 0 until rawPayload.size - 1) {
             if (rawPayload[i] == 0x52.toByte() && rawPayload[i + 1] == 0x4D.toByte()) {
@@ -144,13 +146,13 @@ class BleWakeUpReceiver : BroadcastReceiver() {
             }
         }
 
-        if (startIndex == -1 ||
+        if (envelope == null && (startIndex == -1 ||
             rawPayload.size < startIndex + NativeBleConfig.PROTOCOL_LENGTH_BYTES
-        ) {
+        )) {
             return
         }
 
-        val payload = rawPayload.sliceArray(
+        val payload = if (envelope != null) rawPayload.copyOf() else rawPayload.sliceArray(
             startIndex until startIndex + NativeBleConfig.PROTOCOL_LENGTH_BYTES
         )
         val payloadBase64 = android.util.Base64.encodeToString(

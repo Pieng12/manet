@@ -1,0 +1,227 @@
+import 'package:pkmproject/models/message_identity.dart';
+import 'package:pkmproject/services/ble_protocol.dart';
+import 'package:pkmproject/services/neighbor_transport.dart';
+
+enum NeighborKnowledge { have, missing, unknown }
+
+class NeighborParameters {
+  const NeighborParameters({
+    this.statusPeriodMs = 12000,
+    this.statusBurstMs = 500,
+    this.freshnessMs = 45000,
+    this.discoveryJitterMs = 1500,
+    this.resetCooldownMs = 8000,
+    this.capacity = 16,
+  });
+  final int statusPeriodMs,
+      statusBurstMs,
+      freshnessMs,
+      discoveryJitterMs,
+      resetCooldownMs,
+      capacity;
+  void validate() {
+    if (statusPeriodMs < 1000 ||
+        statusBurstMs < 250 ||
+        statusBurstMs > 2000 ||
+        freshnessMs < statusPeriodMs * 2 ||
+        discoveryJitterMs < 0 ||
+        resetCooldownMs < 1000 ||
+        capacity < 5 ||
+        capacity > 64) {
+      throw ArgumentError('Unsafe neighbor parameters');
+    }
+  }
+}
+
+class _Neighbor {
+  _Neighbor(this.boot, this.sequence, this.at, this.complete, this.states);
+  final int boot, sequence, at;
+  final bool complete;
+  final List<StateIdentity> states;
+}
+
+class NeighborStatusController {
+  NeighborStatusController({
+    required this.scope,
+    this.parameters = const NeighborParameters(),
+  }) {
+    parameters.validate();
+  }
+  final int scope;
+  final NeighborParameters parameters;
+  final Map<int, _Neighbor> _neighbors = {};
+  final Set<String> _seen = {};
+  final Set<String> _forwarded = {};
+  final Set<int> _expired = {};
+  final List<Map<String, Object>> _changes = [];
+  int? _lastRepair;
+  final Set<int> _repairPending = {};
+
+  bool observe(NeighborFrame frame, int receivedMonotonicMs, int nowMs) {
+    if (frame.scope != scope ||
+        receivedMonotonicMs > nowMs ||
+        nowMs - receivedMonotonicMs > parameters.freshnessMs ||
+        _seen.contains(frame.burstIdentity)) {
+      return false;
+    }
+    final previous = _neighbors[frame.transmitter];
+    if (previous == null && _neighbors.length >= parameters.capacity) {
+      return false;
+    }
+    if (previous != null &&
+        (receivedMonotonicMs < previous.at ||
+            frame.boot < previous.boot ||
+            (frame.boot == previous.boot &&
+                frame.sequence <= previous.sequence))) {
+      return false;
+    }
+    _seen.add(frame.burstIdentity);
+    if (previous == null) {
+      _changes.add({
+        'event': 'NEIGHBOR_DISCOVERED',
+        'transmitter_id': frame.transmitter,
+        'boot_id': frame.boot,
+        'transmission_sequence': frame.sequence,
+        'scope': scope,
+        'observed_at': receivedMonotonicMs,
+      });
+    }
+    _expired.remove(frame.transmitter);
+    final packet = frame.inner == null ? null : BlePacket.unpack(frame.inner!);
+    final states = packet == null
+        ? (frame.complete ? frame.inventory : <StateIdentity>[])
+        : [packet.stateIdentity];
+    final complete = frame.type == NeighborFrameType.status && frame.complete;
+    if (previous == null ||
+        previous.boot != frame.boot ||
+        previous.complete != complete ||
+        previous.states.map((s) => s.value).join('|') !=
+            states.map((s) => s.value).join('|') ||
+        nowMs - previous.at > parameters.freshnessMs) {
+      _repairPending.add(frame.transmitter);
+    }
+    // Only the latest sequence per neighbor is required; bounded replay memory.
+    if (_seen.length > parameters.capacity * 8) _seen.remove(_seen.first);
+    _neighbors[frame.transmitter] = _Neighbor(
+      frame.boot,
+      frame.sequence,
+      receivedMonotonicMs,
+      complete,
+      states,
+    );
+    return true;
+  }
+
+  NeighborKnowledge knowledge(int id, StateIdentity local, int nowMs) {
+    final peer = _neighbors[id];
+    if (peer == null ||
+        nowMs < peer.at ||
+        nowMs - peer.at > parameters.freshnessMs) {
+      return NeighborKnowledge.unknown;
+    }
+    for (final state in peer.states) {
+      if (state.value == local.value) return NeighborKnowledge.have;
+      // A newer state is evidence not to repair backwards, including tombstones.
+      if (state.messageKey.senderCrc == local.messageKey.senderCrc &&
+          (state.messageKey.protocolTimestampMs >
+                  local.messageKey.protocolTimestampMs ||
+              (state.messageKey == local.messageKey &&
+                  (state.isAck ||
+                      _priority(state.statusIndex) >
+                          _priority(local.statusIndex))))) {
+        return NeighborKnowledge.have;
+      }
+    }
+    return peer.complete
+        ? NeighborKnowledge.missing
+        : NeighborKnowledge.unknown;
+  }
+
+  static int _priority(int status) => switch (status) {
+    1 => 0,
+    0 => 1,
+    _ => 2,
+  };
+
+  Map<int, NeighborKnowledge> snapshot(StateIdentity state, int nowMs) => {
+    for (final id in _neighbors.keys) id: knowledge(id, state, nowMs),
+  };
+
+  List<Map<String, Object>> takeChanges(int nowMs) {
+    for (final entry in _neighbors.entries) {
+      if (nowMs - entry.value.at > parameters.freshnessMs &&
+          _expired.add(entry.key)) {
+        _changes.add({
+          'event': 'NEIGHBOR_STATUS_EXPIRED',
+          'transmitter_id': entry.key,
+          'boot_id': entry.value.boot,
+          'transmission_sequence': entry.value.sequence,
+          'scope': scope,
+          'status_age_ms': nowMs - entry.value.at,
+        });
+      }
+    }
+    final result = List<Map<String, Object>>.of(_changes);
+    _changes.clear();
+    return result;
+  }
+
+  List<Map<String, Object>> peers(int nowMs) => [
+    for (final entry in _neighbors.entries)
+      {
+        'transmitter_id': entry.key,
+        'boot_id': entry.value.boot,
+        'sequence': entry.value.sequence,
+        'status_age_ms': nowMs - entry.value.at,
+        'complete': entry.value.complete,
+        'fresh':
+            nowMs >= entry.value.at &&
+            nowMs - entry.value.at <= parameters.freshnessMs,
+      },
+  ];
+
+  bool statusHasSlot(int nowMs, int? nextDataMs) =>
+      nextDataMs == null || nextDataMs - nowMs > parameters.statusBurstMs + 250;
+
+  String decision(
+    StateIdentity state,
+    int nowMs, {
+    required bool firstForwardPending,
+  }) {
+    if (firstForwardPending && !_forwarded.contains(state.value)) {
+      return 'INITIAL_FORWARD_PENDING';
+    }
+    final statuses = snapshot(state, nowMs).values;
+    if (statuses.contains(NeighborKnowledge.missing)) return 'FRESH_MISSING';
+    if (statuses.isEmpty || statuses.contains(NeighborKnowledge.unknown)) {
+      return 'UNKNOWN_OR_NO_NEIGHBORS';
+    }
+    return 'ALL_OBSERVED_HAVE';
+  }
+
+  void started(StateIdentity state) => _forwarded.add(state.value);
+
+  bool repairAllowed(
+    StateIdentity state,
+    int nowMs,
+    int intervalMs,
+    int iminMs,
+  ) {
+    if (_repairPending.isEmpty ||
+        intervalMs <= iminMs ||
+        (_lastRepair != null &&
+            nowMs - _lastRepair! < parameters.resetCooldownMs)) {
+      return false;
+    }
+    final values = _repairPending
+        .map((id) => knowledge(id, state, nowMs))
+        .toList();
+    _repairPending.clear();
+    if (!values.contains(NeighborKnowledge.missing) &&
+        !values.contains(NeighborKnowledge.unknown)) {
+      return false;
+    }
+    _lastRepair = nowMs;
+    return true;
+  }
+}

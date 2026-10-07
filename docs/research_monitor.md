@@ -5,8 +5,9 @@ mempermudah pembuatan session, penomoran trial, pemantauan BLE/relay, metrik
 lokal, timeline event, dan export data mentah. Fitur ini bukan layar pengguna
 darurat normal.
 
-Research metadata disimpan di SQLite. Metadata session/trial tidak pernah
-dimasukkan ke payload BLE 17 byte.
+Research metadata disimpan di SQLite. Inner BLE RM17 legacy tidak memuat
+session/trial. Profil baru menambahkan envelope RN dengan CRC scope trial;
+inner tetap 17 byte dan total DATA menjadi 39 byte.
 
 Controller kini mendukung `basic_flooding`, `trickle_no_suppression`, dan
 `trickle` lewat command `configure_session`; tab menampilkan mode session
@@ -329,3 +330,15 @@ hop out, RSSI, payload hash, queue fields jika tersedia, dan detail.
 - Network-wide metric membutuhkan merged peer logs.
 - Research timeout hanya boleh dipakai untuk keputusan trial, bukan TTL protocol.
 - Physical test A-K tetap `NOT RUN` sampai ada bukti perangkat fisik.
+
+## Profil Status Tetangga
+
+`neighbor_graph_v1` menyediakan metode keempat `trickle_neighbor_status`.
+LIVE menampilkan status tetangga **lokal HP**, bukan cakupan seluruh jaringan.
+METRICS menampilkan hasil penggabungan controller (trial sebelumnya/terakhir),
+first RX lima ESP dan overhead DATA/control secara terpisah. Trial graph dimiliki
+controller agar tombol manual tidak merusak scope/randomisasi/jendela batch.
+Pemilihan mode di antara trial dikirim ke owner background, bukan scheduler UI.
+Raw JSON/CSV tersedia; workbook terpisah dibuat controller. UJI JARAK dipertahankan.
+Lihat [spesifikasi](neighbor_status_experiment.md) dan
+[panduan Windows](neighbor_status_windows.md).

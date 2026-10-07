@@ -33,7 +33,11 @@ object NativeBleRadio {
     }
     fun statusMap(context: Context): Map<String, Any?> {
         val error = rejection(context)
+        val capacity = try {
+            if(Build.VERSION.SDK_INT >= 26) (context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager).adapter?.leMaximumAdvertisingDataLength else null
+        } catch (_: SecurityException) { null }
         return mapOf(
+            "maximum_advertising_data_length" to capacity,
             "requested_mode" to mode(context),
             "configured_mode" to if (configured && error == null) CodedRadioPolicy.CODED else null,
             "ready" to (error == null),

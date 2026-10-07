@@ -200,6 +200,8 @@ void backgroundServiceMain() {
         debugPrint("[backgroundServiceMain] Recovering persisted relay state");
         await BleRelayService().recoverPersistedRelayState();
         break;
+      case "drainNativeBleInbox":
+        return await _drainNativeBleInbox();
       case "schedulerTick":
         debugPrint("[backgroundServiceMain] Scheduler tick requested");
         await BleAdvertiserService().advertiseLatestOrStop(

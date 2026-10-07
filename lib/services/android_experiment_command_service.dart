@@ -13,9 +13,11 @@ import 'package:pkmproject/services/relay_queue_service.dart';
 import 'package:pkmproject/services/research_session_service.dart';
 import 'package:pkmproject/services/protocol_epoch_readiness.dart';
 import 'package:pkmproject/services/range_test_service.dart';
+import 'package:pkmproject/services/neighbor_runtime.dart';
 import 'package:pkmproject/sync_service.dart';
 import 'package:pkmproject/utils/hash_utils.dart';
 import 'package:sqflite/sqflite.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 typedef SosActivator = Future<void> Function(SOSMessage message);
 typedef ObservationWindowStarter = void Function();
@@ -127,6 +129,14 @@ class AndroidExperimentCommandService {
         'finalize_trial' => await _finalizeTrial(arguments),
         'export_trial' => await _exportTrial(arguments),
         'reset_trial' => await _resetTrial(arguments),
+        'set_rx_participation' => await _participation(arguments, rxOnly: true),
+        'set_node_participation' => await _participation(
+          arguments,
+          rxOnly: false,
+        ),
+        'get_neighbor_status' => await _neighborStatus(),
+        'store_neighbor_metrics' => await _storeNeighborMetrics(arguments),
+        'set_forwarding_mode' => await _setForwardingMode(arguments),
         'configure_range_test' => await _range.configure(arguments),
         'get_range_test_status' => await _rangeStatus(),
         'export_range_test' => await _range.export(),
@@ -162,11 +172,145 @@ class AndroidExperimentCommandService {
     }
   }
 
+  Future<Map<String, dynamic>> _participation(
+    Map<String, dynamic> args, {
+    required bool rxOnly,
+  }) async {
+    final enabled = args['enabled'] == true;
+    final result = await NativeBridgeService.setResearchParticipation(
+      enabled,
+      rxOnly: rxOnly,
+    );
+    if (!rxOnly) {
+      if (enabled) {
+        _startObservationWindow();
+        await BleAdvertiserService().advertiseLatestOrStop();
+      } else {
+        await _stopObservationWindow();
+      }
+    }
+    await _logger.logEvent(
+      eventType: rxOnly
+          ? 'RX_PARTICIPATION_CHANGED'
+          : 'NODE_PARTICIPATION_CHANGED',
+      deviceId: 'unknown',
+      detail: {'requested_enabled': enabled, ...result},
+    );
+    return result;
+  }
+
+  Future<Map<String, dynamic>> _setForwardingMode(
+    Map<String, dynamic> args,
+  ) async {
+    final session = await _sessions.currentSession();
+    if (session == null ||
+        await _sessions.currentTrial(sessionId: session.sessionId) != null) {
+      throw StateError('Mode can change only between trials');
+    }
+    final mode = _forwardingMode(_requiredString(args, 'mode'));
+    final runtime = NeighborRuntime.instance;
+    await runtime.load();
+    if (mode == ForwardingMode.trickleNeighborStatus &&
+        runtime.configuration == null) {
+      throw StateError(
+        'Mode ini memerlukan konfigurasi neighbor_graph_v1 dari controller',
+      );
+    }
+    if (runtime.configuration != null) {
+      await runtime.configure({
+        ...runtime.configuration!,
+        'transport_profile': NeighborRuntime.profile,
+        'mode': mode.logValue,
+      });
+    }
+    await (await _db).update(
+      'experiment_sessions',
+      {'forwarding_mode': mode.logValue},
+      where: 'session_id = ?',
+      whereArgs: [session.sessionId],
+    );
+    RelayQueueService.configureSessionMode(mode);
+    return {'mode': mode.logValue};
+  }
+
+  Future<Map<String, dynamic>> _neighborStatus() async {
+    final runtime = NeighborRuntime.instance;
+    await runtime.load();
+    final db = await _db;
+    final rows = await db.query(
+      'sos_messages',
+      where: 'ack_received_at IS NULL',
+    );
+    return {
+      'transport_profile': runtime.enabled ? NeighborRuntime.profile : 'legacy',
+      'scope': runtime.enabled ? runtime.scope : null,
+      'local_only': true,
+      'network_summary': await _networkSummary(),
+      'peers': runtime.controller?.peers(_clock.monotonicTimeMs()) ?? [],
+      'states': [
+        for (final row in rows)
+          {
+            'state_identity': SOSMessage.fromDbMap(row).stateIdentity.value,
+            'neighbors':
+                runtime.controller
+                    ?.snapshot(
+                      SOSMessage.fromDbMap(row).stateIdentity,
+                      _clock.monotonicTimeMs(),
+                    )
+                    .map((k, v) => MapEntry(k.toString(), v.name)) ??
+                {},
+          },
+      ],
+    };
+  }
+
+  Future<Map<String, dynamic>?> _networkSummary() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.reload();
+    final raw = prefs.getString('neighbor_network_summary_v1');
+    if (raw == null) return null;
+    final data = Map<String, dynamic>.from(jsonDecode(raw) as Map);
+    final session = await _sessions.currentSession();
+    return data['session_id'] == session?.sessionId ? data : null;
+  }
+
+  Future<Map<String, dynamic>> _storeNeighborMetrics(
+    Map<String, dynamic> args,
+  ) async {
+    final raw = utf8.decode(
+      base64Decode(_requiredString(args, 'summary_base64')),
+    );
+    final data = Map<String, dynamic>.from(jsonDecode(raw) as Map);
+    final session = await _sessions.currentSession();
+    if (session?.topologyLabel != NeighborRuntime.profile ||
+        data['session_id'] != session?.sessionId ||
+        data['measurement_version'] != 'all-node-burst-v1' ||
+        data['N'] != 5) {
+      throw ArgumentError('Merged summary scope/version mismatch');
+    }
+    final trials = await (await _db).query(
+      'experiment_trials',
+      where: 'trial_id = ? AND session_id = ?',
+      whereArgs: [data['trial_id'], data['session_id']],
+      limit: 1,
+    );
+    if (trials.isEmpty) throw ArgumentError('Unknown summary trial');
+    await (await SharedPreferences.getInstance()).setString(
+      'neighbor_network_summary_v1',
+      raw,
+    );
+    return {'stored': true};
+  }
+
   Future<Map<String, dynamic>> _configureSession(
     Map<String, dynamic> args,
   ) async {
     final mode = _forwardingMode(_requiredString(args, 'mode'));
     final mainExperiment = args['main_experiment'] != false;
+    if (mode == ForwardingMode.trickleNeighborStatus &&
+        args['transport_profile'] != NeighborRuntime.profile) {
+      throw ArgumentError('Neighbor mode requires neighbor_graph_v1');
+    }
     _requireSupportedInt(
       args,
       'protocol_epoch_seconds',
@@ -240,6 +384,7 @@ class AndroidExperimentCommandService {
       rxBurstGapMs: rxBurstGapMs,
     );
     RelayQueueService.configureSessionMode(mode);
+    await NeighborRuntime.instance.configure(args);
     await NativeBridgeService.setResearchRxBurstGapMs(
       session.rxBurstGapMs ?? MeshConfig.defaultRxBurstGap.inMilliseconds,
     );
@@ -310,15 +455,29 @@ class AndroidExperimentCommandService {
       commandId: _requiredString(args, 'command_id'),
     );
     final session = await _sessions.currentSession();
+    await NeighborRuntime.instance.startTrial(trial.trialId);
+    if (NeighborRuntime.instance.configuration != null) {
+      final participation = await NativeBridgeService.setResearchParticipation(
+        true,
+        rxOnly: false,
+      );
+      if (participation['ok'] != true) {
+        throw StateError('Trial participation could not be restored');
+      }
+    }
     await NativeBridgeService.configureResearchPhyTelemetry({
       'sessionId': trial.sessionId,
       'trialId': trial.trialId,
       'nodeId': session?.deviceId,
       'mode': session?.forwardingMode,
       'clockOffsetMs': session?.clockOffsetMs,
-      'until': _clock.wallTimeMs() + 180000,
+      'until':
+          _clock.wallTimeMs() + (session?.observationWindowMs ?? 60000) + 60000,
     });
     _startObservationWindow();
+    if (NeighborRuntime.instance.statusEnabled) {
+      await BleAdvertiserService().advertiseLatestOrStop();
+    }
     await _logger.logEvent(
       eventType: ExperimentEventTypes.trialWindowStarted,
       deviceId: SyncService().deviceId,
@@ -454,8 +613,25 @@ class AndroidExperimentCommandService {
 
   Future<Map<String, dynamic>> _resetTrial(Map<String, dynamic> args) async {
     final trialId = _requiredString(args, 'trial_id');
+    await _stopObservationWindow();
+    final neighborProfile = NeighborRuntime.instance.configuration != null;
+    await NeighborRuntime.instance.endTrial();
     await BleAdvertiserService().stopAdvertising();
     final db = await _db;
+    if (neighborProfile) {
+      await db.update(
+        'experiment_trials',
+        {
+          'status': 'INVALID',
+          'result': 'INVALID',
+          'failure_reason': 'RESET_WITHOUT_FINAL_RESULT',
+          'ended_at': _clock.wallTimeMs(),
+          'finalized_at': _clock.wallTimeMs(),
+        },
+        where: 'trial_id = ? AND finalized_at IS NULL',
+        whereArgs: [trialId],
+      );
+    }
     final rows = await db.query(
       'sos_messages',
       columns: const ['id'],
@@ -545,6 +721,7 @@ class AndroidExperimentCommandService {
         0;
     final epoch = ProtocolEpochReadiness.at(_clock.wallTimeMs());
     final radio = capabilities['radio'];
+    await NeighborRuntime.instance.load();
     return {
       'ok': radio is! Map || radio['ready'] == true,
       'node_id': session?.deviceId,
@@ -552,6 +729,35 @@ class AndroidExperimentCommandService {
       'build_id': MeshConfig.buildId,
       'protocol_version': MeshConfig.protocolVersion,
       'payload_length': MeshConfig.protocolLength,
+      'transport_profile': NeighborRuntime.instance.configuration != null
+          ? NeighborRuntime.profile
+          : 'legacy',
+      'transport_version': NeighborRuntime.instance.configuration != null
+          ? 'resqmesh-neighbor-v1'
+          : MeshConfig.protocolVersion,
+      'data_frame_length': NeighborRuntime.instance.configuration != null
+          ? 39
+          : 17,
+      'neighbor_design_version': 1,
+      if (NeighborRuntime.instance.configuration != null) ...{
+        'transmitter_id': NeighborRuntime.instance.transmitter,
+        'scope': NeighborRuntime.instance.enabled
+            ? NeighborRuntime.instance.scope
+            : null,
+        'allowed_transmitters':
+            NeighborRuntime.instance.configuration!['allowed_transmitters'],
+        'neighbor_parameters': {
+          for (final key in [
+            'status_period_ms',
+            'status_burst_ms',
+            'freshness_ms',
+            'discovery_jitter_ms',
+            'reset_cooldown_ms',
+            'neighbor_capacity',
+          ])
+            key: NeighborRuntime.instance.configuration![key],
+        },
+      },
       'measurement_timing_version': 2,
       'method_design_version': 3,
       'supported_modes': ForwardingMode.values
@@ -649,6 +855,7 @@ class AndroidExperimentCommandService {
     return switch (value.toLowerCase()) {
       'trickle' => ForwardingMode.trickle,
       'trickle_no_suppression' => ForwardingMode.trickleNoSuppression,
+      'trickle_neighbor_status' => ForwardingMode.trickleNeighborStatus,
       'basic' || 'basic_flooding' => ForwardingMode.basicFlooding,
       _ => throw ArgumentError('INVALID_FORWARDING_MODE: $value'),
     };

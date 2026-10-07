@@ -64,7 +64,8 @@ object NativeBleInbox {
         val payloadBase64 = Base64.getEncoder().encodeToString(payload)
         val payloadHash = exactPayloadHash(payload)
         val rxBurstGapMs = NativeBleConfig.rxBurstGapMs(context)
-        val observerKey = observerKey(
+        val frame = NeighborTransport.decode(payload)
+        val observerKey = frame?.let { "tx:${it.transmitter}" } ?: observerKey(
             deviceAddress,
             receivedAt,
             receivedElapsedRealtimeMs,
@@ -72,7 +73,11 @@ object NativeBleInbox {
         )
         val metadata = protocolMetadata(payload)
         val items = readItems(context)
-        val observation = observationWindow(
+        val observation = frame?.let {
+            val id = "rn|${it.burstIdentity}"
+            val existing = (0 until items.length()).map { i -> items.getJSONObject(i) }.firstOrNull { item -> item.optString("observation_id") == id }
+            ObservationWindow(id, existing?.optLong("burst_started_elapsed_realtime_ms", receivedElapsedRealtimeMs) ?: receivedElapsedRealtimeMs)
+        } ?: observationWindow(
             items,
             payloadHash,
             observerKey,
@@ -173,14 +178,20 @@ object NativeBleInbox {
     ): NativeBleInboxStoreMutation {
         val payloadBase64 = Base64.getEncoder().encodeToString(payload)
         val payloadHash = exactPayloadHash(payload)
-        val observerKey = observerKey(
+        val frame = NeighborTransport.decode(payload)
+        val observerKey = frame?.let { "tx:${it.transmitter}" } ?: observerKey(
             deviceAddress,
             receivedAt,
             receivedElapsedRealtimeMs,
             rxBurstGapMs
         )
         val items = JSONArray(rawItemsJson)
-        val observation = observationWindow(
+        val observation = frame?.let {
+            val id = "rn|${it.burstIdentity}"
+            val existing = (0 until items.length()).map { i -> items.getJSONObject(i) }
+                .firstOrNull { item -> item.optString("observation_id") == id }
+            ObservationWindow(id, existing?.optLong("burst_started_elapsed_realtime_ms", receivedElapsedRealtimeMs) ?: receivedElapsedRealtimeMs)
+        } ?: observationWindow(
             items,
             payloadHash,
             observerKey,
@@ -347,6 +358,9 @@ object NativeBleInbox {
     }
 
     fun protocolMetadata(payload: ByteArray): NativeBlePacketMetadata? {
+        if (payload.size != NativeBleConfig.PROTOCOL_LENGTH_BYTES) {
+            return NeighborTransport.decode(payload)?.inner?.let { protocolMetadata(it) }
+        }
         if (payload.size != NativeBleConfig.PROTOCOL_LENGTH_BYTES) return null
         if (payload[0] != 0x52.toByte() || payload[1] != 0x4D.toByte()) return null
         val flags = payload[16].toInt() and 0xFF

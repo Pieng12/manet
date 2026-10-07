@@ -89,13 +89,17 @@ def main() -> int:
         return 0
 
     config = load_config(args.config)
+    controller_type = ExperimentController
+    if config.get("transport_profile") == "neighbor_graph_v1":
+        from .neighbor_experiment import NeighborExperimentController
+        controller_type = NeighborExperimentController
     try:
         validate_config(config)
     except ConfigError as error:
         print(json.dumps({"ok": False, "error": str(error)}, indent=2))
         return 2
     if args.command == "plan":
-        controller = ExperimentController(config, [], args.output)
+        controller = controller_type(config, [], args.output)
         controller._save_manifest()
         print(json.dumps({"manifest": str(controller.manifest_path),
                           "planned_trials": len(controller.manifest["trial_order"]),
@@ -107,7 +111,7 @@ def main() -> int:
         config = {**config, "session_id": f"{config.get('session_id', 'three-methods')}-smoke"}
         config["valid_trials_per_condition"] = 1
         config["max_attempts_per_condition"] = 1
-        config["trial_order"] = "blocked"
+        config["trial_order"] = "balanced_randomized" if config.get("transport_profile") == "neighbor_graph_v1" else "blocked"
         run_output = args.output / "smoke_run"
     else:
         run_output = args.output
@@ -126,7 +130,7 @@ def main() -> int:
         print(json.dumps({"ok": False, "error": str(error)}, indent=2))
         return 2
     nodes = build_nodes(config)
-    controller = ExperimentController(config, nodes, run_output)
+    controller = controller_type(config, nodes, run_output)
     try:
         if args.command == "readiness":
             print(json.dumps(controller.readiness(), indent=2))

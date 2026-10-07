@@ -73,7 +73,7 @@ class RepositoryContractTest(unittest.TestCase):
         self.assertIn('if (!burstId.isEmpty()) document["burst_id"]', firmware)
         receive_call = 'emit("BLE_PACKET_RECEIVED", &incoming, nullptr, rssi, observation,\n       String(), &now);'
         self.assertIn(receive_call, firmware)
-        callback = firmware.split('void onResult(', 1)[1].split('void drainReceivedPackets()', 1)[0]
+        callback = firmware.split('void onResult(', 1)[1].split('\n};', 1)[0]
         self.assertNotIn('processPacket(', callback)
         self.assertNotIn('scheduler.', callback)
         self.assertIn('xQueueSend(receivedPackets', callback)

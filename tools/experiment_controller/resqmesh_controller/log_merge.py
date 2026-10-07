@@ -804,6 +804,9 @@ def merge_directory(
     manifest_path: Path | None = None,
 ) -> dict[str, Any]:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path and manifest_path.exists() else {"trials": {}}
+    if manifest.get("transport_profile") == "neighbor_graph_v1":
+        from .neighbor_experiment import merge_neighbor
+        return merge_neighbor(input_dir, output_dir, manifest)
     events = deduplicate(read_json_events(input_dir.rglob("*.jsonl")))
     manifest_session = manifest.get("session_id")
     if manifest_session:

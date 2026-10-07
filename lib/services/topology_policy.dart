@@ -4,6 +4,7 @@ import 'package:pkmproject/models/experiment_session.dart';
 import 'package:pkmproject/models/sos_message.dart';
 import 'package:pkmproject/services/ble_protocol.dart';
 import 'package:pkmproject/config/mesh_config.dart';
+import 'package:pkmproject/services/neighbor_runtime.dart';
 
 class TopologyDecision {
   const TopologyDecision({
@@ -78,6 +79,20 @@ class TopologyPolicy {
     }
 
     final role = session.nodeRole?.toUpperCase() ?? 'OBSERVER';
+    if (NeighborRuntime.instance.enabled) {
+      final sameState =
+          existingMessage?.stateIdentity.value == packet.stateIdentity.value;
+      final transmitter = int.tryParse(
+        (observerKey ?? '').replaceFirst('tx:', ''),
+      );
+      return TopologyDecision(
+        acceptForState: !sameState,
+        relay: role != 'SOURCE',
+        countAsLogicalDuplicate: sameState,
+        countAsTrickleConsistency: sameState && transmitter != packet.senderCrc,
+        reason: 'STABLE_GRAPH_EDGE_VALIDATED',
+      );
+    }
     if (role == 'SOURCE') {
       return const TopologyDecision(
         acceptForState: false,

@@ -8,6 +8,7 @@ class CodedRadio {
  public:
   bool configure(bool requireS8);
   bool start(const std::array<uint8_t, kPayloadLength>& payload);
+  bool start(const uint8_t* payload, size_t length);
   bool stop();
   bool ready() const { return configured_; }
   void telemetry(JsonObject object) const;

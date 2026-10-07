@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:pkmproject/config/mesh_config.dart';
 import 'package:pkmproject/models/experiment_event.dart';
@@ -15,6 +16,8 @@ import 'package:pkmproject/services/research_session_service.dart';
 import 'package:pkmproject/sync_service.dart';
 import 'package:pkmproject/widgets/resq_ui.dart';
 import 'package:pkmproject/widgets/range_test_tab.dart';
+import 'package:pkmproject/services/database_helper.dart';
+import 'package:uuid/uuid.dart';
 
 class ResearchMonitorScreen extends StatefulWidget {
   const ResearchMonitorScreen({super.key});
@@ -48,6 +51,9 @@ class _ResearchMonitorScreenState extends State<ResearchMonitorScreen>
   bool _pendingRelayWork = false;
   String _eventFilter = 'ALL';
   bool _loading = true;
+  bool _refreshing = false;
+  String _selectedMode = MeshConfig.forwardingMode.logValue;
+  Map<String, dynamic> _neighbors = const {};
 
   final _sessionNameController = TextEditingController(text: 'TRICKLE-H3');
   final _targetHopController = TextEditingController(text: '3');
@@ -86,48 +92,66 @@ class _ResearchMonitorScreenState extends State<ResearchMonitorScreen>
   }
 
   Future<void> _refresh() async {
-    final session = await _researchService.currentSession();
-    if (session != null) {
-      await _researchService.applyTimeoutIfNeeded(sessionId: session.sessionId);
+    if (_refreshing) return;
+    _refreshing = true;
+    try {
+      final session = await _researchService.currentSession();
+      if (session != null) {
+        await _researchService.applyTimeoutIfNeeded(
+          sessionId: session.sessionId,
+        );
+      }
+      final trial = session == null
+          ? null
+          : await _researchService.currentTrial(sessionId: session.sessionId);
+      final events = await _logger.events(
+        sessionId: session?.sessionId,
+        trialId: trial?.trialId,
+        limit: 200,
+      );
+      final sessionMetrics = session == null
+          ? null
+          : await _metricsService.loadMetrics(sessionId: session.sessionId);
+      final trialMetrics = session == null || trial == null
+          ? null
+          : await _metricsService.loadMetrics(
+              sessionId: session.sessionId,
+              trialId: trial.trialId,
+            );
+      final capabilities = await NativeBridgeService.getBleCapabilities();
+      final queueSize = await _relayQueue.queueSize();
+      final sosQueueSize = await _relayQueue.queueSizeByType('sos');
+      final ackQueueSize = await _relayQueue.queueSizeByType('ack');
+      final earliest = await _relayQueue.earliestNextEligibleAt();
+      final pendingRelayWork = await NativeBridgeService.hasPendingRelayWork();
+      Map<String, dynamic> neighbors = const {};
+      if (session?.topologyLabel == 'neighbor_graph_v1') {
+        try {
+          neighbors = await _ownerCommand('get_neighbor_status');
+        } catch (_) {
+          neighbors = {'unavailable': true};
+        }
+      }
+      if (!mounted) return;
+      setState(() {
+        _session = session;
+        _trial = trial;
+        _events = events;
+        _sessionMetrics = sessionMetrics;
+        _trialMetrics = trialMetrics;
+        _capabilities = capabilities;
+        _queueSize = queueSize;
+        _sosQueueSize = sosQueueSize;
+        _ackQueueSize = ackQueueSize;
+        _earliestNextEligibleAt = earliest;
+        _pendingRelayWork = pendingRelayWork;
+        _neighbors = neighbors;
+        if (session != null) _selectedMode = session.forwardingMode;
+        _loading = false;
+      });
+    } finally {
+      _refreshing = false;
     }
-    final trial = session == null
-        ? null
-        : await _researchService.currentTrial(sessionId: session.sessionId);
-    final events = await _logger.events(
-      sessionId: session?.sessionId,
-      trialId: trial?.trialId,
-      limit: 200,
-    );
-    final sessionMetrics = session == null
-        ? null
-        : await _metricsService.loadMetrics(sessionId: session.sessionId);
-    final trialMetrics = session == null || trial == null
-        ? null
-        : await _metricsService.loadMetrics(
-            sessionId: session.sessionId,
-            trialId: trial.trialId,
-          );
-    final capabilities = await NativeBridgeService.getBleCapabilities();
-    final queueSize = await _relayQueue.queueSize();
-    final sosQueueSize = await _relayQueue.queueSizeByType('sos');
-    final ackQueueSize = await _relayQueue.queueSizeByType('ack');
-    final earliest = await _relayQueue.earliestNextEligibleAt();
-    final pendingRelayWork = await NativeBridgeService.hasPendingRelayWork();
-    if (!mounted) return;
-    setState(() {
-      _session = session;
-      _trial = trial;
-      _events = events;
-      _sessionMetrics = sessionMetrics;
-      _trialMetrics = trialMetrics;
-      _capabilities = capabilities;
-      _queueSize = queueSize;
-      _sosQueueSize = sosQueueSize;
-      _ackQueueSize = ackQueueSize;
-      _earliestNextEligibleAt = earliest;
-      _pendingRelayWork = pendingRelayWork;
-      _loading = false;
-    });
   }
 
   @override
@@ -178,13 +202,28 @@ class _ResearchMonitorScreenState extends State<ResearchMonitorScreen>
         _trialMetrics?.currentPacket ?? _sessionMetrics?.currentPacket;
     return _scroll(
       children: [
+        if (_session?.topologyLabel == 'neighbor_graph_v1')
+          _section('Status Tetangga Lokal HP', [
+            _kv(
+              'Skenario',
+              _session?.scenarioLabel == 'S0_MAIN'
+                  ? 'S0_MAIN (utama)'
+                  : '${_session?.scenarioLabel} (pendukung)',
+            ),
+            _kv('Scope', '${_neighbors['scope'] ?? '-'}'),
+            for (final state in (_neighbors['states'] as List? ?? []))
+              for (final peer in (state['neighbors'] as Map).entries)
+                _kv('Pemancar ${peer.key}', '${peer.value}'),
+          ]),
         _section('Experiment Session', [
           _kv('Session', _session?.name ?? 'No active session'),
           _kv('Trial', _trial?.trialCode ?? 'No active trial'),
           _kv('Trial Status', _trial?.status ?? '-'),
-          _kv(
-            'Forwarding Mode',
-            _session?.forwardingMode ?? MeshConfig.forwardingMode.logValue,
+          _dropdown(
+            label: 'Forwarding Mode',
+            value: _selectedMode,
+            values: ForwardingMode.values.map((m) => m.logValue).toList(),
+            onChanged: _changeMode,
           ),
           _kv('Node Role', _session?.nodeRole ?? _nodeRole),
           _kv('Hop Target', _session?.targetHop?.toString() ?? '-'),
@@ -266,6 +305,62 @@ class _ResearchMonitorScreenState extends State<ResearchMonitorScreen>
   }
 
   Widget _buildMetricsTab() {
+    if (_session?.topologyLabel == 'neighbor_graph_v1') {
+      final summary = _neighbors['network_summary'] as Map?;
+      final pairs = summary?['per_receiver'] as List? ?? [];
+      return _scroll(
+        children: [
+          _section('Statistik Network-Wide (Controller)', [
+            _kv('Trial', '${summary?['trial_id'] ?? '-'}'),
+            _kv('Metode', '${summary?['method'] ?? _selectedMode}'),
+            _kv('Skenario', '${summary?['scenario'] ?? _session?.hypothesis}'),
+            _kv(
+              'Hasil',
+              '${summary?['result'] ?? 'Menunggu arsip seluruh node'}',
+            ),
+            _kv('DSR', '${summary?['dsr_percent'] ?? '-'} %'),
+            _kv('E2E pasangan sukses', '${summary?['e2e_mean_ms'] ?? '-'} ms'),
+            _kv('LDR', '${summary?['ldr_percent'] ?? '-'} %'),
+            _kv(
+              'Overhead DATA / CONTROL',
+              '${summary?['data_tx'] ?? '-'} / ${summary?['control_tx'] ?? '-'}',
+            ),
+            _kv('CONTROL sebelum t0', '${summary?['setup_control_tx'] ?? '-'}'),
+          ]),
+          _section('Penerimaan Pertama per ESP', [
+            for (final receiver in [
+              'esp-r1a',
+              'esp-r1b',
+              'esp-r2a',
+              'esp-r2b',
+              'esp-destination',
+            ])
+              _kv(
+                receiver,
+                pairs.any((p) => (p as Map)['receiver'] == receiver)
+                    ? '${(pairs.firstWhere((p) => (p as Map)['receiver'] == receiver) as Map)['e2e_latency_ms']} ms'
+                    : summary == null
+                    ? 'Menunggu arsip'
+                    : 'Tidak diterima dalam window',
+              ),
+          ]),
+          _section('Statistik Lokal HP', [
+            _kv(
+              'SOS accepted',
+              '${_trialMetrics?.acceptedCount ?? _sessionMetrics?.acceptedCount ?? 0}',
+            ),
+            _kv(
+              'TX sukses lokal',
+              '${_trialMetrics?.txSuccessCount ?? _sessionMetrics?.txSuccessCount ?? 0}',
+            ),
+            _kv(
+              'Tetangga teramati',
+              '${(_neighbors['peers'] as List? ?? []).length}',
+            ),
+          ]),
+        ],
+      );
+    }
     final sessionMetrics = _sessionMetrics;
     if (sessionMetrics == null) {
       return _scroll(
@@ -377,72 +472,82 @@ class _ResearchMonitorScreenState extends State<ResearchMonitorScreen>
   Widget _buildTrialTab() {
     return _scroll(
       children: [
-        _section('Experiment Configuration', [
-          _textField(_sessionNameController, 'Experiment Name'),
-          _kv(
-            'Forwarding Mode',
-            _session?.forwardingMode ?? MeshConfig.forwardingMode.logValue,
-          ),
-          _dropdown(
-            label: 'Node Role',
-            value: _nodeRole,
-            values: const [
-              'SOURCE',
-              'RELAY',
-              'DESTINATION',
-              'GATEWAY',
-              'OBSERVER',
-            ],
-            onChanged: (value) => setState(() => _nodeRole = value),
-          ),
-          _textField(
-            _targetHopController,
-            'Target Hop Count',
-            keyboardType: TextInputType.number,
-          ),
-          _textField(_topologyController, 'Topology Label'),
-          _textField(_scenarioController, 'Distance / Scenario Label'),
-          _textField(
-            _trialTimeoutController,
-            'Trial Timeout Seconds',
-            keyboardType: TextInputType.number,
-          ),
-          _textField(_notesController, 'Notes', maxLines: 3),
-          _buttonRow([
-            _action('START SESSION', Icons.play_arrow, _startSession),
-            _action('END SESSION', Icons.stop, _endSession),
-          ]),
-        ]),
-        _section('Trial Controls', [
-          _kv('Current Trial', _trial?.trialCode ?? '-'),
-          _dropdown(
-            label: 'Failure Reason',
-            value: _failureReason,
-            values: const [
-              'NO_DELIVERY',
-              'TIMEOUT',
-              'DEVICE_ERROR',
-              'BLUETOOTH_ERROR',
-              'USER_ERROR',
-              'OTHER',
-            ],
-            onChanged: (value) => setState(() => _failureReason = value),
-          ),
-          _textField(_trialNotesController, 'Trial Notes', maxLines: 2),
-          _buttonRow([
-            _action('START TRIAL', Icons.play_circle, _startTrial),
-            _action(
-              'END TRIAL',
-              Icons.check_circle,
-              () => _finishTrial('SUCCESS'),
+        if (_session?.topologyLabel != 'neighbor_graph_v1')
+          _section('Experiment Configuration', [
+            _textField(_sessionNameController, 'Experiment Name'),
+            _kv(
+              'Forwarding Mode',
+              _session?.forwardingMode ?? MeshConfig.forwardingMode.logValue,
             ),
+            _dropdown(
+              label: 'Node Role',
+              value: _nodeRole,
+              values: const [
+                'SOURCE',
+                'RELAY',
+                'DESTINATION',
+                'GATEWAY',
+                'OBSERVER',
+              ],
+              onChanged: (value) => setState(() => _nodeRole = value),
+            ),
+            _textField(
+              _targetHopController,
+              'Target Hop Count',
+              keyboardType: TextInputType.number,
+            ),
+            _textField(_topologyController, 'Topology Label'),
+            _textField(_scenarioController, 'Distance / Scenario Label'),
+            _textField(
+              _trialTimeoutController,
+              'Trial Timeout Seconds',
+              keyboardType: TextInputType.number,
+            ),
+            _textField(_notesController, 'Notes', maxLines: 3),
+            _buttonRow([
+              _action('START SESSION', Icons.play_arrow, _startSession),
+              _action('END SESSION', Icons.stop, _endSession),
+            ]),
           ]),
-          _buttonRow([
-            _action('FAILED', Icons.cancel, () => _finishTrial('FAILED')),
-            _action('INVALIDATE', Icons.report, _invalidateTrial),
-            _action('NEXT TRIAL', Icons.skip_next, _nextTrial),
+        if (_session?.topologyLabel == 'neighbor_graph_v1')
+          _section('Trial Graph', [
+            _kv('Trial', _trial?.trialCode ?? '-'),
+            _kv('Status', _trial?.status ?? '-'),
+            _kv('Metode', _session?.forwardingMode ?? '-'),
+            _kv('Skenario', _session?.scenarioLabel ?? '-'),
+            _kv('Pemilik trial', 'Controller eksperimen'),
           ]),
-        ]),
+        if (_session?.topologyLabel != 'neighbor_graph_v1')
+          _section('Trial Controls', [
+            _kv('Current Trial', _trial?.trialCode ?? '-'),
+            _dropdown(
+              label: 'Failure Reason',
+              value: _failureReason,
+              values: const [
+                'NO_DELIVERY',
+                'TIMEOUT',
+                'DEVICE_ERROR',
+                'BLUETOOTH_ERROR',
+                'USER_ERROR',
+                'OTHER',
+              ],
+              onChanged: (value) => setState(() => _failureReason = value),
+            ),
+            _textField(_trialNotesController, 'Trial Notes', maxLines: 2),
+            _buttonRow([
+              _action('START TRIAL', Icons.play_circle, _startTrial),
+              _action(
+                'END TRIAL',
+                Icons.check_circle,
+                () => _finishTrial('SUCCESS'),
+              ),
+            ]),
+            _buttonRow([
+              _action('FAILED', Icons.cancel, () => _finishTrial('FAILED')),
+              _action('INVALIDATE', Icons.report, _invalidateTrial),
+              _action('NEXT TRIAL', Icons.skip_next, _nextTrial),
+            ]),
+          ]),
         _section('Export', [
           _buttonRow([
             _action('EXPORT TRIAL CSV', Icons.table_chart, _exportTrialCsv),
@@ -519,7 +624,13 @@ class _ResearchMonitorScreenState extends State<ResearchMonitorScreen>
           ),
           _kv('Manufacturer ID Native', _nativeManufacturerLabel()),
           _kv('Manufacturer Match', _manufacturerMatch() ? 'Yes' : 'No'),
-          _kv('Payload Length', '${MeshConfig.protocolLength} bytes'),
+          _kv('Inner Payload', '${MeshConfig.protocolLength} bytes'),
+          _kv(
+            'DATA Frame',
+            _session?.topologyLabel == 'neighbor_graph_v1'
+                ? '39 bytes'
+                : '17 bytes',
+          ),
           _kv(
             'Connectable Advertising',
             MeshConfig.connectableAdvertising ? 'Yes' : 'No',
@@ -579,6 +690,7 @@ class _ResearchMonitorScreenState extends State<ResearchMonitorScreen>
     final metadata = await NativeBridgeService.getDeviceMetadata();
     try {
       await _researchService.startSession(
+        forwardingMode: RelayQueueService.modeFromPersistedValue(_selectedMode),
         deviceId: _syncService.deviceId,
         name: _sessionNameController.text,
         nodeRole: _nodeRole,
@@ -607,6 +719,60 @@ class _ResearchMonitorScreenState extends State<ResearchMonitorScreen>
       detail: {'node_role': _nodeRole, 'target_hop': targetHop},
     );
     await _refresh();
+  }
+
+  Future<Map<String, dynamic>> _ownerCommand(
+    String command, {
+    String? mode,
+  }) async {
+    final id = const Uuid().v4();
+    if (!await NativeBridgeService.requestResearchCommand({
+      'command': command,
+      'command_id': id,
+      'mode': ?mode,
+    })) {
+      throw StateError('Owner scheduler tidak tersedia');
+    }
+    final db = await DatabaseHelper().database;
+    for (var attempt = 0; attempt < 40; attempt++) {
+      final rows = await db.query(
+        'experiment_commands',
+        where: 'command_id = ?',
+        whereArgs: [id],
+        limit: 1,
+      );
+      if (rows.isNotEmpty) {
+        final result = Map<String, dynamic>.from(
+          jsonDecode(rows.first['result_json'] as String) as Map,
+        );
+        if (result['state'] != 'PROCESSING') {
+          if (result['ok'] != true) throw StateError('${result['error']}');
+          return result;
+        }
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+    }
+    throw StateError('Respons owner timeout');
+  }
+
+  Future<void> _changeMode(String value) async {
+    if (_session == null) {
+      if (value == 'trickle_neighbor_status') {
+        ResqFeedback.error(
+          context,
+          'Konfigurasikan profil graph melalui controller terlebih dahulu',
+        );
+        return;
+      }
+      setState(() => _selectedMode = value);
+      return;
+    }
+    try {
+      await _ownerCommand('set_forwarding_mode', mode: value);
+      await _refresh();
+    } catch (e) {
+      if (mounted) ResqFeedback.error(context, '$e');
+    }
   }
 
   Future<void> _endSession() async {

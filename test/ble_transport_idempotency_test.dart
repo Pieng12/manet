@@ -12,6 +12,11 @@ import 'package:pkmproject/services/database_helper.dart';
 import 'package:pkmproject/services/experiment_logger.dart';
 import 'package:pkmproject/services/native_ble_inbox_drain_service.dart';
 import 'package:pkmproject/services/research_metrics_service.dart';
+import 'package:pkmproject/config/mesh_config.dart';
+import 'package:pkmproject/services/neighbor_runtime.dart';
+import 'package:pkmproject/services/neighbor_transport.dart';
+import 'package:pkmproject/services/research_session_service.dart';
+import 'package:pkmproject/services/relay_queue_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sqflite/sqflite.dart' as sqflite;
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
@@ -60,6 +65,8 @@ void main() {
   });
 
   tearDown(() async {
+    await NeighborRuntime.instance.configure({});
+    RelayQueueService.configureSessionMode(null);
     BleRelayService.resetFailureHooksForTesting();
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(nativeChannel, null);
@@ -94,6 +101,160 @@ void main() {
       orderBy: 'id ASC',
     );
   }
+
+  Future<NeighborFrame> configureNeighbor({bool status = false}) async {
+    final sessions = ResearchSessionService();
+    await sessions.startSession(
+      sessionId: 'graph-session',
+      sessionCode: 'graph',
+      deviceId: 'android-fixture',
+      name: 'graph',
+      nodeRole: 'RELAY',
+      targetHop: 0,
+      topologyLabel: NeighborRuntime.profile,
+      scenarioLabel: 'S0_MAIN',
+      forwardingMode: ForwardingMode.trickleNeighborStatus,
+    );
+    await sessions.startTrial(
+      sessionId: 'graph-session',
+      trialId: 'graph-trial',
+      trialCode: 'graph-trial',
+      commandId: 'start-graph',
+    );
+    await NeighborRuntime.instance.configure({
+      'transport_profile': NeighborRuntime.profile,
+      'node_id': 'android-fixture',
+      'mode': 'trickle_neighbor_status',
+      'allowed_transmitters': [123],
+    });
+    await NeighborRuntime.instance.startTrial('graph-trial');
+    RelayQueueService.configureSessionMode(
+      ForwardingMode.trickleNeighborStatus,
+    );
+    return NeighborFrame(
+      type: status ? NeighborFrameType.status : NeighborFrameType.data,
+      transmitter: 123,
+      boot: 1,
+      sequence: 1,
+      scope: NeighborRuntime.instance.scope,
+      inner: status
+          ? null
+          : base64Decode(
+              await sosPayloadBase64(
+                senderCrc: 456,
+                timestampMs: DateTime.now().millisecondsSinceEpoch,
+                hopCount: 1,
+              ),
+            ),
+    );
+  }
+
+  test(
+    'RN DATA durable processing dedupes RF replay but counts second burst',
+    () async {
+      final frame = await configureNeighbor();
+      final service = BleRelayService();
+      final received = DateTime.now().millisecondsSinceEpoch;
+      expect(
+        await service.processIncomingPayload(
+          frame.encode(),
+          receivedAtMs: received,
+          deviceAddress: 'AA',
+        ),
+        BleProcessingResult.accepted,
+      );
+      expect(
+        await service.processIncomingPayload(
+          frame.encode(),
+          receivedAtMs: received + 1,
+          deviceAddress: 'BB',
+        ),
+        BleProcessingResult.transportDuplicate,
+      );
+      expect(await eventsOf('DATA_RECEIVED'), hasLength(1));
+      expect(
+        (await eventsOf('DATA_RECEIVED')).single['timestamp_ms'],
+        received,
+      );
+      final next = NeighborFrame(
+        type: frame.type,
+        transmitter: 123,
+        boot: 1,
+        sequence: 2,
+        scope: frame.scope,
+        inner: frame.inner,
+      );
+      expect(
+        await service.processIncomingPayload(next.encode()),
+        BleProcessingResult.duplicate,
+      );
+      expect(await eventsOf('DATA_RECEIVED'), hasLength(2));
+      final db = await DatabaseHelper().database;
+      final sos = (await db.query('sos_messages')).single;
+      expect(sos['duplicate_count'], 1);
+      expect(sos['hop_count'], 2);
+      expect(await db.query('relay_queue'), hasLength(1));
+    },
+  );
+
+  test(
+    'RN forbidden edge and wrong scope have no durable or neighbor effects',
+    () async {
+      final frame = await configureNeighbor();
+      for (final bad in [
+        NeighborFrame(
+          type: frame.type,
+          transmitter: 999,
+          boot: 1,
+          sequence: 1,
+          scope: frame.scope,
+          inner: frame.inner,
+        ),
+        NeighborFrame(
+          type: frame.type,
+          transmitter: 123,
+          boot: 1,
+          sequence: 1,
+          scope: frame.scope + 1,
+          inner: frame.inner,
+        ),
+      ]) {
+        expect(
+          await BleRelayService().processIncomingPayload(bad.encode()),
+          BleProcessingResult.invalid,
+        );
+      }
+      final db = await DatabaseHelper().database;
+      expect(await db.query('sos_messages'), isEmpty);
+      expect(await db.query('processed_ble_observations'), isEmpty);
+      expect(NeighborRuntime.instance.controller!.peers(999999), isEmpty);
+      expect(await eventsOf('DATA_RECEIVED'), isEmpty);
+    },
+  );
+
+  test(
+    'empty STATUS is durable and idempotent but never a SOS or ACK',
+    () async {
+      final frame = await configureNeighbor(status: true);
+      expect(
+        await BleRelayService().processIncomingPayload(frame.encode()),
+        BleProcessingResult.accepted,
+      );
+      expect(
+        await BleRelayService().processIncomingPayload(frame.encode()),
+        BleProcessingResult.transportDuplicate,
+      );
+      final db = await DatabaseHelper().database;
+      expect(await db.query('sos_messages'), isEmpty);
+      expect(await db.query('ack_tombstones'), isEmpty);
+      expect(await eventsOf('STATUS_RECEIVED'), hasLength(1));
+      expect(await eventsOf('DATA_RECEIVED'), isEmpty);
+      expect(
+        (await db.query('processed_ble_observations')).single['state'],
+        'completed',
+      );
+    },
+  );
 
   Future<Map<String, Object?>> onlySos() async {
     final db = await DatabaseHelper().database;

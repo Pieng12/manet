@@ -246,8 +246,11 @@ class SerialNode(NodeTransport):
     _write_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
     _stop_reader: threading.Event = field(default_factory=threading.Event, init=False, repr=False)
     _reader: threading.Thread | None = field(default=None, init=False, repr=False)
+    transport_error: str | None = field(default=None, init=False)
 
     def _connection(self) -> Any:
+        if self.transport_error:
+            raise DeviceError(self.transport_error)
         if self._serial is None:
             try:
                 import serial
@@ -267,7 +270,14 @@ class SerialNode(NodeTransport):
 
     def _reader_loop(self, connection: Any) -> None:
         while not self._stop_reader.is_set():
-            raw = connection.readline()
+            try:
+                raw = connection.readline()
+            except Exception as error:
+                if not self._stop_reader.is_set():
+                    with self._condition:
+                        self.transport_error=f"serial disconnected: {self.node_id} ({self.port}): {error}"
+                        self._condition.notify_all()
+                return
             if not raw:
                 continue
             try:
@@ -293,6 +303,8 @@ class SerialNode(NodeTransport):
         deadline = time.monotonic() + 8
         with self._condition:
             while time.monotonic() < deadline:
+                if self.transport_error:
+                    raise DeviceError(self.transport_error)
                 for value in list(self._responses):
                     if not command_id or value.get("command_id") == command_id:
                         self._responses.remove(value)
@@ -305,6 +317,8 @@ class SerialNode(NodeTransport):
         session_id: str | None = None,
         trial_id: str | None = None,
     ) -> list[dict[str, Any]]:
+        if self.transport_error:
+            raise DeviceError(self.transport_error)
         self._connection()
         with self._condition:
             events, self._events = self._events, []
@@ -314,6 +328,12 @@ class SerialNode(NodeTransport):
             if (session_id is None or item.get("session_id") == session_id)
             and (trial_id is None or item.get("trial_id") == trial_id)
         ]
+
+    def diagnostic_events(self, session_id: str, trial_id: str) -> list[dict[str, Any]]:
+        # Salvage already received evidence after disconnect, without claiming a complete stream.
+        with self._condition:
+            return [dict(e) for e in self._events
+                    if e.get("session_id") == session_id and e.get("trial_id") == trial_id]
 
     def close(self) -> None:
         if self._serial is not None:

@@ -7,7 +7,7 @@ void main() {
       File(path).readAsStringSync().replaceAll('\r\n', '\n');
 
   test(
-    'Native BLE inbox worker uses headless Dart without foreground service fallback',
+    'legacy inbox remains headless; graph profile routes to its single BLE owner',
     () {
       final worker = read(
         'android/app/src/main/kotlin/com/example/pkmproject/NativeBleInboxWorker.kt',
@@ -22,9 +22,19 @@ void main() {
       expect(worker, contains('NativeBleAdvertiser.startAdvertising'));
       expect(worker, contains('setHasPendingRelayWork'));
       expect(worker, contains('enqueueIfPendingAndPermitted'));
-      expect(worker, isNot(contains('MeshBackgroundService')));
-      expect(worker, isNot(contains('startForegroundService')));
-      expect(worker, isNot(contains('startService')));
+      final legacy = worker.substring(worker.indexOf('val completed ='));
+      expect(legacy, isNot(contains('MeshBackgroundService')));
+      expect(legacy, isNot(contains('startForegroundService')));
+      expect(legacy, isNot(contains('startService')));
+      expect(worker, contains('NeighborTransport.requiresSchedulerOwner'));
+      expect(
+        worker,
+        contains('MeshBackgroundService.OWNER_INBOX_DRAIN_ACTION'),
+      );
+      expect(
+        worker.indexOf('OWNER_INBOX_DRAIN_ACTION'),
+        lessThan(worker.indexOf('val completed =')),
+      );
     },
   );
 

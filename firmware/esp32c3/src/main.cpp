@@ -13,6 +13,8 @@
 #include "Protocol.h"
 #include "CodedRadio.h"
 #include "TrickleTiming.h"
+#include "NeighborTransport.h"
+#include <set>
 
 #ifndef RESQMESH_FIRMWARE_BUILD_ID
 #error "RESQMESH_FIRMWARE_BUILD_ID must be injected by the PlatformIO build"
@@ -32,7 +34,7 @@ constexpr uint32_t kNativeStartRetryMs = 1000;
 constexpr size_t kSerialRxBufferBytes = 2048;
 
 enum class Role { Source, Relay, Destination, Observer };
-enum class Mode { Basic, TrickleNoSuppression, Trickle };
+enum class Mode { Basic, TrickleNoSuppression, Trickle, NeighborStatus };
 
 bool usesTrickle(Mode mode) { return mode != Mode::Basic; }
 bool suppressionEnabled(Mode mode) { return mode == Mode::Trickle; }
@@ -50,6 +52,9 @@ struct NodeConfig {
   uint8_t hopOut = 0;
   uint32_t rxBurstGapMs = kDefaultRxBurstGapMs;
   bool protocolActive = false;
+  bool neighborProfile = false;
+  std::array<uint32_t, 5> allowed{};
+  uint8_t allowedCount = 0;
 };
 
 struct SchedulerState {
@@ -63,6 +68,7 @@ struct SchedulerState {
   bool waitingIntervalEnd = false;
   bool opportunityEvaluated = false;
   bool advertising = false;
+  bool statusAdvertising = false;
   bool firstAdvertiseStarted = false;
   uint64_t firstAdvertiseStartedAtMs = 0;
   uint32_t burstEndsAt = 0;
@@ -83,9 +89,17 @@ uint32_t quietUntil = 0;
 bool observationWindowOpen = false;
 String serialBuffer;
 ObservationTracker observationTracker(kDefaultRxBurstGapMs);
+NeighborController neighbors;
+uint32_t incarnation = 0, transportSequence = 0, trialScope = 0, nextStatusAt = 0;
+bool rxParticipation = true, txParticipation = true;
+std::set<std::string> frameObservations;
+NeighborFrame activeFrame;
+const NeighborFrame* eventFrame = nullptr;
 SemaphoreHandle_t serialOutputMutex = nullptr;
 
 struct ReceivedPacket {
+  bool envelope = false;
+  NeighborFrame frame;
   Packet packet;
   int rssi;
   char advertiser[18];
@@ -120,6 +134,7 @@ const char* roleName(Role role) {
 }
 
 const char* modeName(Mode mode) {
+  if (mode == Mode::NeighborStatus) return "trickle_neighbor_status";
   if (mode == Mode::TrickleNoSuppression) return "trickle_no_suppression";
   return mode == Mode::Trickle ? "trickle" : "basic_flooding";
 }
@@ -158,17 +173,40 @@ void emit(const char* eventType, const Packet* packet = nullptr,
   document["trial_id"] = config.trialId;
   document["mode"] = modeName(config.mode);
   document["role"] = roleName(config.role);
+  if (config.neighborProfile) {
+    document["transport_profile"] = "neighbor_graph_v1";
+    document["scope"] = trialScope;
+    if (eventFrame != nullptr) {
+      document["transmitter_id"] = eventFrame->transmitter;
+      document["boot_id"] = eventFrame->boot;
+      document["transmission_sequence"] = eventFrame->sequence;
+      document["transport_burst_id"] = burstIdentity(*eventFrame);
+      document["frame_type"] = eventFrame->status ? "status" : "data";
+    }
+  }
   if (strncmp(eventType, "ADVERTISE_BURST_", 16) == 0 ||
+      strncmp(eventType,"DATA_BURST_",11)==0 || strncmp(eventType,"STATUS_BURST_",13)==0 ||
       strcmp(eventType, "SERVICE_STARTED") == 0) {
     radio.telemetry(document["radio"].to<JsonObject>());
   }
   const uint32_t eventTime =
       physicalReceivedAt != nullptr ? *physicalReceivedAt : millis();
   document["monotonic_ms"] = eventTime;
+  if(config.neighborProfile) document["clock_domain"]="esp_boot_millis";
+  if(config.mode==Mode::NeighborStatus && scheduler.hasPacket && strncmp(eventType,"NEIGHBOR_",9)==0) {
+    const auto counts=neighbors.counts(scheduler.packet,eventTime);
+    document["have_count"]=counts.have;document["missing_count"]=counts.missing;
+    document["unknown_count"]=counts.unknown;document["status_age_ms"]=counts.maxAge;
+  }
   if (wallClockValid) document["timestamp_ms"] = wallOffsetMs + eventTime;
   document["clock_sync_valid"] = wallClockValid;
   if (wallClockValid) document["clock_offset_ms"] = 0;
   if (reason != nullptr) document["reason"] = reason;
+  if(config.neighborProfile && (strncmp(eventType,"RX_PARTICIPATION_",17)==0 || strncmp(eventType,"NODE_PARTICIPATION_",19)==0)) {
+    document["rx_enabled"]=rxParticipation; document["tx_enabled"]=txParticipation;
+    if(reason && (strcmp(reason,"ENABLE")==0 || strcmp(reason,"DISABLE")==0)) document["requested_enabled"]=strcmp(reason,"ENABLE")==0;
+    else if(reason && strcmp(reason,"FAILED")!=0) document["confirmed_enabled"]=rxParticipation;
+  }
   if (usesTrickle(config.mode) && scheduler.hasPacket &&
       (strncmp(eventType, "TRICKLE_", 8) == 0 ||
        strncmp(eventType, "ADVERTISE_BURST_", 16) == 0)) {
@@ -211,6 +249,14 @@ void respond(const String& command, const String& commandId, bool ok,
   document["command"] = command;
   document["command_id"] = commandId;
   document["ok"] = ok;
+  if(command=="set_rx_participation" || command=="set_node_participation") {
+    if(ok) document["confirmed_enabled"] = rxParticipation;
+    else document["confirmed_enabled"] = nullptr;
+    document["rx_enabled"] = rxParticipation;
+    document["tx_enabled"] = txParticipation;
+    document["native_monotonic_ms"] = millis();
+    if(wallClockValid) document["timestamp_ms"] = wallTimeMs();
+  }
   if (error != nullptr) document["error"] = error;
   if (serialOutputMutex != nullptr) {
     xSemaphoreTake(serialOutputMutex, portMAX_DELAY);
@@ -228,6 +274,7 @@ Role parseRole(const String& value) {
 }
 
 Mode parseMode(const String& value) {
+  if (value == "trickle_neighbor_status") return Mode::NeighborStatus;
   if (value == "trickle_no_suppression") return Mode::TrickleNoSuppression;
   return value == "basic" || value == "basic_flooding" ? Mode::Basic
                                                          : Mode::Trickle;
@@ -264,6 +311,7 @@ bool pauseScanner() {
 }
 
 void resumeScanner() {
+  if (!rxParticipation) return;
   if (scanner != nullptr && !scanner->isScanning()) {
     scanner->start(0, false, false);
   }
@@ -277,6 +325,8 @@ void clearProtocolState() {
   if (scheduler.advertising && advertising != nullptr) advertising->stop();
   resumeScanner();
   scheduler = SchedulerState();
+  frameObservations.clear();
+  neighbors.reset(0);
   preferences.remove("packet");
   observationTracker.clear();
 }
@@ -286,8 +336,12 @@ void cancelActiveBurst(const char* reason) {
   advertising->stop();
   resumeScanner();
   scheduler.advertising = false;
-  emit("ADVERTISE_BURST_CANCELLED", &scheduler.packet, reason, 0, String(),
+  eventFrame = config.neighborProfile ? &activeFrame : nullptr;
+  emit(scheduler.statusAdvertising ? "STATUS_BURST_CANCELLED" : "ADVERTISE_BURST_CANCELLED", scheduler.statusAdvertising ? nullptr : &scheduler.packet, reason, 0, String(),
        scheduler.burstId);
+  if(config.neighborProfile && !scheduler.statusAdvertising) emit("DATA_BURST_CANCELLED",&scheduler.packet,reason,0,String(),scheduler.burstId);
+  scheduler.statusAdvertising = false;
+  eventFrame = nullptr;
   scheduler.burstId = "";
 }
 
@@ -304,6 +358,8 @@ void chooseTrickleTransmit(uint32_t now, const char* reason) {
 }
 
 void scheduleNewState(const char* reason) {
+  scheduler.firstAdvertiseStarted = false;
+  if (config.mode==Mode::NeighborStatus) emit("INITIAL_FORWARD_PENDING",&scheduler.packet);
   const uint32_t now = millis();
   scheduler.intervalMs = kIminMs;
   if (usesTrickle(config.mode)) {
@@ -325,6 +381,9 @@ void storeForRelay(const Packet& incoming, const char* reason,
   scheduler.hasPacket = true;
   persistPacket();
   emit("BLE_PACKET_ACCEPTED", &incoming, reason);
+  if (config.neighborProfile) {
+    emit("NODE_FIRST_VALID_RECEIVE", &incoming, nullptr, 0, String(), String(), receivedAt);
+  }
   if (config.role == Role::Destination) {
     emit("DESTINATION_FIRST_VALID_RECEIVE", &incoming, nullptr, 0,
          String(), String(), receivedAt);
@@ -426,15 +485,24 @@ class ScanCallbacks : public NimBLEScanCallbacks {
     const uint32_t receivedAt = millis();
     if (!device->haveManufacturerData()) return;
     const std::string data = device->getManufacturerData();
+    const auto* raw = reinterpret_cast<const uint8_t*>(data.data());
+    const size_t skip = data.size()>=2 && raw[0]==0xff && raw[1]==0xff ? 2 : 0;
+    NeighborFrame frame;
+    const bool isEnvelope = data.size()>skip+1 && raw[skip]==0x52 && raw[skip+1]==0x4e;
     std::array<uint8_t, kPayloadLength> payload{};
-    if (!extractApplicationPayload(
+    if (!isEnvelope && !extractApplicationPayload(
             reinterpret_cast<const uint8_t*>(data.data()), data.size(),
             payload)) {
       return;
     }
     Packet packet;
-    if (!decode(payload.data(), payload.size(), packet)) return;
+    if (isEnvelope) {
+      if (!decodeFrame(raw+skip,data.size()-skip,frame)) return;
+      packet=frame.packet;
+    } else if (!decode(payload.data(), payload.size(), packet)) return;
     ReceivedPacket received{};
+    received.envelope = isEnvelope;
+    received.frame = frame;
     received.packet = packet;
     received.rssi = device->getRSSI();
     received.receivedAt = receivedAt;
@@ -451,6 +519,63 @@ class ScanCallbacks : public NimBLEScanCallbacks {
   }
 };
 
+void processFrame(const ReceivedPacket& rx) {
+  const auto& f=rx.frame;
+  if (!config.neighborProfile || !config.protocolActive || !rxParticipation || f.scope!=trialScope || !due(rx.receivedAt,quietUntil)) return;
+  bool allowed=false;
+  for(size_t i=0;i<config.allowedCount;++i) allowed=allowed || config.allowed[i]==f.transmitter;
+  if (!allowed) return;
+  if(!wallClockValid || !frameTimeValid(f,wallTimeMs()/1000)) return;
+  if(!f.status && f.packet.kind==PacketKind::Ack) return;
+  const auto identity=burstIdentity(f);
+  if (!frameObservations.insert(identity).second) return;
+  if (frameObservations.size()>4096) { emit("EXPERIMENT_CONFIG_VIOLATION",nullptr,"FRAME_OBSERVATION_CAPACITY"); return; }
+  eventFrame=&f;
+  const String observation=(config.nodeId+"|"+String(identity.c_str()));
+  const uint32_t at=rx.receivedAt;
+  const bool discovered=!neighbors.known(f.transmitter);
+  if (config.mode==Mode::NeighborStatus && neighbors.observe(f,at,millis())) {
+    if(discovered) emit("NEIGHBOR_DISCOVERED",f.status ? nullptr : &f.packet,nullptr,rx.rssi,observation,String(),&at);
+    emit("NEIGHBOR_STATUS_UPDATED",f.status ? nullptr : &f.packet,nullptr,rx.rssi,observation,String(),&at);
+    if(scheduler.hasPacket && neighbors.repairAllowed(scheduler.packet,millis(),scheduler.intervalMs,kIminMs)) {
+      scheduler.intervalMs=kIminMs;
+      chooseTrickleTransmit(millis(),"NEIGHBOR_REPAIR");
+      emit("REPAIR_NEEDED",&scheduler.packet);
+    }
+  }
+  if (f.status) {
+    emit("STATUS_RECEIVED",nullptr,nullptr,rx.rssi,observation,String(),&at);
+    eventFrame=nullptr; return;
+  }
+  const auto& p=f.packet;
+  // Completion ACK is disabled in the graph research profile.
+  if (p.kind==PacketKind::Ack) { eventFrame=nullptr; return; }
+  bool stale=false;
+  if(scheduler.hasPacket && p.senderCrc==scheduler.packet.senderCrc) {
+    const auto a=inventoryState(p), b=inventoryState(scheduler.packet);
+    auto priority=[](uint8_t s){return s==1 ? 0 : s==0 ? 1 : 2;};
+    stale=p.timestampSeconds<scheduler.packet.timestampSeconds || (a.seconds==b.seconds && priority(a.flags & 63)<priority(b.flags & 63));
+  }
+  if (stale) { emit("BLE_PACKET_STALE",&p); eventFrame=nullptr; return; }
+  emit("DATA_RECEIVED",&p,nullptr,rx.rssi,observation,String(),&at);
+  emit("BLE_PACKET_RECEIVED",&p,nullptr,rx.rssi,observation,String(),&at);
+  JsonDocument phy;
+  phy["kind"]="event"; phy["event_type"]="BLE_RX_PHY_OBSERVED"; phy["event_sequence"]=++eventSequence;
+  phy["node_id"]=config.nodeId; phy["session_id"]=config.sessionId; phy["trial_id"]=config.trialId;
+  phy["observation_id"]=observation; phy["timestamp_ms"]=wallOffsetMs+at;
+  phy["primary_phy"]=rx.primaryPhy; phy["secondary_phy"]=rx.secondaryPhy; phy["legacy"]=rx.legacy; phy["coding"]="unknown";
+  xSemaphoreTake(serialOutputMutex,portMAX_DELAY); serializeJson(phy,Serial); Serial.println(); xSemaphoreGive(serialOutputMutex);
+  const bool same=scheduler.hasPacket && stateIdentity(p)==stateIdentity(scheduler.packet);
+  if(same) {
+    emit("BLE_PACKET_DUPLICATE",&p,nullptr,rx.rssi,observation);
+    if(usesTrickle(config.mode) && f.transmitter!=p.senderCrc && !due(at,scheduler.intervalEndAt) && due(at,scheduler.intervalStartedAt)) {
+      scheduler.consistencyCount++;
+      emit("TRICKLE_CONSISTENT_HEARD",&p,nullptr,0,observation);
+    }
+  } else if(config.role!=Role::Source) storeForRelay(p,"GRAPH_NEW_STATE",&at);
+  eventFrame=nullptr;
+}
+
 void drainReceivedPackets() {
   const uint32_t dropped = receiveOverflow.exchange(0);
   if (dropped > 0 && observationWindowOpen) {
@@ -463,6 +588,8 @@ void drainReceivedPackets() {
     if (!observationWindowOpen || received.generation != receiveGeneration.load()) {
       continue;
     }
+    if(received.envelope) { processFrame(received); continue; }
+    if(config.neighborProfile) continue;
     processPacket(received.packet, received.rssi, String(received.advertiser),
                   received.receivedAt, received.primaryPhy, received.secondaryPhy, received.legacy);
   }
@@ -486,22 +613,40 @@ void startBurst() {
     scheduler.burstId = "";
     return;
   }
-  emit("ADVERTISE_BURST_REQUESTED", &scheduler.packet, nullptr, 0, String(),
-       scheduler.burstId);
+  std::vector<uint8_t> framed;
+  if(config.neighborProfile) {
+    activeFrame=NeighborFrame{}; activeFrame.packet=scheduler.packet;
+    activeFrame.transmitter=crc32(config.nodeId.c_str());
+    const uint32_t oldBoot=incarnation;
+    if(!advanceBurstIdentity(incarnation,transportSequence) || (oldBoot!=incarnation && preferences.putUInt("incarnation",incarnation)!=sizeof(uint32_t))) {
+      txParticipation=false;emit("EXPERIMENT_CONFIG_VIOLATION",nullptr,"INCARNATION_PERSISTENCE_FAILED_OR_EXHAUSTED");return;
+    }
+    activeFrame.boot=incarnation;
+    activeFrame.sequence=transportSequence; activeFrame.scope=trialScope;
+    if(!encodeFrame(activeFrame,framed)) return;
+    scheduler.burstId=String(burstIdentity(activeFrame).c_str());
+    eventFrame=&activeFrame;
+  }
+  emit("ADVERTISE_BURST_REQUESTED", &scheduler.packet, nullptr, 0, String(), scheduler.burstId);
+  if(config.neighborProfile) emit("DATA_BURST_REQUESTED",&scheduler.packet,nullptr,0,String(),scheduler.burstId);
 
   if (!pauseScanner()) {
     scheduler.transmitAt = millis() + kNativeStartRetryMs;
     emit("ADVERTISE_BURST_FAILED", &scheduler.packet, "SCAN_STOP_FAILED", 0,
          String(), scheduler.burstId);
+    if(config.neighborProfile) emit("DATA_BURST_FAILED",&scheduler.packet,"SCAN_STOP_FAILED",0,String(),scheduler.burstId);
     scheduler.burstId = "";
+    eventFrame=nullptr;
     return;
   }
-  if (!advertising->start(payload)) {
+  if (!(config.neighborProfile ? advertising->start(framed.data(),framed.size()) : advertising->start(payload))) {
     resumeScanner();
     scheduler.transmitAt = millis() + kNativeStartRetryMs;
     emit("ADVERTISE_BURST_FAILED", &scheduler.packet, "NATIVE_START_FAILED",
          0, String(), scheduler.burstId);
+    if(config.neighborProfile) emit("DATA_BURST_FAILED",&scheduler.packet,"NATIVE_START_FAILED",0,String(),scheduler.burstId);
     scheduler.burstId = "";
+    eventFrame=nullptr;
     return;
   }
   scheduler.advertising = true;
@@ -509,6 +654,8 @@ void startBurst() {
   scheduler.burstEndsAt = succeededAt + kBurstMs;
   emit("ADVERTISE_BURST_STARTED", &scheduler.packet, nullptr, 0, String(),
        scheduler.burstId, &succeededAt);
+  if(config.neighborProfile) emit("DATA_BURST_STARTED",&scheduler.packet,nullptr,0,String(),scheduler.burstId,&succeededAt);
+  if(config.mode==Mode::NeighborStatus && !scheduler.firstAdvertiseStarted) emit("INITIAL_FORWARD_STARTED",&scheduler.packet);
   if (!scheduler.firstAdvertiseStarted && config.role == Role::Source) {
     scheduler.firstAdvertiseStartedAtMs = wallOffsetMs + succeededAt;
     emit("SOURCE_FIRST_ADVERTISE_STARTED", &scheduler.packet, nullptr, 0,
@@ -517,14 +664,28 @@ void startBurst() {
   scheduler.firstAdvertiseStarted = true;
   emit("BLE_RELAY_STARTED", &scheduler.packet, nullptr, 0, String(),
        scheduler.burstId);
+  eventFrame=nullptr;
 }
 
 void finishBurst() {
   advertising->stop();
   resumeScanner();
   scheduler.advertising = false;
+  if(scheduler.statusAdvertising) {
+    scheduler.statusAdvertising=false;
+    eventFrame=&activeFrame;
+    emit("STATUS_BURST_ENDED",nullptr,nullptr,0,String(),scheduler.burstId);
+    eventFrame=nullptr;
+    scheduler.burstId="";
+    return;
+  }
   emit("ADVERTISE_BURST_ENDED", &scheduler.packet, nullptr, 0, String(),
        scheduler.burstId);
+  if(config.neighborProfile) {
+    eventFrame=&activeFrame;
+    emit("DATA_BURST_ENDED",&scheduler.packet,"TARGET_DURATION_REACHED",0,String(),scheduler.burstId);
+    eventFrame=nullptr;
+  }
   const uint32_t now = millis();
   if (config.mode == Mode::Basic) {
     scheduler.transmitAt = now + kBasicIntervalMs + random(300, 1501);
@@ -535,17 +696,53 @@ void finishBurst() {
   scheduler.burstId = "";
 }
 
+void startStatusBurst() {
+  activeFrame=NeighborFrame{}; activeFrame.status=true;
+  activeFrame.transmitter=crc32(config.nodeId.c_str());
+  const uint32_t oldBoot=incarnation;
+  if(!advanceBurstIdentity(incarnation,transportSequence) || (oldBoot!=incarnation && preferences.putUInt("incarnation",incarnation)!=sizeof(uint32_t))) {
+    txParticipation=false;emit("EXPERIMENT_CONFIG_VIOLATION",nullptr,"INCARNATION_PERSISTENCE_FAILED_OR_EXHAUSTED");return;
+  }
+  activeFrame.boot=incarnation;
+  activeFrame.sequence=transportSequence; activeFrame.scope=trialScope;
+  if(scheduler.hasPacket) { activeFrame.count=1; activeFrame.inventory[0]=inventoryState(scheduler.packet); }
+  std::vector<uint8_t> bytes;
+  const auto& params=neighbors.parameters;
+  nextStatusAt=millis()+params.statusPeriod+random(0,params.jitter+1);
+  if(!encodeFrame(activeFrame,bytes)) return;
+  eventFrame=&activeFrame;
+  scheduler.burstId=String(burstIdentity(activeFrame).c_str());
+  emit("STATUS_BURST_REQUESTED",nullptr,nullptr,0,String(),scheduler.burstId);
+  if(!pauseScanner() || !advertising->start(bytes.data(),bytes.size())) {
+    resumeScanner(); emit("STATUS_BURST_FAILED",nullptr,"NATIVE_START_FAILED"); eventFrame=nullptr; return;
+  }
+  scheduler.advertising=true; scheduler.statusAdvertising=true;
+  const uint32_t now=millis(); scheduler.burstEndsAt=now+params.statusBurst;
+  emit("STATUS_BURST_STARTED",nullptr,nullptr,0,String(),scheduler.burstId,&now);
+  eventFrame=nullptr;
+}
+
 void tickScheduler() {
-  if (!observationWindowOpen || !scheduler.hasPacket ||
+  if (!observationWindowOpen || !txParticipation ||
       config.role == Role::Destination ||
       config.role == Role::Observer || !config.protocolActive) {
     return;
   }
   const uint32_t now = millis();
+  if(config.mode==Mode::NeighborStatus) for(const auto& expired:neighbors.newlyExpired(now)) {
+    eventFrame=&expired;emit("NEIGHBOR_STATUS_EXPIRED",nullptr,"FRESHNESS_ELAPSED");eventFrame=nullptr;
+  }
   if (scheduler.advertising) {
     if (due(now, scheduler.burstEndsAt)) finishBurst();
     return;
   }
+  // Never occupy set 0 across an imminent DATA opportunity. Empty inventory still discovers peers.
+  if(config.mode==Mode::NeighborStatus && due(now,nextStatusAt) &&
+     (!scheduler.hasPacket || (scheduler.waitingIntervalEnd && !due(now,scheduler.intervalEndAt)) ||
+      (!due(now,scheduler.transmitAt) && scheduler.transmitAt-now>neighbors.parameters.statusBurst+250))) {
+    startStatusBurst(); return;
+  }
+  if(!scheduler.hasPacket) return;
   if (usesTrickle(config.mode) && due(now, scheduler.intervalEndAt)) {
     if (trickleOpportunityMissed(now, scheduler.intervalStartedAt,
                                 scheduler.intervalMs, scheduler.opportunityEvaluated)) {
@@ -564,22 +761,24 @@ void tickScheduler() {
                            scheduler.intervalMs, scheduler.transmitAt))) {
     return;
   }
+  const char* neighborReason=config.mode==Mode::NeighborStatus ? neighbors.decision(scheduler.packet,now,!scheduler.firstAdvertiseStarted) : nullptr;
   if (usesTrickle(config.mode) && !scheduler.opportunityEvaluated) {
     scheduler.opportunityEvaluated = true;
     emit("TRICKLE_TX_OPPORTUNITY", &scheduler.packet,
-         trickleAllowsTransmission(suppressionEnabled(config.mode), scheduler.consistencyCount, 1)
+         (neighborReason ? strcmp(neighborReason,"ALL_OBSERVED_HAVE")!=0 : trickleAllowsTransmission(suppressionEnabled(config.mode), scheduler.consistencyCount, 1))
              ? "ALLOWED" : "SUPPRESSED");
   }
+  if(neighborReason) emit(strcmp(neighborReason,"ALL_OBSERVED_HAVE")==0 ? "NEIGHBOR_TX_SUPPRESSED" : "NEIGHBOR_TX_ALLOWED",&scheduler.packet,neighborReason);
   if (usesTrickle(config.mode) &&
-      !trickleAllowsTransmission(suppressionEnabled(config.mode), scheduler.consistencyCount, 1)) {
-    emit("TRICKLE_TX_SUPPRESSED", &scheduler.packet, "C_GE_K");
+      (neighborReason ? strcmp(neighborReason,"ALL_OBSERVED_HAVE")==0 : !trickleAllowsTransmission(suppressionEnabled(config.mode), scheduler.consistencyCount, 1))) {
+    emit("TRICKLE_TX_SUPPRESSED", &scheduler.packet, neighborReason ? neighborReason : "C_GE_K");
     scheduler.waitingIntervalEnd = true;
     scheduler.transmitAt = scheduler.intervalEndAt;
     return;
   }
   if (usesTrickle(config.mode)) {
     emit("TRICKLE_TX_ALLOWED", &scheduler.packet,
-         suppressionEnabled(config.mode) ? "C_LT_K" : "SUPPRESSION_DISABLED");
+         neighborReason ? neighborReason : suppressionEnabled(config.mode) ? "C_LT_K" : "SUPPRESSION_DISABLED");
   }
   startBurst();
 }
@@ -625,10 +824,29 @@ void emitReadiness(const String& commandId) {
           ? static_cast<double>(epochEndSeconds() + 1 - nowSeconds) / 86400.0
           : 0;
   document["payload_length"] = kPayloadLength;
+  document["transport_profile"] = config.neighborProfile ? "neighbor_graph_v1" : "legacy";
+  document["transport_version"] = config.neighborProfile ? kNeighborProtocol : kProtocolVersion;
+  document["data_frame_length"] = config.neighborProfile ? 39 : 17;
+  document["neighbor_design_version"] = 1;
+  if(config.neighborProfile) {
+    document["transmitter_id"]=crc32(config.nodeId.c_str());
+    document["scope"]=trialScope;
+    auto allowed=document["allowed_transmitters"].to<JsonArray>();
+    for(size_t i=0;i<config.allowedCount;++i) allowed.add(config.allowed[i]);
+    auto params=document["neighbor_parameters"].to<JsonObject>();
+    params["status_period_ms"]=neighbors.parameters.statusPeriod;
+    params["status_burst_ms"]=neighbors.parameters.statusBurst;
+    params["freshness_ms"]=neighbors.parameters.freshness;
+    params["discovery_jitter_ms"]=neighbors.parameters.jitter;
+    params["reset_cooldown_ms"]=neighbors.parameters.resetCooldown;
+    params["neighbor_capacity"]=neighbors.parameters.capacity;
+  }
+  document["rx_participation"] = rxParticipation;
+  document["tx_participation"] = txParticipation;
   document["measurement_timing_version"] = 2;
   document["method_design_version"] = 3;
   document["suppression_enabled"] = suppressionEnabled(config.mode);
-  document["supported_modes"] = "basic_flooding,trickle_no_suppression,trickle";
+  document["supported_modes"] = "basic_flooding,trickle_no_suppression,trickle,trickle_neighbor_status";
   document["trickle_imin_ms"] = kIminMs;
   document["trickle_imax_ms"] = kImaxMs;
   document["trickle_k"] = 1;
@@ -660,6 +878,11 @@ void handleCommand(const String& line) {
     }
     wallOffsetMs = requestedWallMs - millis();
     wallClockValid = true;
+    if(config.neighborProfile && !config.trialId.isEmpty() && preferences.getBool("nwindow",false)) {
+      observationWindowOpen=true;receiveEnabled.store(rxParticipation);
+      resumeScanner();
+      nextStatusAt=millis()+1000+random(0,neighbors.parameters.jitter+1);
+    }
     respond(command, commandId, true);
     return;
   }
@@ -668,6 +891,7 @@ void handleCommand(const String& line) {
     return;
   }
   if (command == "configure_session") {
+    if (observationWindowOpen) { respond(command,commandId,false,"TRIAL_RUNNING"); return; }
     const String radioMode = document["radio_mode"] | "coded";
     if (radioMode != "coded" && radioMode != "coded_s8_required") {
       respond(command, commandId, false, "INVALID_RADIO_MODE");
@@ -692,7 +916,7 @@ void handleCommand(const String& line) {
       return;
     }
     if (requestedMode != "trickle" && requestedMode != "basic" &&
-        requestedMode != "basic_flooding" && requestedMode != "trickle_no_suppression") {
+        requestedMode != "basic_flooding" && requestedMode != "trickle_no_suppression" && requestedMode != "trickle_neighbor_status") {
       respond(command, commandId, false, "INVALID_MODE");
       return;
     }
@@ -701,6 +925,27 @@ void handleCommand(const String& line) {
     if (requestedRxBurstGapMs == 0) {
       respond(command, commandId, false, "INVALID_rx_burst_gap_ms");
       return;
+    }
+    const String requestedProfile=document["transport_profile"] | "legacy";
+    if(requestedProfile!="legacy" && requestedProfile!="neighbor_graph_v1") { respond(command,commandId,false,"UNSUPPORTED_TRANSPORT_PROFILE");return; }
+    if(requestedMode=="trickle_neighbor_status" && requestedProfile!="neighbor_graph_v1") { respond(command,commandId,false,"NEIGHBOR_PROFILE_REQUIRED");return; }
+    if(requestedProfile=="neighbor_graph_v1") {
+      const String node=document["node_id"] | "";
+      const auto ids=document["allowed_transmitters"].as<JsonArray>();
+      std::set<uint32_t> unique;
+      if(node.isEmpty() || ids.isNull() || ids.size()==0 || ids.size()>5 || (requestedRole!="SOURCE" && requestedRole!="RELAY")) { respond(command,commandId,false,"INVALID_GRAPH");return; }
+      for(JsonVariant value:ids) {
+        const uint32_t id=value.as<uint32_t>();
+        if(!value.is<uint32_t>() || id==0 || id==crc32(node.c_str()) || !unique.insert(id).second) { respond(command,commandId,false,"INVALID_TRANSMITTER");return; }
+      }
+      NeighborParameters candidate;
+      candidate.statusPeriod=document["status_period_ms"] | 12000;
+      candidate.statusBurst=document["status_burst_ms"] | 500;
+      candidate.freshness=document["freshness_ms"] | 45000;
+      candidate.jitter=document["discovery_jitter_ms"] | 1500;
+      candidate.resetCooldown=document["reset_cooldown_ms"] | 8000;
+      candidate.capacity=document["neighbor_capacity"] | 16;
+      if(!candidate.valid() || document["discovery_jitter_ms"].as<int64_t>()<0) { respond(command,commandId,false,"INVALID_NEIGHBOR_PARAMETERS");return; }
     }
     preferences.putBool("s8required", radioMode == "coded_s8_required");
     if (!radio.configure(radioMode == "coded_s8_required")) {
@@ -719,6 +964,33 @@ void handleCommand(const String& line) {
     config.hopOut = document["hop_out"] | 0;
     config.rxBurstGapMs = requestedRxBurstGapMs;
     config.protocolActive = document["protocol_active"] | true;
+    const String profile=document["transport_profile"] | "legacy";
+    config.neighborProfile=profile=="neighbor_graph_v1";
+    if(requestedMode=="trickle_neighbor_status" && !config.neighborProfile) { respond(command,commandId,false,"NEIGHBOR_PROFILE_REQUIRED"); return; }
+    config.allowedCount=0;
+    if(config.neighborProfile) {
+      const auto allowed=document["allowed_transmitters"].as<JsonArray>();
+      if(allowed.isNull() || allowed.size()>5) { respond(command,commandId,false,"INVALID_GRAPH"); return; }
+      for(JsonVariant value:allowed) {
+        const uint32_t id=value.as<uint32_t>();
+        if(!id || id==crc32(config.nodeId.c_str())) { respond(command,commandId,false,"INVALID_TRANSMITTER"); return; }
+        config.allowed[config.allowedCount++]=id;
+      }
+      auto& p=neighbors.parameters;
+      p.statusPeriod=document["status_period_ms"] | 12000;
+      p.statusBurst=document["status_burst_ms"] | 500;
+      p.freshness=document["freshness_ms"] | 45000;
+      p.jitter=document["discovery_jitter_ms"] | 1500;
+      p.resetCooldown=document["reset_cooldown_ms"] | 8000;
+      p.capacity=document["neighbor_capacity"] | 16;
+      if(!p.valid()) { respond(command,commandId,false,"INVALID_NEIGHBOR_PARAMETERS"); return; }
+      std::string serialized; serializeJson(document["allowed_transmitters"],serialized);
+      preferences.putString("adjacency",serialized.c_str());
+      preferences.putUInt("nperiod",p.statusPeriod); preferences.putUInt("nburst",p.statusBurst);
+      preferences.putUInt("nfresh",p.freshness); preferences.putUInt("njitter",p.jitter);
+      preferences.putUInt("ncool",p.resetCooldown); preferences.putUInt("ncap",p.capacity);
+    }
+    preferences.putBool("ngraph",config.neighborProfile);
     observationTracker.configure(config.rxBurstGapMs);
     persistConfig();
     respond(command, commandId, true);
@@ -735,7 +1007,14 @@ void handleCommand(const String& line) {
     }
     clearProtocolState();
     config.trialId = String(document["trial_id"] | "");
+    trialScope=crc32(config.trialId.c_str());
+    neighbors.reset(trialScope);
+    rxParticipation=txParticipation=true;
+    if(config.neighborProfile) { preferences.putBool("nrx",true);preferences.putBool("ntx",true); }
+    resumeScanner();
+    nextStatusAt=millis()+1000+random(0,neighbors.parameters.jitter+1);
     observationWindowOpen = true;
+    if(config.neighborProfile) preferences.putBool("nwindow",true);
     persistConfig();
     emit("TRIAL_WINDOW_STARTED");
     receiveEnabled.store(true);
@@ -748,10 +1027,25 @@ void handleCommand(const String& line) {
       drainReceivedPackets();
       cancelActiveBurst("OBSERVATION_WINDOW_ENDED");
       observationWindowOpen = false;
+      if(config.neighborProfile) preferences.putBool("nwindow",false);
       receiveGeneration.fetch_add(1);
       emit("TRIAL_WINDOW_ENDED");
     }
     respond(command, commandId, true);
+    return;
+  }
+  if(command=="set_rx_participation" || command=="set_node_participation") {
+    const bool enabled=document["enabled"] | false;
+    emit(command=="set_rx_participation" ? "RX_PARTICIPATION_REQUESTED" : "NODE_PARTICIPATION_REQUESTED",nullptr,enabled ? "ENABLE" : "DISABLE");
+    rxParticipation=enabled;
+    if(config.neighborProfile) preferences.putBool("nrx",enabled);
+    bool confirmed=true;
+    if(command=="set_node_participation") { txParticipation=enabled; if(config.neighborProfile) preferences.putBool("ntx",enabled); if(!enabled) cancelActiveBurst("PARTICIPATION_DISABLED"); }
+    if(enabled) { resumeScanner(); confirmed=scanner && scanner->isScanning(); }
+    else confirmed=pauseScanner();
+    receiveEnabled.store(enabled && observationWindowOpen);
+    emit(command=="set_rx_participation" ? "RX_PARTICIPATION_CHANGED" : "NODE_PARTICIPATION_CHANGED",nullptr,confirmed ? (enabled ? "ENABLED_CONFIRMED" : "DISABLED_CONFIRMED") : "FAILED");
+    respond(command,commandId,confirmed,confirmed ? nullptr : "PARTICIPATION_NOT_CONFIRMED");
     return;
   }
   if (command == "trigger_sos") {
@@ -784,7 +1078,11 @@ void handleCommand(const String& line) {
   }
   if (command == "reset_trial") {
     observationWindowOpen = false;
+    if(config.neighborProfile) preferences.putBool("nwindow",false);
     clearProtocolState();
+    rxParticipation=txParticipation=true;
+    if(config.neighborProfile) { preferences.putBool("nrx",true);preferences.putBool("ntx",true); }
+    resumeScanner();
     quietUntil = millis() + kQuietPeriodMs;
     emit("TRIAL_RESET");
     config.trialId = "";
@@ -796,6 +1094,11 @@ void handleCommand(const String& line) {
 }
 
 void loadPersistentState() {
+  incarnation=preferences.getUInt("incarnation",0)+1;
+  if(incarnation==0) { emit("EXPERIMENT_CONFIG_VIOLATION",nullptr,"INCARNATION_EXHAUSTED"); return; }
+  if(preferences.putUInt("incarnation",incarnation)!=sizeof(uint32_t)) {
+    incarnation=0;txParticipation=false;emit("EXPERIMENT_CONFIG_VIOLATION",nullptr,"INCARNATION_PERSISTENCE_FAILED");return;
+  }
   config.nodeId = preferences.getString("node", config.nodeId);
   config.sessionLabel = preferences.getString("label", "");
   config.sessionId = preferences.getString("session", "");
@@ -809,6 +1112,18 @@ void loadPersistentState() {
   config.rxBurstGapMs =
       preferences.getUInt("rxgap", kDefaultRxBurstGapMs);
   config.protocolActive = preferences.getBool("active", false);
+  config.neighborProfile=preferences.getBool("ngraph",false);
+  if(config.neighborProfile) {
+    JsonDocument adjacency; deserializeJson(adjacency,preferences.getString("adjacency","[]"));
+    for(JsonVariant value:adjacency.as<JsonArray>()) if(config.allowedCount<5) config.allowed[config.allowedCount++]=value.as<uint32_t>();
+    auto& p=neighbors.parameters;
+    p.statusPeriod=preferences.getUInt("nperiod",12000); p.statusBurst=preferences.getUInt("nburst",500);
+    p.freshness=preferences.getUInt("nfresh",45000); p.jitter=preferences.getUInt("njitter",1500);
+    p.resetCooldown=preferences.getUInt("ncool",8000); p.capacity=preferences.getUInt("ncap",16);
+    trialScope=crc32(config.trialId.c_str()); neighbors.reset(trialScope);
+    rxParticipation=preferences.getBool("nrx",true);txParticipation=preferences.getBool("ntx",true);
+    if(!rxParticipation) pauseScanner();
+  }
   observationTracker.configure(config.rxBurstGapMs);
   if (preferences.getBytesLength("packet") == kPayloadLength) {
     std::array<uint8_t, kPayloadLength> bytes{};

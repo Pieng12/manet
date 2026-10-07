@@ -43,6 +43,22 @@ class BleRuntimeState {
 }
 
 class NativeBridgeService {
+  static Future<bool> requestResearchCommand(Map<String, dynamic> args) async =>
+      await _platform.invokeMethod<bool>('requestResearchCommand', {
+        'json': jsonEncode(args),
+      }) ==
+      true;
+  static Future<Map<String, dynamic>> setResearchParticipation(
+    bool enabled, {
+    required bool rxOnly,
+  }) async {
+    final value = await _platform.invokeMapMethod<String, dynamic>(
+      'setResearchParticipation',
+      {'enabled': enabled, 'rxOnly': rxOnly},
+    );
+    return value ?? {'ok': false, 'error': 'NO_NATIVE_CONFIRMATION'};
+  }
+
   static Future<void> configureResearchPhyTelemetry(
     Map<String, dynamic> args,
   ) async {

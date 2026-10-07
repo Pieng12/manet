@@ -2,7 +2,7 @@ import sys
 import unittest
 from unittest.mock import patch
 
-from resqmesh_controller.devices import AdbNode, SerialNode, _run
+from resqmesh_controller.devices import AdbNode, SerialNode, DeviceError, _run
 
 
 class FakeConnection:
@@ -17,6 +17,18 @@ class FakeConnection:
 
 
 class DeviceTransportTest(unittest.TestCase):
+    def test_serial_disconnect_notifies_and_preserves_partial_raw_evidence(self):
+        node = SerialNode("esp-r2a", "RELAY", "COM_TEST")
+        node._events.append({'session_id':'s','trial_id':'t','event_type':'DATA_RECEIVED'})
+        class BrokenConnection:
+            def readline(self):
+                raise PermissionError('device disappeared')
+        node._reader_loop(BrokenConnection())
+        self.assertIn('device disappeared',node.transport_error)
+        with self.assertRaises(DeviceError): node.command('readiness',{})
+        with self.assertRaises(DeviceError): node.collect_events('s','t')
+        self.assertEqual(1,len(node.diagnostic_events('s','t')))
+
     def test_adb_events_are_read_from_durable_export(self) -> None:
         node = AdbNode("android-source", "SOURCE", "SERIAL")
         node.command = lambda name, arguments: {

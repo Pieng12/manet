@@ -15,6 +15,8 @@ import 'package:pkmproject/services/experiment_logger.dart';
 import 'package:pkmproject/services/experiment_clock.dart';
 import 'package:pkmproject/services/native_bridge_service.dart';
 import 'package:pkmproject/services/relay_queue_service.dart';
+import 'package:pkmproject/services/neighbor_runtime.dart';
+import 'package:pkmproject/services/neighbor_transport.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 
@@ -73,6 +75,7 @@ class BleAdvertiserService {
   String? _currentBurstMessageKey;
   String? _currentBurstStateIdentity;
   String? _currentBurstStatus;
+  NeighborFrame? _currentNeighborFrame;
   Timer? _watchdogTimer;
   Timer? _ackRestoreTimer;
   Timer? _slotTimer;
@@ -246,7 +249,8 @@ class BleAdvertiserService {
 
   Future<void> _publishPendingRelayWork() async {
     await NativeBridgeService.setHasPendingRelayWork(
-      await _relayQueue.hasActiveItems(),
+      await _relayQueue.hasActiveItems() ||
+          NeighborRuntime.instance.statusEnabled,
     );
   }
 
@@ -262,7 +266,13 @@ class BleAdvertiserService {
       _setSchedulerState(RelaySchedulerState.advertising);
       return;
     }
-    final earliest = await _relayQueue.earliestNextEligibleAt();
+    var earliest = await _relayQueue.earliestNextEligibleAt();
+    final runtime = NeighborRuntime.instance;
+    await runtime.load();
+    if (runtime.statusEnabled &&
+        (earliest == null || runtime.nextStatusAt < earliest)) {
+      earliest = runtime.nextStatusAt;
+    }
     if (earliest == null) {
       _setSchedulerState(
         _isAdvertising
@@ -278,13 +288,14 @@ class BleAdvertiserService {
     }
 
     final now = _clock.monotonicTimeMs();
+    final deadline = earliest;
     final delayMs = earliest <= now ? 0 : earliest - now;
     _setSchedulerState(RelaySchedulerState.waitingNextSlot);
     final schedulerState = _schedulerState.name;
     void armWakeTimer() {
       final delay = _relayQueue.mode.usesTrickle
           ? remainingQueueWakeDelay(
-              deadlineMs: earliest,
+              deadlineMs: deadline,
               nowMs: _clock.monotonicTimeMs(),
             )
           : Duration(milliseconds: delayMs);
@@ -329,7 +340,7 @@ class BleAdvertiserService {
     }
     await _schedulerDiagnostic(
       (wall, monotonic) async => _experimentLogger.logEvent(
-        eventType: earliest <= now
+        eventType: deadline <= now
             ? ExperimentEventTypes.queueWakeTriggered
             : ExperimentEventTypes.queueWakeScheduled,
         deviceId: 'unknown',
@@ -560,7 +571,32 @@ class BleAdvertiserService {
         return;
       }
 
+      final runtime = NeighborRuntime.instance;
+      await runtime.load();
+      await runtime.emitChanges(_clock.monotonicTimeMs());
       final queued = await _nextQueuedAdvertisement();
+      final nextData = await _relayQueue.earliestNextEligibleAt();
+      if (runtime.statusEnabled &&
+          nextData != null &&
+          nextData > _clock.monotonicTimeMs() &&
+          nextData <=
+              _clock.monotonicTimeMs() +
+                  runtime.controller!.parameters.statusBurstMs +
+                  250 &&
+          runtime.nextStatusAt <= _clock.monotonicTimeMs()) {
+        runtime.nextStatusAt =
+            nextData + _relayQueue.slotDurationForMode().inMilliseconds;
+      }
+      if (queued == null &&
+          runtime.statusEnabled &&
+          _clock.monotonicTimeMs() >= runtime.nextStatusAt &&
+          runtime.controller!.statusHasSlot(
+            _clock.monotonicTimeMs(),
+            nextData,
+          )) {
+        await _startStatusBurst();
+        return;
+      }
       if (_researchObservationPaused) {
         await stopAdvertising();
         _setSchedulerState(RelaySchedulerState.stopped);
@@ -701,6 +737,10 @@ class BleAdvertiserService {
     int? decisionWallMs,
   }) async {
     final state = decision.state;
+    final neighborReason =
+        _relayQueue.mode == ForwardingMode.trickleNeighborStatus
+        ? _relayQueue.neighborDecisionReason(message.id)
+        : null;
     final decisionAtMs =
         decisionWallMs ??
         _clock.wallTimeMs() - (_clock.monotonicTimeMs() - state.updatedAt);
@@ -711,14 +751,16 @@ class BleAdvertiserService {
         TrickleTransmitDecisionType.suppressTransmit => 'suppressed',
         _ => 'waiting',
       },
-      'reason': switch (decision.type) {
-        TrickleTransmitDecisionType.allowTransmit =>
-          _relayQueue.mode.suppressionEnabled
-              ? 'C_LT_K'
-              : 'SUPPRESSION_DISABLED',
-        TrickleTransmitDecisionType.suppressTransmit => 'C_GE_K',
-        _ => 'INTERVAL_WAIT',
-      },
+      'reason':
+          neighborReason ??
+          switch (decision.type) {
+            TrickleTransmitDecisionType.allowTransmit =>
+              _relayQueue.mode.suppressionEnabled
+                  ? 'C_LT_K'
+                  : 'SUPPRESSION_DISABLED',
+            TrickleTransmitDecisionType.suppressTransmit => 'C_GE_K',
+            _ => 'INTERVAL_WAIT',
+          },
       'I': state.intervalMs,
       'Imin': MeshConfig.trickleImin.inMilliseconds,
       'Imax': MeshConfig.trickleImax.inMilliseconds,
@@ -733,6 +775,35 @@ class BleAdvertiserService {
     };
     if (decision.type == TrickleTransmitDecisionType.allowTransmit ||
         decision.type == TrickleTransmitDecisionType.suppressTransmit) {
+      if (neighborReason != null) {
+        final knowledge = NeighborRuntime.instance.controller!.snapshot(
+          message.stateIdentity,
+          state.updatedAt,
+        );
+        await NeighborRuntime.instance.log(
+          decision.shouldAdvertise
+              ? 'NEIGHBOR_TX_ALLOWED'
+              : 'NEIGHBOR_TX_SUPPRESSED',
+          state: message.stateIdentity,
+          reason: neighborReason,
+          monotonic: state.updatedAt,
+          receivedAt: decisionAtMs,
+          detail: {
+            'have_count': knowledge.values
+                .where((v) => v.name == 'have')
+                .length,
+            'missing_count': knowledge.values
+                .where((v) => v.name == 'missing')
+                .length,
+            'unknown_count': knowledge.values
+                .where((v) => v.name == 'unknown')
+                .length,
+            'neighbors': NeighborRuntime.instance.controller!
+                .snapshot(message.stateIdentity, state.updatedAt)
+                .map((k, v) => MapEntry(k.toString(), v.name)),
+          },
+        );
+      }
       await _experimentLogger.logEvent(
         eventType: ExperimentEventTypes.trickleTxOpportunity,
         deviceId: 'unknown',
@@ -823,9 +894,24 @@ class BleAdvertiserService {
       slotDuration: burstDuration,
     );
 
-    final payload = BlePacket.packSos(message);
+    final inner = BlePacket.packSos(message);
+    final runtime = NeighborRuntime.instance;
+    await runtime.load();
+    final frame = runtime.enabled ? await runtime.frame(inner: inner) : null;
+    final payload = frame?.encode() ?? inner;
+    if (frame != null) {
+      await _schedulerDiagnostic(
+        (wall, monotonic) => runtime.log(
+          'DATA_BURST_REQUESTED',
+          frame: frame,
+          state: message.stateIdentity,
+          receivedAt: wall,
+          monotonic: monotonic,
+        ),
+      );
+    }
     final packet = BlePacket.unpack(
-      payload,
+      inner,
       referenceTime: DateTime.fromMillisecondsSinceEpoch(message.updatedAt),
     );
     final payloadHash = packet?.identity;
@@ -870,6 +956,25 @@ class BleAdvertiserService {
         final succeededAt = _clock.wallTimeMs();
         final succeededAtMonotonic = _clock.monotonicTimeMs();
         _isAdvertising = true;
+        if (frame != null) {
+          runtime.controller!.started(message.stateIdentity);
+          await runtime.log(
+            'DATA_BURST_STARTED',
+            frame: frame,
+            state: message.stateIdentity,
+            receivedAt: succeededAt,
+            monotonic: succeededAtMonotonic,
+          );
+          if (queued.item.relayCount == 0 && runtime.statusEnabled) {
+            await runtime.log(
+              'INITIAL_FORWARD_STARTED',
+              frame: frame,
+              state: message.stateIdentity,
+              receivedAt: succeededAt,
+              monotonic: succeededAtMonotonic,
+            );
+          }
+        }
         _rememberStartedBurst(
           burstId: burstId,
           wallMs: succeededAt,
@@ -882,6 +987,7 @@ class BleAdvertiserService {
           messageKey: packet?.messageKey.value,
           stateIdentity: packet?.stateIdentity.value,
           status: message.status.name,
+          neighborFrame: frame,
         );
         _setSchedulerState(RelaySchedulerState.advertising);
         _isAdvertisingController.add(_isAdvertising);
@@ -971,6 +1077,14 @@ class BleAdvertiserService {
     }
 
     final errorCode = await _lastNativeAdvertiseErrorCode();
+    if (frame != null) {
+      await runtime.log(
+        'DATA_BURST_FAILED',
+        frame: frame,
+        state: message.stateIdentity,
+        reason: errorCode ?? 'NATIVE_START_FAILED',
+      );
+    }
     final blockedState = _blockedStateForNativeError(errorCode);
     if (blockedState == null) {
       await _relayQueue.markAdvertisingFailed(
@@ -1018,6 +1132,50 @@ class BleAdvertiserService {
       await _scheduleNextQueueWake();
     }
     _markAdvertisingInactive();
+  }
+
+  Future<void> _startStatusBurst() async {
+    final runtime = NeighborRuntime.instance;
+    final frame = await runtime.statusFrame();
+    final now = _clock.monotonicTimeMs();
+    runtime.statusAttempted(now);
+    await runtime.log('STATUS_BURST_REQUESTED', frame: frame);
+    try {
+      if (await _startNativePayload(frame.encode())) {
+        final startedWall = _clock.wallTimeMs();
+        final startedMonotonic = _clock.monotonicTimeMs();
+        _isAdvertising = true;
+        _currentAdvertisedMessageId = null;
+        final duration = Duration(
+          milliseconds: runtime.controller!.parameters.statusBurstMs,
+        );
+        _rememberStartedBurst(
+          burstId: frame.burstIdentity,
+          wallMs: startedWall,
+          monotonicMs: startedMonotonic,
+          targetDuration: duration,
+          packetType: 'status',
+          hopOut: 0,
+          neighborFrame: frame,
+        );
+        await runtime.log(
+          'STATUS_BURST_STARTED',
+          frame: frame,
+          receivedAt: startedWall,
+          monotonic: startedMonotonic,
+        );
+        _isAdvertisingController.add(true);
+        _slotTimer = Timer(duration, () async {
+          await stopAdvertising();
+          await advertiseLatestOrStop();
+        });
+        return;
+      }
+    } catch (_) {
+      // Failure must retain the DATA queue and recover via the same owner.
+    }
+    await runtime.log('STATUS_BURST_FAILED', frame: frame);
+    await _scheduleNextQueueWake();
   }
 
   Future<void> _startQueuedAck(
@@ -1212,6 +1370,7 @@ class BleAdvertiserService {
     String? messageKey,
     String? stateIdentity,
     String? status,
+    NeighborFrame? neighborFrame,
   }) {
     _currentBurstId = burstId;
     _currentBurstStartedWallMs = wallMs;
@@ -1224,6 +1383,7 @@ class BleAdvertiserService {
     _currentBurstMessageKey = messageKey;
     _currentBurstStateIdentity = stateIdentity;
     _currentBurstStatus = status;
+    _currentNeighborFrame = neighborFrame;
   }
 
   static String burstStopReason({
@@ -1243,6 +1403,25 @@ class BleAdvertiserService {
     final startedMonotonic = _currentBurstStartedMonotonicMs;
     if (burstId == null || startedMonotonic == null) return;
     final endedMonotonic = _clock.monotonicTimeMs();
+    if (_currentNeighborFrame != null) {
+      final frame = _currentNeighborFrame!;
+      final reason = burstStopReason(
+        requestedReason: stopReason,
+        actualDurationMs: endedMonotonic - startedMonotonic,
+        targetDurationMs: _currentBurstTargetDurationMs,
+      );
+      await NeighborRuntime.instance.log(
+        '${frame.type == NeighborFrameType.data ? 'DATA' : 'STATUS'}_BURST_${reason == 'TARGET_DURATION_REACHED' ? 'ENDED' : 'CANCELLED'}',
+        frame: frame,
+        receivedAt: _clock.wallTimeMs(),
+        monotonic: endedMonotonic,
+        reason: reason,
+        detail: {
+          'actual_duration_ms': endedMonotonic - startedMonotonic,
+          'target_duration_ms': _currentBurstTargetDurationMs,
+        },
+      );
+    }
     await _experimentLogger.logEvent(
       eventType: ExperimentEventTypes.advertiseBurstEnded,
       deviceId: 'unknown',
@@ -1279,6 +1458,7 @@ class BleAdvertiserService {
     _currentBurstMessageKey = null;
     _currentBurstStateIdentity = null;
     _currentBurstStatus = null;
+    _currentNeighborFrame = null;
   }
 
   Future<void> _persistPendingAck(Uint8List payload) async {

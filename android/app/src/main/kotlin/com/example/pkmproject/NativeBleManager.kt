@@ -92,6 +92,7 @@ object NativeBleManager {
         context: Context,
         scanAllAdvertisements: Boolean = DEFAULT_SCAN_ALL_ADVERTISEMENTS
     ): Boolean {
+        if (!ResearchParticipation.rxEnabled(context)) return false
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
             Log.w(TAG, "BLE PendingIntent scan requires Android 8.0+")
             nativeScanActive = false

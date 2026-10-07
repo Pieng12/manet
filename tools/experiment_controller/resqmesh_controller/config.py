@@ -57,6 +57,10 @@ def _valid_research_build_id(value: Any) -> bool:
 
 
 def validate_config(config: dict[str, Any]) -> None:
+    if config.get("transport_profile") == "neighbor_graph_v1":
+        from .neighbor_experiment import validate_neighbor_config
+        validate_neighbor_config(config)
+        return
     errors: list[str] = []
     nodes = config.get("nodes")
     if not isinstance(nodes, list) or not nodes:
@@ -214,6 +218,9 @@ def validate_config(config: dict[str, Any]) -> None:
 
 
 def research_fingerprint(config: dict[str, Any]) -> str:
+    if config.get("transport_profile") == "neighbor_graph_v1":
+        from .neighbor_experiment import neighbor_fingerprint
+        return neighbor_fingerprint(config)
     relevant = {
         "android_build_id": config.get("android_build_id", config.get("build_id")),
         "firmware_build_id": config.get("firmware_build_id"),

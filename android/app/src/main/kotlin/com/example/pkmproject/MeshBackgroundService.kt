@@ -67,6 +67,7 @@ class MeshBackgroundService : Service() {
         const val TASK_REMOVED_RECOVERY_ACTION = "id.ac.usu.resqmesh.TASK_REMOVED_RECOVERY"
         const val SCHEDULER_TICK_ACTION = "id.ac.usu.resqmesh.SCHEDULER_TICK"
         const val NATIVE_INBOX_RECOVERY_ACTION = "id.ac.usu.resqmesh.NATIVE_INBOX_RECOVERY"
+        const val OWNER_INBOX_DRAIN_ACTION = "id.ac.usu.resqmesh.OWNER_INBOX_DRAIN"
         const val RESEARCH_COMMAND_ACTION = "id.ac.usu.resqmesh.RESEARCH_COMMAND_INTERNAL"
         private const val PREFS = "resqmesh_service_state"
         private const val KEY_RELAY_MODE_ENABLED = "relay_mode_enabled"
@@ -161,6 +162,9 @@ class MeshBackgroundService : Service() {
                 }
                 SCHEDULER_TICK_ACTION -> {
                     sendWakeUpToFlutter("schedulerTick", null, null, 0)
+                }
+                OWNER_INBOX_DRAIN_ACTION -> {
+                    sendWakeUpToFlutter("drainNativeBleInbox", null, null, 0)
                 }
                 RESEARCH_COMMAND_ACTION -> {
                     sendResearchCommandToFlutter(
@@ -391,6 +395,8 @@ class MeshBackgroundService : Service() {
                         result.success(true)
                     }
                     "getRangeRxTelemetry" -> result.success(RangeRxTelemetry.snapshot(this))
+                    "setResearchParticipation" -> result.success(ResearchParticipation.set(this,
+                        call.argument<Boolean>("enabled") == true, call.argument<Boolean>("rxOnly") == true))
                     "configureResearchPhyTelemetry" -> {
                         ResearchRxTelemetry.configure(this, call.argument<String>("sessionId") ?: "",
                             call.argument<String>("trialId") ?: "", call.argument<String>("nodeId") ?: "",

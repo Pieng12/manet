@@ -396,3 +396,22 @@ bukan sebelum trigger SOS. APK/firmware harus melaporkan
 `measurement_timing_version=2`; smoke baru wajib sebelum batch baru.
 Rumus metrik, Basic Flooding, payload 17 byte dan dataset lama tidak diubah.
 Lihat [protokol eksperimen](docs/experiment_protocol.md).
+
+## Profil Eksperimen Status Tetangga
+
+Branch `metode-penerimaan` menambahkan `trickle_neighbor_status` sebagai metode
+keempat dalam profil terpisah `neighbor_graph_v1`. Keempat metode memakai DATA
+39 byte (envelope RN + inner RM17), graph logis yang sama, dan lima ESP penerima
+sekaligus relay. STATUS hanya lokal, bukan ACK penyelesaian. SOS tetap persisten;
+rumus/arsip H1/H2/H3 serta fitur Uji Jarak tidak diganti.
+
+Main-only 60 trial; full 180 dengan skenario delayed RX/late join terpisah.
+Workbook baru `resqmesh_neighbor_analysis.xlsx` memuat DSR all-node, E2E per
+penerima, LDR burst, dan overhead DATA/control. Build serta smoke perangkat baru
+wajib sebelum batch; keberhasilan build bukan validasi RF.
+
+- [Spesifikasi, migrasi, dan batas klaim](docs/neighbor_status_experiment.md)
+- [Panduan Windows: build, flash manual, pilot, 60/180 trial](docs/neighbor_status_windows.md)
+- [Hasil pemeriksaan otomatis dan daftar file berubah](docs/neighbor_status_validation.md)
+- Config contoh: `tools/experiment_controller/config.neighbor.main.example.json`
+  dan `config.neighbor.full.example.json`, tanpa mengganti config pribadi.

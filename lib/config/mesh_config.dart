@@ -1,7 +1,8 @@
 enum ForwardingMode {
   basicFlooding('basic_flooding'),
   trickleNoSuppression('trickle_no_suppression'),
-  trickle('trickle');
+  trickle('trickle'),
+  trickleNeighborStatus('trickle_neighbor_status');
 
   const ForwardingMode(this.logValue);
 
@@ -53,6 +54,8 @@ class MeshConfig {
       ? ForwardingMode.basicFlooding
       : forwardingModeName == 'trickle_no_suppression'
       ? ForwardingMode.trickleNoSuppression
+      : forwardingModeName == 'trickle_neighbor_status'
+      ? ForwardingMode.trickleNeighborStatus
       : ForwardingMode.trickle;
 
   static const int protocolLength = 17;
