@@ -5,6 +5,14 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class CodedRadioPolicyTest {
+    @Test fun acceptedCodedConfigurationNeverClaimsVerifiedS8() {
+        assertNull(CodedRadioPolicy.rejection(36, true, true, true, true, true, "coded"))
+        val evidence = CodedRadioPolicy.codingEvidence()
+        assertEquals("UNKNOWN", evidence["coding_actual"])
+        assertEquals("UNVERIFIED", evidence["on_air_coding_status"])
+        assertEquals(false, evidence["on_air_coding_verified"])
+        assertEquals(false, evidence["s8_requirement_accepted"])
+    }
     @Test fun highPowerKeepsRadioIntervalAndUnsupportedS8Policy() {
         assertEquals(AdvertisingSetParameters.TX_POWER_HIGH, CodedRadioPolicy.TX_POWER_DBM)
         assertEquals(400, CodedRadioPolicy.INTERVAL_UNITS)

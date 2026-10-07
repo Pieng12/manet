@@ -196,6 +196,31 @@ void main() {
       NeighborKnowledge.unknown,
     );
   });
+  test(
+    'repair cooldown diagnostic is bounded and does not consume pending repair',
+    () {
+      final c = NeighborStatusController(scope: 4);
+      c.observe(status(3), 100, 100);
+      expect(c.repairAllowed(state, 100, 16000, 8000), true);
+      c.takeChanges(100);
+      c.observe(status(4), 200, 200);
+      for (var now = 200; now < 210; now++) {
+        expect(c.repairAllowed(state, now, 16000, 8000), false);
+      }
+      final changes = c.takeChanges(210);
+      expect(
+        changes.where((e) => e['event'] == 'REPAIR_DEFERRED_COOLDOWN'),
+        hasLength(1),
+      );
+      expect(c.takeChanges(210), isEmpty);
+      expect(c.repairAllowed(state, 8100, 16000, 8000), true);
+      expect(c.repairAllowed(state, 8101, 16000, 8000), false);
+      expect(
+        c.decision(state, 8101, firstForwardPending: false),
+        'FRESH_MISSING',
+      );
+    },
+  );
   test('equal-timestamp ACK tombstone must not request older SOS repair', () {
     final c = NeighborStatusController(scope: 4);
     final closed = StateIdentity(

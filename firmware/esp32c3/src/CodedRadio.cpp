@@ -73,6 +73,8 @@ void CodedRadio::telemetry(JsonObject object) const {
   if (configured_) object["configured_mode"] = requireS8_ ? "coded_s8_required" : "coded";
   else object["configured_mode"] = nullptr;
   object["ready"] = configured_;
+  object["api_configuration_accepted"] = configured_;
+  object["phy_evidence_basis"] = "requested_configuration_not_received_PHY";
   object["primary_phy"] = "coded";
   object["secondary_phy"] = "coded";
   object["scan_phy"] = "coded";
@@ -83,6 +85,8 @@ void CodedRadio::telemetry(JsonObject object) const {
   object["coding_selection_support"] = v2Supported_ ? "supported" : "unsupported";
   object["s8_requirement_accepted"] = requireS8_ && configured_;
   object["on_air_coding_verified"] = false;
+  object["coding_actual"] = "UNKNOWN";
+  object["on_air_coding_status"] = "UNVERIFIED";
   object["tx_power_requested_dbm"] = kRadioTxPowerDbm;
   if (configured_) object["tx_power_actual_dbm"] = actualPower_;
   else object["tx_power_actual_dbm"] = nullptr;

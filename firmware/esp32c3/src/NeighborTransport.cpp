@@ -47,7 +47,7 @@ bool frameTimeValid(const NeighborFrame& f,uint64_t nowSeconds,uint32_t skewSeco
   return true;
 }
 bool NeighborParameters::valid() const { return statusPeriod>=1000 && statusBurst>=250 && statusBurst<=2000 && freshness>=statusPeriod*2 && resetCooldown>=1000 && capacity>=5 && capacity<=64; }
-void NeighborController::reset(uint32_t scope) { scope_=scope; entries_.clear(); repaired_=false; repairPending_.clear(); }
+void NeighborController::reset(uint32_t scope) { scope_=scope; entries_.clear(); repaired_=false; repairPending_.clear(); deferred_=false; cooldownReported_=false; }
 bool NeighborController::known(uint32_t transmitter) const {
   return std::any_of(entries_.begin(),entries_.end(),[&](const Entry& e){return e.frame.transmitter==transmitter;});
 }
@@ -90,12 +90,24 @@ const char* NeighborController::decision(const Packet& p,uint32_t now,bool first
   return unknown ? "UNKNOWN_OR_NO_NEIGHBORS" : "ALL_OBSERVED_HAVE";
 }
 bool NeighborController::repairAllowed(const Packet& p,uint32_t now,uint32_t interval,uint32_t imin) {
-  if (repairPending_.empty() || interval<=imin || (repaired_ && now-lastRepair_<parameters.resetCooldown)) return false;
+  if (repairPending_.empty() || interval<=imin) return false;
+  if (repaired_ && now-lastRepair_<parameters.resetCooldown) {
+    if(!cooldownReported_ && std::any_of(repairPending_.begin(),repairPending_.end(),[&](uint32_t id){return knowledge(id,p,now)!=Knowledge::Have;})) {
+      deferred_=true; cooldownReported_=true;
+    }
+    return false;
+  }
   bool need=false;
   for(const auto id:repairPending_) need=need || knowledge(id,p,now)!=Knowledge::Have;
   repairPending_.clear();
   if (!need) return false;
-  repaired_=true; lastRepair_=now; return true;
+  repaired_=true; lastRepair_=now; cooldownReported_=false; return true;
+}
+bool NeighborController::takeRepairDeferred() { const bool result=deferred_;deferred_=false;return result; }
+std::vector<uint32_t> NeighborController::observedTransmitters() const {
+  std::vector<uint32_t> result;
+  for(const auto& entry:entries_) result.push_back(entry.frame.transmitter);
+  return result;
 }
 KnowledgeCounts NeighborController::counts(const Packet& local,uint32_t now) const {
   KnowledgeCounts result;

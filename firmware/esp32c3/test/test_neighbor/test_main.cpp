@@ -70,4 +70,16 @@ void tombstones() {
   auto newer=packet();newer.timestampSeconds++;
   TEST_ASSERT_EQUAL(int(Knowledge::Missing),int(c.knowledge(3,newer,100)));
 }
-int main(int,char**) { UNITY_BEGIN();RUN_TEST(golden);RUN_TEST(decisions);RUN_TEST(freshness);RUN_TEST(identity);RUN_TEST(timestamps);RUN_TEST(tombstones);return UNITY_END(); }
+void cooldown_diagnostics_preserve_pending() {
+  NeighborController c;c.reset(4);
+  TEST_ASSERT_TRUE(c.observe(status(3),100,100));
+  TEST_ASSERT_TRUE(c.repairAllowed(packet(),100,16000,8000));
+  TEST_ASSERT_TRUE(c.observe(status(4),200,200));
+  for(uint32_t now=200;now<210;++now) TEST_ASSERT_FALSE(c.repairAllowed(packet(),now,16000,8000));
+  TEST_ASSERT_TRUE(c.takeRepairDeferred());TEST_ASSERT_FALSE(c.takeRepairDeferred());
+  TEST_ASSERT_TRUE(c.observedTransmitters().size()==2);
+  TEST_ASSERT_TRUE(c.repairAllowed(packet(),8100,16000,8000));
+  TEST_ASSERT_FALSE(c.repairAllowed(packet(),8101,16000,8000));
+  TEST_ASSERT_EQUAL_STRING("FRESH_MISSING",c.decision(packet(),8101,false));
+}
+int main(int,char**) { UNITY_BEGIN();RUN_TEST(golden);RUN_TEST(decisions);RUN_TEST(freshness);RUN_TEST(identity);RUN_TEST(timestamps);RUN_TEST(tombstones);RUN_TEST(cooldown_diagnostics_preserve_pending);return UNITY_END(); }

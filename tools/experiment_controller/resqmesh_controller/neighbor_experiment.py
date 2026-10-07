@@ -119,6 +119,12 @@ def flatten(event: dict[str, Any]) -> dict[str, Any]:
 def summarize_network(events: list[dict[str, Any]], record: dict[str, Any]) -> dict[str, Any]:
     from .log_merge import _timestamp
     events = [flatten(e) for e in events]
+    events = [e for e in events
+              if (record.get("session_id") is None or e.get("session_id") == record["session_id"])
+              and (record.get("trial_id") is None or e.get("trial_id") == record["trial_id"])
+              and (record.get("scope") is None or e.get("scope") == record["scope"]
+                   or (e.get("scope") is None and e.get("event_type") in
+                       {"SOS_CREATED", "SOURCE_FIRST_ADVERTISE_STARTED"}))]
     start, end = record.get("observation_started_at_ms"), record.get("observation_ended_at_ms")
     if start is None or end is None:
         raise ValueError("Physical observation window required")
@@ -178,6 +184,7 @@ def summarize_network(events: list[dict[str, Any]], record: dict[str, Any]) -> d
             "e2e_mean_ms": sum(values)/len(values) if values else None,
             "successful_pairs": u, "data_tx": len(data_tx), "control_tx": len(control_tx),
             "network_overhead": len(data_tx)+len(control_tx), "setup_control_tx": len(setup_control),
+            "setup_plus_window_tx": len(setup_control)+len(data_tx)+len(control_tx),
             "per_receiver": latency}
 
 
@@ -193,6 +200,9 @@ class NeighborExperimentController(ExperimentController):
                      target_valid_trials=4 * len(self.config["hypotheses"]) * self.valid_target,
                      neighbor_scenarios=list(self.config["hypotheses"]),
                      graph=EDGES, target_node_ids=list(TARGETS), neighbor_parameters={**DEFAULTS, **self.config.get("neighbor_parameters", {})})
+        value["reporting_version"] = "neighbor-descriptive-v1"
+        value["phy_claim_limit"] = "LE Coded; coding aktual UNKNOWN/UNVERIFIED kecuali ada bukti on-air; bukan otomatis S=8/125 kbps"
+        value["cost_basis"] = "Burst logis berhasil dimulai; setup_plus_window_tx bukan seluruh biaya siklus hidup"
         from .config import METHOD_PARAMETERS
         value["method_parameters"] = {**METHOD_PARAMETERS, "trickle_neighbor_status": {
             "scheduler": "trickle", "suppression_basis": "fresh_observed_neighbor_inventory",
@@ -218,6 +228,8 @@ class NeighborExperimentController(ExperimentController):
                 result = node.command("readiness", {"command_id": self._command_id("neighbor-ready-after-clock", node.node_id)})
             results[node.node_id] = result
             self.manifest.setdefault("radio_readiness", {})[node.node_id] = result.get("radio")
+            from .neighbor_reporting import phy_evidence
+            self.manifest.setdefault("phy_evidence", {})[node.node_id] = phy_evidence(result.get("radio"))
             errors = self._readiness_errors(node, result, spec, after_reset, require_active_trial)
             if errors:
                 failures.append(f"{node.node_id}: {'; '.join(errors)}")
@@ -428,24 +440,23 @@ def merge_neighbor(input_dir: Path, output_dir: Path, manifest: dict[str, Any]):
     from .log_merge import read_json_events
     from .excel_report import _write_table
     from openpyxl import Workbook
+    from .neighbor_reporting import aggregate, mechanism_counts, phy_evidence, write_charts
+    from .neighbor_validation import validate_logs
     raw_events = read_json_events(input_dir.rglob("*.jsonl"))
     events = [flatten(e) for e in raw_events if e.get("session_id") == manifest["session_id"] and e.get("trial_id") in manifest["trials"]]
     rows, receivers = [], []
     for trial_id, record in manifest["trials"].items():
         scoped = [e for e in events if e.get("trial_id") == trial_id]
-        metrics = summarize_network(scoped, {**record, "scope": stable_id(record["device_trial_id"])}) if record.get("observation_started_at_ms") is not None else {}
+        metrics = summarize_network(scoped, {**record, "trial_id": trial_id, "session_id": manifest["session_id"], "scope": stable_id(record["device_trial_id"])}) if all(record.get(k) is not None for k in ("observation_started_at_ms", "observation_ended_at_ms")) else {}
         rows.append({"trial_id": trial_id, "method": record["mode"], "scenario": record["hypothesis"], "analysis_group": "utama" if record["hypothesis"] == "S0_MAIN" else "pendukung", "result": record["result"], "valid": record["result"] in {"SUCCESS","FAILED_DELIVERY"}, "invalid_reasons": record.get("invalid_reasons",[]), "block": record.get("block"), "observation_started_at_ms": record.get("observation_started_at_ms"), "observation_ended_at_ms": record.get("observation_ended_at_ms"), "config_fingerprint": record.get("config_fingerprint"), **{k:v for k,v in metrics.items() if k!="per_receiver"}})
         for target in TARGETS:
             pair = next((p for p in metrics.get("per_receiver", []) if p["receiver"] == target), {})
             receivers.append({"trial_id": trial_id, "method": record["mode"], "scenario": record["hypothesis"], "valid": rows[-1]["valid"], "receiver": target, "received": bool(pair), "first_rx_at_ms":pair.get("first_rx_at_ms"), "e2e_latency_ms": pair.get("e2e_latency_ms"), "clock_uncertainty_ms": pair.get("clock_uncertainty_ms"), "clock_tolerance_ms": record.get("clock_tolerance_ms")})
-    summaries=[]
-    for scenario in manifest.get("neighbor_scenarios", sorted({r["scenario"] for r in rows})):
-        for method in METHODS:
-            trials=[r for r in rows if r["scenario"]==scenario and r["method"]==method and r["valid"]]
-            if not trials: continue
-            m=sum(r.get("M",0) for r in trials); u=sum(r.get("U",0) for r in trials); r=sum(t.get("R",0) for t in trials)
-            delays=[p["e2e_latency_ms"] for p in receivers if p["scenario"]==scenario and p["method"]==method and p["valid"] and p["e2e_latency_ms"] is not None]
-            summaries.append({"method":method,"scenario":scenario,"analysis_group":"utama" if scenario=="S0_MAIN" else "pendukung","valid_trials":len(trials),"failed_delivery_trials":sum(t["result"]=="FAILED_DELIVERY" for t in trials),"M":m,"N":5,"U":u,"R":r,"dsr_percent":100*u/(m*5) if m else None,"ldr_percent":100*(r-u)/r if r else None,"successful_pairs":len(delays),"e2e_mean_ms":sum(delays)/len(delays) if delays else None,"data_tx":sum(t.get("data_tx",0) for t in trials),"control_tx":sum(t.get("control_tx",0) for t in trials),"network_overhead":sum(t.get("network_overhead",0) for t in trials),"setup_control_tx":sum(t.get("setup_control_tx",0) for t in trials)})
+    scenarios = manifest.get("neighbor_scenarios", sorted({r["scenario"] for r in rows}))
+    summaries, stats = aggregate(rows, receivers, scenarios, METHODS)
+    diagnostics = mechanism_counts(events, manifest["trials"])
+    phy = [{"node_id": node, **phy_evidence(radio)} for node, radio in manifest.get("radio_readiness", {}).items()]
+    validation = validate_logs(events, manifest)
     output_dir.mkdir(parents=True,exist_ok=True)
     wb=Workbook(); wb.remove(wb.active)
     _write_table(wb,"Overview",[{"field":k,"value":v} for k,v in manifest.items() if k!="trials"])
@@ -453,9 +464,16 @@ def merge_neighbor(input_dir: Path, output_dir: Path, manifest: dict[str, Any]):
         {"metrik":"DSR","rumus":"U/(M*5)*100","catatan":"FAILED_DELIVERY tetap masuk denominator"},
         {"metrik":"E2E","rumus":"RX native pertama - DATA sumber pertama","catatan":"Rata-rata pasangan sukses; gagal kosong"},
         {"metrik":"LDR","rumus":"(R-U)/R*100","catatan":"STATUS dikecualikan; R=0 kosong"},
-        {"metrik":"Overhead","rumus":"DATA_TX + CONTROL_TX","catatan":"Burst berhasil dimulai seluruh enam node, hanya dalam window"}])
+        {"metrik":"Overhead","rumus":"DATA_TX + CONTROL_TX","catatan":"Burst logis berhasil dimulai seluruh enam node, hanya dalam window; bukan energi/paket RF"},
+        {"metrik":"Setup + window","rumus":"setup_control_tx + network_overhead","catatan":"STATUS persiapan trial yang sama + window; bukan seluruh biaya siklus hidup"},
+        {"metrik":"Statistik per trial","rumus":"Mean, median, SD sampel, min, max atas trial valid","catatan":"FAILED_DELIVERY termasuk; INVALID terpisah; nilai tidak terdefinisi kosong; SD kosong bila n terdefinisi < 2"},
+        {"metrik":"Delay per trial vs pasangan","rumus":"e2e_mean_ms_trial_mean vs e2e_mean_ms","catatan":"Rata-rata trial tanpa bobot vs rata-rata semua pasangan sukses; bukan nilai nol untuk kegagalan"}])
     _write_table(wb,"Trial Metrics",rows)
     _write_table(wb,"Method Scenario Summary",summaries)
+    _write_table(wb,"Descriptive Statistics",stats)
+    _write_table(wb,"Mechanism Diagnostics",diagnostics)
+    _write_table(wb,"PHY Evidence",phy)
+    _write_table(wb,"Log Validation",validation)
     _write_table(wb,"Receivers",receivers)
     _write_table(wb,"All Events",events)
     _write_table(wb,"Participation",[{"trial_id":trial_id,**p} for trial_id, record in manifest["trials"].items() for p in record.get("participation",[])])
@@ -470,15 +488,22 @@ def merge_neighbor(input_dir: Path, output_dir: Path, manifest: dict[str, Any]):
             row['transmission_timing'] = 't acak dalam [I/2,I); STATUS terpisah memakai discovery jitter'
     _write_table(wb,"Method Parameters",parameters)
     _write_table(wb,"Invalid Trials",[r for r in rows if r["result"]=="INVALID"])
+    chart_paths = write_charts(output_dir/"charts", summaries, stats, scenarios, METHODS, manifest.get("synthetic_data") is True)
+    _write_table(wb,"Charts",[{"artifact":Path(p).name,"catatan":"Buka SVG; grafik delay menyertakan jumlah pasangan sukses dan DSR agregat","path":str(Path("charts")/Path(p).name)} for p in chart_paths])
+    for row in range(2, len(chart_paths)+2):
+        wb["Charts"].cell(row, 3).hyperlink = str(Path("charts")/Path(chart_paths[row-2]).name)
+        wb["Charts"].cell(row, 3).style = "Hyperlink"
     path=output_dir/"resqmesh_neighbor_analysis.xlsx"; wb.save(path)
     (output_dir/"network_metrics.json").write_text(json.dumps(rows,indent=2),encoding="utf-8")
     (output_dir/"all_events.json").write_text(json.dumps(raw_events,indent=2),encoding="utf-8")
     (output_dir/"method_scenario_summary.json").write_text(json.dumps(summaries,indent=2),encoding="utf-8")
     (output_dir/"manifest_snapshot.json").write_text(json.dumps(manifest,indent=2),encoding="utf-8")
+    for name, data in (("descriptive_statistics", stats), ("mechanism_diagnostics", diagnostics), ("phy_evidence", phy), ("log_validation", validation)):
+        (output_dir/f"{name}.json").write_text(json.dumps(data,indent=2),encoding="utf-8")
     import csv
-    for name, data in (("trial_metrics",rows),("receivers",receivers),("all_events",events),("method_scenario_summary",summaries)):
+    for name, data in (("trial_metrics",rows),("receivers",receivers),("all_events",events),("method_scenario_summary",summaries), ("descriptive_statistics",stats), ("mechanism_diagnostics",diagnostics), ("phy_evidence",phy), ("log_validation",validation)):
         with (output_dir/f"{name}.csv").open("w",newline="",encoding="utf-8-sig") as f:
             fields=list(dict.fromkeys(k for row in data for k in row)) or ["trial_id"]
             writer=csv.DictWriter(f,fieldnames=fields); writer.writeheader()
             writer.writerows({k: json.dumps(v,ensure_ascii=False) if isinstance(v,(dict,list)) else v for k,v in row.items()} for row in data)
-    return {"workbook":str(path),"trial_count":len(rows),"event_count":len(events)}
+    return {"workbook":str(path),"trial_count":len(rows),"event_count":len(events), "charts":chart_paths, "validation":"log_validation.json", "synthetic_data":manifest.get("synthetic_data", False)}

@@ -166,3 +166,56 @@ Pisahkan analisis S0 dari S1/S2. Periksa tabel Receivers (lima baris per trial),
 DSR/LDR/E2E/overhead DATA+CONTROL, setup sebelum t0, Participation, Invalid
 Trials, dan All Events. Jangan menganggap suppression menjamin jaringan penuh,
 atau Coded PHY membuktikan S8/jarak fisik tiga hop.
+
+## 6. Validator Log Dan Kasus Pilot
+
+Setelah smoke/pilot, jalankan pemeriksaan **tanpa koneksi perangkat** ke folder
+baru. Jangan gunakan folder hasil lama sebagai tujuan:
+
+```powershell
+$CheckDir = Join-Path $OutputDir ("validation-" + (Get-Date -Format 'yyyyMMdd-HHmmss'))
+py tools\experiment_controller\run.py validate-neighbor --input (Join-Path $OutputDir 'smoke_run\raw') --manifest (Join-Path $OutputDir 'smoke_run\manifest.json') --output $CheckDir
+# Exit 0: semua kasus memiliki bukti PASS; 2: ada FAIL; 3: bukti INCONCLUSIVE.
+# INCONCLUSIVE bukan gagal delivery dan bukan alasan menghapus/mengubah trial.
+Start-Process explorer.exe -ArgumentList $CheckDir
+```
+
+Merge juga menyimpan hasil di `Log Validation`, JSON/CSV; PASS mengacu pada
+kasus teramati dalam log, bukan sertifikat fisik universal. Fixture/mock diberi
+label SYNTHETIC dan **tidak boleh dipakai sebagai penerimaan hardware**.
+
+| Kasus pilot | Langkah dan bukti minimum |
+| --- | --- |
+| A melihat C HAVE, D MISSING | Pilot metode usulan, S1, D scanner OFF lalu ON sesuai controller. Cari snapshot keputusan A berisi ID C=HAVE dan D=MISSING, diikuti NEIGHBOR_TX_ALLOWED/FRESH_MISSING. Jika kombinasi tidak teramati, INCONCLUSIVE, bukan PASS. |
+| Semua HAVE | Setelah propagasi S0, cari NEIGHBOR_TX_SUPPRESSED/ALL_OBSERVED_HAVE dengan have>0, missing=unknown=0 dan STATUS_BURST_STARTED berikutnya pada node sama. SOS tetap di queue/readiness. |
+| Expiry | Dalam pilot terpisah hentikan TX/RX satu tetangga melalui set_node_participation, tunggu lebih dari freshness_ms, lalu cari NEIGHBOR_STATUS_EXPIRED dan snapshot peer UNKNOWN sebelum refresh. Jangan mengubah interval/freshness hanya untuk meluluskan batch. |
+| Discovery kosong | S2: E TX/RX OFF sebelum SOS, kemudian ON. Cari STATUS_RECEIVED inventory_count=0, snapshot_complete=true, NEIGHBOR_DISCOVERED dan REPAIR_NEEDED dengan identitas burst yang sama pada D. Jika interval masih Imin/cooldown, tunggu kasus repair yang benar; REPAIR_DEFERRED_COOLDOWN bukan reset. |
+| Scanner pulih | Untuk ENDED, FAILED, CANCELLED cari SCANNER_RECOVERY_CHECK terikat burst, rx_enabled=true, scanner_registered=true dan DATA_RECEIVED/STATUS_RECEIVED sesudahnya pada node sama. Registrasi API saja tidak membuktikan penerimaan RF pulih. Cancellation saat akhir window mungkin tak punya RX lanjutan: tetap INCONCLUSIVE. |
+| S1 aktual | D: RX_PARTICIPATION_CHANGED confirmed_enabled=false, rx_enabled=false, scanner_registered=false; kemudian confirmed_enabled=true/rx_enabled=true. Command REQUESTED bukan bukti keberhasilan. |
+| S2 aktual | E: NODE_PARTICIPATION_CHANGED OFF lalu ON, RX/TX keduanya berubah terkonfirmasi. Simpan event dan respons final command. |
+| Native initial failure | Pilot terpisah: ganggu Bluetooth sumber saat initial pending, pulihkan dan arsipkan tanpa mengubah hasil. Wajib INITIAL_FORWARD_FAILED/first_forward_pending=true dan keberhasilan DATA berikutnya untuk inspeksi manual. Jika hanya blocked preflight atau gagal tidak terjadi, kasus native failure belum terbukti. Jangan memakai mock untuk menggantikannya. |
+| Arsip/rumus | Keenam node harus memiliki marker TRIAL_WINDOW_STARTED/ENDED; event_sequence ESP tidak berlubang. Bandingkan hitung ulang M/N/U/R/TX/DSR/LDR/E2E dengan evidence manifest. Log parsial tidak boleh diberi PASS. |
+
+Untuk command pilot manual, gunakan helper/transport controller yang membaca
+respons final dan parameter `command_id` unik. Jangan membuka port serial kedua
+saat controller berjalan. Perturbasi tambahan dilakukan hanya pada pilot
+terpisah yang didokumentasikan, bukan pada batch utama/S1/S2 standar. Tandai
+hasil pilot tersebut sebagai diagnostik; jangan gabungkan dengan dataset utama.
+
+Periksa `Descriptive Statistics`, `Mechanism Diagnostics`, `PHY Evidence`,
+`Charts` dan `setup_plus_window_tx`. Frekuensi diagnostik mencakup seluruh trial,
+termasuk sebelum t0; nol event bukan bukti bahwa kasus sudah diuji. S0 tetap
+terpisah dari S1/S2, statistik hanya trial valid termasuk FAILED_DELIVERY.
+SD sampel kosong jika kurang dari dua nilai; delay tanpa RX bukan nol. Grafik
+SVG dapat dibuka melalui folder `charts/` atau tautan di sheet Charts.
+
+Contoh exporter tanpa perangkat, **data sintetis**, pada folder build baru:
+
+```powershell
+$Fixture = Join-Path 'build' ("neighbor-SYNTHETIC-" + (Get-Date -Format 'yyyyMMdd-HHmmss'))
+py tools\neighbor_report_fixture.py --output $Fixture
+Start-Process explorer.exe -ArgumentList (Join-Path (Get-Location) "$Fixture\merged")
+```
+
+Fixture sengaja memiliki jumlah trial berbeda, FAILED_DELIVERY, INVALID dan
+skenario tanpa data. Itu menguji pelaporan nilai kosong; bukan hasil pengukuran RF.

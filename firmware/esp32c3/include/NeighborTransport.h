@@ -45,11 +45,14 @@ class NeighborController {
   bool known(uint32_t transmitter) const;
   std::vector<NeighborFrame> newlyExpired(uint32_t now);
   KnowledgeCounts counts(const Packet& local,uint32_t now) const;
+  std::vector<uint32_t> observedTransmitters() const;
+  bool takeRepairDeferred();
  private:
   struct Entry { NeighborFrame frame; uint32_t at; bool expired=false; };
   std::vector<Entry> entries_;
   uint32_t scope_ = 0, lastRepair_ = 0;
   bool repaired_ = false;
   std::vector<uint32_t> repairPending_;
+  bool deferred_ = false, cooldownReported_ = false;
 };
 }

@@ -79,6 +79,10 @@ def main() -> int:
     merge.add_argument("--input", type=Path, required=True)
     merge.add_argument("--output", type=Path, required=True)
     merge.add_argument("--manifest", type=Path)
+    validator = subparsers.add_parser("validate-neighbor")
+    validator.add_argument("--input", type=Path, required=True)
+    validator.add_argument("--output", type=Path, required=True)
+    validator.add_argument("--manifest", type=Path, required=True)
     args = parser.parse_args()
 
     if args.command == "discover":
@@ -87,6 +91,11 @@ def main() -> int:
     if args.command == "merge":
         print(json.dumps(merge_directory(args.input, args.output, args.manifest), indent=2))
         return 0
+    if args.command == "validate-neighbor":
+        from .neighbor_validation import validate_directory
+        result = validate_directory(args.input, args.output, args.manifest)
+        print(json.dumps(result, indent=2))
+        return 2 if result["counts"]["FAIL"] else 3 if result["counts"]["INCONCLUSIVE"] or not result["checks"] else 0
 
     config = load_config(args.config)
     controller_type = ExperimentController

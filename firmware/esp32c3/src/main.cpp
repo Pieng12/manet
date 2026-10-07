@@ -182,6 +182,8 @@ void emit(const char* eventType, const Packet* packet = nullptr,
       document["transmission_sequence"] = eventFrame->sequence;
       document["transport_burst_id"] = burstIdentity(*eventFrame);
       document["frame_type"] = eventFrame->status ? "status" : "data";
+      document["inventory_count"] = eventFrame->count;
+      document["snapshot_complete"] = eventFrame->complete;
     }
   }
   if (strncmp(eventType, "ADVERTISE_BURST_", 16) == 0 ||
@@ -197,7 +199,19 @@ void emit(const char* eventType, const Packet* packet = nullptr,
     const auto counts=neighbors.counts(scheduler.packet,eventTime);
     document["have_count"]=counts.have;document["missing_count"]=counts.missing;
     document["unknown_count"]=counts.unknown;document["status_age_ms"]=counts.maxAge;
+    auto knowledge=document["neighbor_knowledge"].to<JsonObject>();
+    for(const auto id:neighbors.observedTransmitters()) {
+      const auto value=neighbors.knowledge(id,scheduler.packet,eventTime);
+      knowledge[String(id)]=value==Knowledge::Have ? "HAVE" : value==Knowledge::Missing ? "MISSING" : "UNKNOWN";
+    }
   }
+  if(config.neighborProfile && (strcmp(eventType,"SCANNER_RECOVERY_CHECK")==0 ||
+      strcmp(eventType,"RX_PARTICIPATION_CHANGED")==0 || strcmp(eventType,"NODE_PARTICIPATION_CHANGED")==0)) {
+    document["scanner_registered"]=scanner && scanner->isScanning();
+    document["rx_enabled"]=rxParticipation;document["tx_enabled"]=txParticipation;
+    if(strcmp(eventType,"SCANNER_RECOVERY_CHECK")==0) document["burst_outcome"]=reason;
+  }
+  if(strcmp(eventType,"INITIAL_FORWARD_FAILED")==0) document["first_forward_pending"]=!scheduler.firstAdvertiseStarted;
   if (wallClockValid) document["timestamp_ms"] = wallOffsetMs + eventTime;
   document["clock_sync_valid"] = wallClockValid;
   if (wallClockValid) document["clock_offset_ms"] = 0;
@@ -340,6 +354,7 @@ void cancelActiveBurst(const char* reason) {
   emit(scheduler.statusAdvertising ? "STATUS_BURST_CANCELLED" : "ADVERTISE_BURST_CANCELLED", scheduler.statusAdvertising ? nullptr : &scheduler.packet, reason, 0, String(),
        scheduler.burstId);
   if(config.neighborProfile && !scheduler.statusAdvertising) emit("DATA_BURST_CANCELLED",&scheduler.packet,reason,0,String(),scheduler.burstId);
+  if(config.neighborProfile) emit("SCANNER_RECOVERY_CHECK",nullptr,"CANCELLED");
   scheduler.statusAdvertising = false;
   eventFrame = nullptr;
   scheduler.burstId = "";
@@ -540,8 +555,9 @@ void processFrame(const ReceivedPacket& rx) {
     if(scheduler.hasPacket && neighbors.repairAllowed(scheduler.packet,millis(),scheduler.intervalMs,kIminMs)) {
       scheduler.intervalMs=kIminMs;
       chooseTrickleTransmit(millis(),"NEIGHBOR_REPAIR");
-      emit("REPAIR_NEEDED",&scheduler.packet);
+      emit("REPAIR_NEEDED",&scheduler.packet,"NEW_NEIGHBOR_OR_CHANGED_SNAPSHOT");
     }
+    if(neighbors.takeRepairDeferred()) emit("REPAIR_DEFERRED_COOLDOWN",scheduler.hasPacket ? &scheduler.packet : nullptr,"RESET_COOLDOWN");
   }
   if (f.status) {
     emit("STATUS_RECEIVED",nullptr,nullptr,rx.rssi,observation,String(),&at);
@@ -635,6 +651,8 @@ void startBurst() {
     emit("ADVERTISE_BURST_FAILED", &scheduler.packet, "SCAN_STOP_FAILED", 0,
          String(), scheduler.burstId);
     if(config.neighborProfile) emit("DATA_BURST_FAILED",&scheduler.packet,"SCAN_STOP_FAILED",0,String(),scheduler.burstId);
+    if(config.mode==Mode::NeighborStatus && !scheduler.firstAdvertiseStarted) emit("INITIAL_FORWARD_FAILED",&scheduler.packet,"SCAN_STOP_FAILED");
+    if(config.neighborProfile) emit("SCANNER_RECOVERY_CHECK",nullptr,"FAILED");
     scheduler.burstId = "";
     eventFrame=nullptr;
     return;
@@ -645,6 +663,8 @@ void startBurst() {
     emit("ADVERTISE_BURST_FAILED", &scheduler.packet, "NATIVE_START_FAILED",
          0, String(), scheduler.burstId);
     if(config.neighborProfile) emit("DATA_BURST_FAILED",&scheduler.packet,"NATIVE_START_FAILED",0,String(),scheduler.burstId);
+    if(config.mode==Mode::NeighborStatus && !scheduler.firstAdvertiseStarted) emit("INITIAL_FORWARD_FAILED",&scheduler.packet,"NATIVE_START_FAILED");
+    if(config.neighborProfile) emit("SCANNER_RECOVERY_CHECK",nullptr,"FAILED");
     scheduler.burstId = "";
     eventFrame=nullptr;
     return;
@@ -675,6 +695,7 @@ void finishBurst() {
     scheduler.statusAdvertising=false;
     eventFrame=&activeFrame;
     emit("STATUS_BURST_ENDED",nullptr,nullptr,0,String(),scheduler.burstId);
+    emit("SCANNER_RECOVERY_CHECK",nullptr,"ENDED");
     eventFrame=nullptr;
     scheduler.burstId="";
     return;
@@ -684,6 +705,7 @@ void finishBurst() {
   if(config.neighborProfile) {
     eventFrame=&activeFrame;
     emit("DATA_BURST_ENDED",&scheduler.packet,"TARGET_DURATION_REACHED",0,String(),scheduler.burstId);
+    emit("SCANNER_RECOVERY_CHECK",nullptr,"ENDED");
     eventFrame=nullptr;
   }
   const uint32_t now = millis();
@@ -714,7 +736,7 @@ void startStatusBurst() {
   scheduler.burstId=String(burstIdentity(activeFrame).c_str());
   emit("STATUS_BURST_REQUESTED",nullptr,nullptr,0,String(),scheduler.burstId);
   if(!pauseScanner() || !advertising->start(bytes.data(),bytes.size())) {
-    resumeScanner(); emit("STATUS_BURST_FAILED",nullptr,"NATIVE_START_FAILED"); eventFrame=nullptr; return;
+    resumeScanner(); emit("STATUS_BURST_FAILED",nullptr,"NATIVE_START_FAILED"); emit("SCANNER_RECOVERY_CHECK",nullptr,"FAILED"); eventFrame=nullptr; return;
   }
   scheduler.advertising=true; scheduler.statusAdvertising=true;
   const uint32_t now=millis(); scheduler.burstEndsAt=now+params.statusBurst;

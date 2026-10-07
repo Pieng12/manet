@@ -361,10 +361,11 @@ ringkas, dan compatibility harus dibuktikan dengan perangkat fisik.
 
 Daftar lengkap ada di [`docs/known_limitations.md`](docs/known_limitations.md).
 
-Status perangkat saat ini: command readiness native USB telah dibuktikan oleh
-pengguna (`DEVICE SERIAL VERIFIED`). Enam kondisi smoke belum dijalankan
-(`DEVICE SMOKE TEST NOT RUN`) dan H1-H3 fisik belum dibuktikan
-(`PHYSICAL MULTI-HOP NOT RUN`).
+Catatan perangkat pada laporan awal profil H1-H3: readiness USB saat itu sudah
+diverifikasi, sedangkan smoke/multi-hop belum diuji pada laporan tersebut.
+Ini bukan status terbaru semua sesi atau bukti untuk profil tetangga. Audit
+pelaporan profil tetangga hanya menjalankan tes/build perangkat lunak; penerimaan
+fisik binary baru tetap memerlukan log pilot keenam perangkat.
 
 ## Privasi dan Keamanan
 
@@ -415,3 +416,11 @@ wajib sebelum batch; keberhasilan build bukan validasi RF.
 - [Hasil pemeriksaan otomatis dan daftar file berubah](docs/neighbor_status_validation.md)
 - Config contoh: `tools/experiment_controller/config.neighbor.main.example.json`
   dan `config.neighbor.full.example.json`, tanpa mengganti config pribadi.
+
+Pelaporan tetangga juga menyediakan biaya STATUS persiapan, biaya setup+window,
+statistik deskriptif per trial valid, grafik SVG per skenario, frekuensi keputusan,
+dan validator PASS/FAIL/INCONCLUSIVE. Nilai tidak terdefinisi tetap kosong;
+FAILED_DELIVERY masuk analisis, INVALID terpisah. Grafik delay menyertakan konteks
+keberhasilan RX. Ukuran frame bukan overhead RF; Coded bukan bukti S=8.
+Lihat [audit pelaporan](docs/neighbor_reporting_validation.md) dan
+[langkah validasi log/pilot](docs/neighbor_status_windows.md#6-validator-log-dan-kasus-pilot).

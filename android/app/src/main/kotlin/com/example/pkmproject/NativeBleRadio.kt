@@ -40,15 +40,15 @@ object NativeBleRadio {
             "maximum_advertising_data_length" to capacity,
             "requested_mode" to mode(context),
             "configured_mode" to if (configured && error == null) CodedRadioPolicy.CODED else null,
+            "api_configuration_accepted" to (configured && error == null),
+            "phy_evidence_basis" to "requested_configuration_not_received_PHY",
             "ready" to (error == null),
             "primary_phy" to "coded", "secondary_phy" to "coded", "scan_phy" to "coded",
             "legacy" to false, "connectable" to false, "scannable" to false,
             "coding_requested" to if (mode(context) == CodedRadioPolicy.S8_REQUIRED) "require_s8" else "unspecified",
-            "coding_selection_support" to "unsupported", "s8_requirement_accepted" to false,
-            "on_air_coding_verified" to false,
             "tx_power_requested_dbm" to CodedRadioPolicy.TX_POWER_DBM,
             "tx_power_actual_dbm" to actualTxPower,
             "advertising_interval_units" to CodedRadioPolicy.INTERVAL_UNITS,
-            "advertising_interval_ms" to 250, "last_error" to (error ?: lastError))
+            "advertising_interval_ms" to 250, "last_error" to (error ?: lastError)) + CodedRadioPolicy.codingEvidence()
     }
 }

@@ -340,5 +340,14 @@ first RX lima ESP dan overhead DATA/control secara terpisah. Trial graph dimilik
 controller agar tombol manual tidak merusak scope/randomisasi/jendela batch.
 Pemilihan mode di antara trial dikirim ke owner background, bukan scheduler UI.
 Raw JSON/CSV tersedia; workbook terpisah dibuat controller. UJI JARAK dipertahankan.
+METRICS memisahkan `setup_control_tx`, `network_overhead` dalam window dan
+`setup_plus_window_tx`; biaya gabungan bukan seluruh siklus hidup protokol.
+LIVE memisahkan PHY diminta, konfigurasi diterima API, dukungan pemilihan coding,
+dan coding aktual UNKNOWN/UNVERIFIED. Label Coded tidak berarti S=8/125 kbps.
+Snapshot keputusan dan diagnostics initial failed/repair cooldown/scanner
+recovery ikut log; status registrasi scanner bukan bukti penerimaan RF.
+Exporter menyediakan statistik per trial valid, rasio agregat, frekuensi
+diagnostik, validator log, serta tautan grafik per skenario. Nilai tidak
+terdefinisi tetap kosong dan FAILED_DELIVERY tetap masuk analisis.
 Lihat [spesifikasi](neighbor_status_experiment.md) dan
 [panduan Windows](neighbor_status_windows.md).

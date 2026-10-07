@@ -458,6 +458,7 @@ class BleRelayService {
           await _advertiser.advertiseLatestOrStop();
         }
       }
+      await runtime.emitChanges(now);
     }
     if (frame.type == NeighborFrameType.status) {
       final claim = await _dbHelper.claimBleObservation(

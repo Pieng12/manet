@@ -206,6 +206,9 @@ class NeighborRuntime {
     'scope': f.scope,
     'transport_burst_id': f.burstIdentity,
     'transport_profile': profile,
+    'frame_type': f.type.name,
+    'inventory_count': f.inventory.length,
+    'snapshot_complete': f.complete,
   };
   Future<void> emitChanges(int nowMs) async {
     if (!statusEnabled) return;
@@ -249,6 +252,7 @@ class NeighborRuntime {
         eventKey: observation == null ? null : '$event|$observation',
         detail: {
           ...detail,
+          if (enabled) 'scope': scope,
           if (frame != null) ...fields(frame),
           'reason': ?reason,
           'clock_domain': clockDomain,

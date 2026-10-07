@@ -173,4 +173,15 @@ void main() {
       expect(fresh.burstIdentity, isNot(old.burstIdentity));
     },
   );
+  test(
+    'diagnostic frame metadata distinguishes empty inventory from unknown coding',
+    () async {
+      final frame = await runtime.frame();
+      final fields = runtime.fields(frame);
+      expect(fields['inventory_count'], 0);
+      expect(fields['snapshot_complete'], true);
+      expect(fields['scope'], runtime.scope);
+      expect(fields['transport_burst_id'], frame.burstIdentity);
+    },
+  );
 }

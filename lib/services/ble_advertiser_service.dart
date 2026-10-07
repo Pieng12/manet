@@ -801,6 +801,9 @@ class BleAdvertiserService {
             'neighbors': NeighborRuntime.instance.controller!
                 .snapshot(message.stateIdentity, state.updatedAt)
                 .map((k, v) => MapEntry(k.toString(), v.name)),
+            'neighbor_knowledge': knowledge.map(
+              (k, v) => MapEntry(k.toString(), v.name.toUpperCase()),
+            ),
           },
         );
       }
@@ -1084,6 +1087,16 @@ class BleAdvertiserService {
         state: message.stateIdentity,
         reason: errorCode ?? 'NATIVE_START_FAILED',
       );
+      if (runtime.statusEnabled && queued.item.relayCount == 0) {
+        await runtime.log(
+          'INITIAL_FORWARD_FAILED',
+          frame: frame,
+          state: message.stateIdentity,
+          reason: errorCode ?? 'NATIVE_START_FAILED',
+          detail: {'first_forward_pending': true},
+        );
+      }
+      await _logScannerRecovery(frame, 'FAILED');
     }
     final blockedState = _blockedStateForNativeError(errorCode);
     if (blockedState == null) {
@@ -1175,6 +1188,7 @@ class BleAdvertiserService {
       // Failure must retain the DATA queue and recover via the same owner.
     }
     await runtime.log('STATUS_BURST_FAILED', frame: frame);
+    await _logScannerRecovery(frame, 'FAILED');
     await _scheduleNextQueueWake();
   }
 
@@ -1421,6 +1435,10 @@ class BleAdvertiserService {
           'target_duration_ms': _currentBurstTargetDurationMs,
         },
       );
+      await _logScannerRecovery(
+        frame,
+        reason == 'TARGET_DURATION_REACHED' ? 'ENDED' : 'CANCELLED',
+      );
     }
     await _experimentLogger.logEvent(
       eventType: ExperimentEventTypes.advertiseBurstEnded,
@@ -1459,6 +1477,25 @@ class BleAdvertiserService {
     _currentBurstStateIdentity = null;
     _currentBurstStatus = null;
     _currentNeighborFrame = null;
+  }
+
+  Future<void> _logScannerRecovery(NeighborFrame frame, String outcome) async {
+    try {
+      final capabilities = await NativeBridgeService.getBleCapabilities();
+      await NeighborRuntime.instance.log(
+        'SCANNER_RECOVERY_CHECK',
+        frame: frame,
+        monotonic: _clock.monotonicTimeMs(),
+        detail: {
+          'burst_outcome': outcome,
+          'rx_enabled': true,
+          'scanner_registered': capabilities['nativeScanActive'],
+          'evidence_basis': 'API_REGISTRATION_NOT_RF_VERIFICATION',
+        },
+      );
+    } catch (error) {
+      print('[NeighborRuntime] Scanner diagnostic unavailable: $error');
+    }
   }
 
   Future<void> _persistPendingAck(Uint8List payload) async {

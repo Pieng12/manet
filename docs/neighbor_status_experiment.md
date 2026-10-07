@@ -168,15 +168,55 @@ Toleransi yang dikonfigurasi dicatat terpisah, tidak disamakan dengan bound.
 - LDR=100*(R-U)/R, kosong jika R=0. STATUS/source RX/edge terlarang dikecualikan.
 - Overhead=DATA_TX+CONTROL_TX yang berhasil dimulai seluruh enam node di window.
   REQUESTED/FAILED bukan TX. Kontrol sebelum t0 dicatat `setup_control_tx`.
+  `setup_plus_window_tx=setup_control_tx+network_overhead` melaporkan STATUS
+  persiapan dalam trial/scope yang sama ditambah window; bukan seluruh biaya
+  siklus hidup protokol. Semua komponen berdeduplikasi identitas burst.
+
+Ukuran inner SOS 17 byte, DATA 39 byte, STATUS 22-86 byte adalah **frame protokol**,
+bukan seluruh paket radio. Overhead adalah burst logis, bukan jumlah repetisi
+paket RF atau konsumsi energi. Satu SOS unik per trial; gateway/completion ACK
+dinonaktifkan. STATUS bukan ACK penyelesaian dan suppression tidak menghapus SOS.
+
+Ringkasan deskriptif per metode/skenario memasukkan SUCCESS dan FAILED_DELIVERY,
+memisahkan INVALID, serta melaporkan mean/median/SD sampel/min/max. SD kosong
+jika nilai terdefinisi kurang dari dua. Delay tanpa RX dan LDR saat R=0 kosong.
+Field rasio agregat lama tetap ada; kolom `*_trial_mean` adalah rata-rata nilai
+per trial tanpa bobot. `e2e_mean_ms` ringkasan memakai semua pasangan sukses,
+sedangkan `e2e_mean_ms_trial_mean` merata-ratakan delay trial dengan RX; keduanya
+bisa berbeda jika jumlah pasangan sukses antartial berbeda. Jumlah pasangan
+sukses dan pasangan dengan delay terdefinisi ditampilkan terpisah.
+
+Grafik SVG di `charts/` memisahkan skenario dan menampilkan empat metrik serta
+komposisi DATA/STATUS rata-rata per trial. Grafik delay disertai jumlah pasangan
+sukses dan DSR agregat. Nilai kosong tidak dijadikan nol. Sheet Charts memberikan
+tautan relatif ke artifact SVG. Tidak ada uji inferensial otomatis: block,
+trial_id, method, scenario, receiver dan nilai per trial sudah disiapkan; tetapkan
+unit analisis, efek blok, penanganan missing dan asumsi sebelum uji lanjutan.
+
+Perbandingan empat metode mengevaluasi mekanisme usulan secara keseluruhan
+(Trickle, initial forwarding, discovery dan repair), bukan efek kausal paket
+STATUS saja. Parameter default adalah parameter pilot, bukan optimasi empiris.
 
 Research Monitor membedakan pengetahuan lokal HP (peers teramati) dari ringkasan
 network-wide yang dikirim controller setelah penggabungan log. Ringkasan tidak
 dipakai algoritma dan bukan pengamatan live seluruh jaringan. UI tidak memiliki
 scheduler kedua. Workbook `resqmesh_neighbor_analysis.xlsx` terpisah berisi
 Overview, Metric Definitions, Trial Metrics, Method Scenario Summary, Receivers,
-All Events, Participation, Method Parameters, Invalid Trials; JSON/CSV ikut
+All Events, Participation, Method Parameters, Invalid Trials, Descriptive
+Statistics, Mechanism Diagnostics, PHY Evidence, Log Validation, Charts; JSON/CSV ikut
 tersimpan. Raw per attempt immutable, termasuk attempt INVALID; log parsial
 diselamatkan saat disconnect bila tersedia. Jangan menimpa output merge lama.
+
+Readiness/manifest/UI memisahkan PHY diminta, konfigurasi advertising diterima
+API, dukungan pemilihan coding, dan coding aktual. Primary/secondary/scan pada
+readiness adalah konfigurasi, bukan pengukuran PHY RX. ScanResult diagnostik
+tetap jalur bukti PHY RX aktual; bukan bukti S2/S8. Coding aktual tetap
+UNKNOWN/UNVERIFIED bila tidak terukur. SDK Android 36 yang dipakai tidak memiliki
+setter coding S8 pada public AdvertisingSetParameters.Builder
+([API resmi](https://developer.android.com/reference/android/bluetooth/le/AdvertisingSetParameters.Builder));
+`coded_s8_required` ditolak eksplisit. ESP memakai opsi HCI extended advertising
+V2 NimBLE resmi jika controller mendukung; penerimaan permintaan tetap bukan
+verifikasi on-air. Profil `coded` tetap sah tanpa bukti S8/125 kbps.
 
 ## Validasi Perangkat Yang Masih Wajib
 

@@ -2,8 +2,15 @@
 
 Tanggal pemeriksaan: 2026-10-07. Repository lokal: `D:\PKM\Project\pkmproject`.
 Branch: `metode-penerimaan`, dibuat dari `optimasi-jarak`.
-Commit referensi: `6f5b1c83e6fc6a395d5b1140924f35c0f6206f9c`.
-Perubahan belum di-commit/push. Tidak ada flash atau eksperimen fisik.
+HEAD yang diperiksa pada audit pelaporan: `2ecdf8bf81f9cb9cbacca17e6f1bf27fae56f664`.
+Implementasi awal sudah ada dalam commit tersebut. Branch lokal melacak
+`origin/metode-penerimaan` menurut referensi Git lokal; audit ini tidak mengambil
+atau memverifikasi keadaan server remote. Perubahan audit berikutnya belum
+di-commit oleh audit ini. Tidak ada push, flash, install, atau eksperimen fisik.
+
+Hasil audit terbaru dicatat terpisah dalam
+[audit pelaporan dan validator](neighbor_reporting_validation.md). Angka/build
+di bagian historis berikut bukan hasil menjalankan ulang audit terbaru.
 
 ## Ruang Lingkup
 
@@ -22,7 +29,7 @@ Perubahan belum di-commit/push. Tidak ada flash atau eksperimen fisik.
   profil graph. Worker legacy tetap memakai jalur headless yang sudah ada.
 - DB protokol tetap versi 14. Tidak ada hard TTL/hop/max relay count baru.
 
-## Pemeriksaan Otomatis
+## Pemeriksaan Otomatis Historis
 
 | Pemeriksaan | Hasil |
 | --- | --- |
@@ -38,7 +45,7 @@ Perubahan belum di-commit/push. Tidak ada flash atau eksperimen fisik.
 | Flutter APK debug, offline + build ID | Lulus |
 | git diff --check | Lulus; warning line ending Git bukan whitespace error |
 
-## Artifact Build
+## Artifact Build Historis
 
 Build ID APK dan firmware: `a72f3087f909`. Hash source akhir cocok dengan
 manifest. Artifact ada di:
@@ -91,9 +98,9 @@ Ringkasan network-wide pada HP berasal dari controller setelah penggabungan,
 bukan oracle yang diberikan kepada algoritma. Statistik lokal HP berbeda.
 Tidak ada klaim efisiensi energi, novelty global atau keberhasilan rescue.
 
-## File Diubah Atau Ditambahkan
+## File Implementasi Awal
 
-Daftar mencakup perubahan source, konfigurasi contoh, test, dan dokumentasi;
+Daftar historis implementasi awal mencakup source, konfigurasi contoh, test, dan dokumentasi;
 build artifact/log berada di direktori ignored `build/`, bukan dataset.
 
 ```text

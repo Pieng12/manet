@@ -56,6 +56,7 @@ class NeighborStatusController {
   final List<Map<String, Object>> _changes = [];
   int? _lastRepair;
   final Set<int> _repairPending = {};
+  int? _reportedCooldown;
 
   bool observe(NeighborFrame frame, int receivedMonotonicMs, int nowMs) {
     if (frame.scope != scope ||
@@ -207,10 +208,23 @@ class NeighborStatusController {
     int intervalMs,
     int iminMs,
   ) {
-    if (_repairPending.isEmpty ||
-        intervalMs <= iminMs ||
-        (_lastRepair != null &&
-            nowMs - _lastRepair! < parameters.resetCooldownMs)) {
+    if (_repairPending.isEmpty || intervalMs <= iminMs) {
+      return false;
+    }
+    if (_lastRepair != null &&
+        nowMs - _lastRepair! < parameters.resetCooldownMs) {
+      if (_reportedCooldown != _lastRepair &&
+          _repairPending.any(
+            (id) => knowledge(id, state, nowMs) != NeighborKnowledge.have,
+          )) {
+        _reportedCooldown = _lastRepair;
+        _changes.add({
+          'event': 'REPAIR_DEFERRED_COOLDOWN',
+          'scope': scope,
+          'next_repair_eligible_at': _lastRepair! + parameters.resetCooldownMs,
+          'reason': 'RESET_COOLDOWN',
+        });
+      }
       return false;
     }
     final values = _repairPending
@@ -222,6 +236,7 @@ class NeighborStatusController {
       return false;
     }
     _lastRepair = nowMs;
+    _reportedCooldown = null;
     return true;
   }
 }

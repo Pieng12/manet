@@ -282,6 +282,7 @@ class _ResearchMonitorScreenState extends State<ResearchMonitorScreen>
           for (final key in const [
             'requested_mode',
             'configured_mode',
+            'api_configuration_accepted',
             'ready',
             'primary_phy',
             'secondary_phy',
@@ -290,13 +291,30 @@ class _ResearchMonitorScreenState extends State<ResearchMonitorScreen>
             'coding_selection_support',
             's8_requirement_accepted',
             'on_air_coding_verified',
+            'coding_actual',
+            'on_air_coding_status',
             'tx_power_requested_dbm',
             'tx_power_actual_dbm',
             'advertising_interval_ms',
             'last_error',
           ])
             _kv(
-              key.replaceAll('_', ' '),
+              const {
+                    'requested_mode': 'PHY diminta',
+                    'configured_mode': 'Mode diterima API advertising',
+                    'api_configuration_accepted':
+                        'Konfigurasi advertising diterima API',
+                    'coding_selection_support': 'Dukungan pemilihan coding',
+                    'coding_requested': 'Coding diminta (bukan bukti on-air)',
+                    's8_requirement_accepted': 'Permintaan S=8 diterima API',
+                    'on_air_coding_verified': 'Coding terverifikasi on-air',
+                    'coding_actual': 'Coding aktual',
+                    'on_air_coding_status': 'Status bukti coding',
+                    'primary_phy': 'Primary PHY konfigurasi',
+                    'secondary_phy': 'Secondary PHY konfigurasi',
+                    'scan_phy': 'Scan PHY konfigurasi',
+                  }[key] ??
+                  key.replaceAll('_', ' '),
               '${(_capabilities['radio'] as Map?)?[key] ?? '-'}',
             ),
         ]),
@@ -326,6 +344,18 @@ class _ResearchMonitorScreenState extends State<ResearchMonitorScreen>
               '${summary?['data_tx'] ?? '-'} / ${summary?['control_tx'] ?? '-'}',
             ),
             _kv('CONTROL sebelum t0', '${summary?['setup_control_tx'] ?? '-'}'),
+            _kv(
+              'Overhead window (burst)',
+              '${summary?['network_overhead'] ?? '-'}',
+            ),
+            _kv(
+              'Setup + window (burst)',
+              '${summary?['setup_plus_window_tx'] ?? '-'}',
+            ),
+            _kv(
+              'Cakupan biaya',
+              'STATUS persiapan + window; bukan seluruh siklus hidup',
+            ),
           ]),
           _section('Penerimaan Pertama per ESP', [
             for (final receiver in [
