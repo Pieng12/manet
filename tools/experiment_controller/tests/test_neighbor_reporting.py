@@ -113,6 +113,15 @@ class NeighborReportingTests(unittest.TestCase):
 
 
 class NeighborLogValidationTests(unittest.TestCase):
+    def complete_archive(self):
+        events = source_events() + [received(node) for node in TARGETS]
+        for node in (SOURCE, *TARGETS):
+            events.extend([ev("TRIAL_WINDOW_STARTED", node, 800), ev("TRIAL_WINDOW_ENDED", node, 2000)])
+            for sequence, event in enumerate(sorted((e for e in events if e["node_id"] == node),
+                                                     key=lambda e: e["timestamp_ms"]), 10):
+                event["id" if node == SOURCE else "event_sequence"] = sequence
+        return events
+
     def checks(self, events, r=None):
         result = validate_logs(events, {"session_id": "fixture", "synthetic_data": True, "trials": {"t1": r or record()}})
         self.assertTrue(all(v["evidence_origin"] == "SYNTHETIC_FIXTURE_NOT_HARDWARE" for v in result))
@@ -176,15 +185,53 @@ class NeighborLogValidationTests(unittest.TestCase):
         self.assertEqual("FAIL", self.checks(events, r)["METRICS_RECOMPUTE_MATCH"])
 
     def test_complete_marker_archive_and_correct_metrics_pass_only_observed_log(self):
-        events = source_events() + [received(node) for node in TARGETS]
-        for node in (SOURCE, *TARGETS):
-            events.extend([ev("TRIAL_WINDOW_STARTED", node, 800), ev("TRIAL_WINDOW_ENDED", node, 2000)])
+        events = self.complete_archive()
         r = record()
         r["evidence"] = summarize_network(events, r)
         result = self.checks(events, r)
         self.assertEqual("PASS", result["LOG_COMPLETENESS"])
         self.assertEqual("PASS", result["METRICS_RECOMPUTE_MATCH"])
         self.assertEqual("INCONCLUSIVE", result["INITIAL_FAILURE_REMAINS_PENDING"])
+
+    def test_markers_without_sequences_cannot_certify_logs_or_metrics(self):
+        events = self.complete_archive()
+        for e in events:
+            e.pop("event_sequence", None)
+        r = record()
+        r["evidence"] = summarize_network(events, r)
+        result = self.checks(events, r)
+        self.assertEqual("INCONCLUSIVE", result["LOG_COMPLETENESS"])
+        self.assertEqual("INCONCLUSIVE", result["METRICS_RECOMPUTE_MATCH"])
+
+    def test_each_esp_event_requires_valid_sequence(self):
+        for value in (None, True, "10", 0, -1):
+            with self.subTest(value=value):
+                events = self.complete_archive()
+                next(e for e in events if e["node_id"] == TARGETS[2])["event_sequence"] = value
+                self.assertEqual("INCONCLUSIVE", self.checks(events)["LOG_COMPLETENESS"])
+
+    def test_foreign_sequences_cannot_repair_missing_node_evidence(self):
+        for field, value in (("session_id", "other"), ("trial_id", "other"), ("scope", 999)):
+            with self.subTest(field=field):
+                events = self.complete_archive()
+                original = next(e for e in events if e["node_id"] == TARGETS[2])
+                foreign = {**original, field: value}
+                original.pop("event_sequence")
+                self.assertEqual("INCONCLUSIVE", self.checks(events+[foreign])["LOG_COMPLETENESS"])
+
+    def test_replayed_archive_not_conflicting_sequence_is_allowed(self):
+        events = self.complete_archive()
+        self.assertEqual("PASS", self.checks(events+copy.deepcopy(events))["LOG_COMPLETENESS"])
+        conflict = {**next(e for e in events if e["node_id"] == TARGETS[0]), "event_type": "OTHER"}
+        self.assertEqual("FAIL", self.checks(events+[conflict])["LOG_COMPLETENESS"])
+
+    def test_android_global_db_ids_need_not_be_contiguous(self):
+        events = self.complete_archive()
+        for event in events:
+            if event["node_id"] == SOURCE:
+                event["id"] *= 3
+                self.assertNotIn("event_sequence", event)
+        self.assertEqual("PASS", self.checks(events)["LOG_COMPLETENESS"])
 
     def test_validator_cli_inconclusive_exit_never_opens_devices(self):
         from contextlib import redirect_stdout
@@ -220,6 +267,117 @@ class NeighborLogValidationTests(unittest.TestCase):
         self.assertEqual("FAIL", self.checks([expired, decision])["EXPIRED_STATUS_UNKNOWN"])
         refresh = {**expired, "event_type": "NEIGHBOR_STATUS_UPDATED", "timestamp_ms": 1150}
         self.assertEqual("INCONCLUSIVE", self.checks([expired, refresh, decision])["EXPIRED_STATUS_UNKNOWN"])
+
+    def test_expiry_have_or_missing_fails_regardless_of_allow_reason(self):
+        expired = ev("NEIGHBOR_STATUS_EXPIRED", TARGETS[0], 1100, tx=stable_id(TARGETS[2]))
+        for state in ("HAVE", "MISSING"):
+            with self.subTest(state=state):
+                decision = ev("NEIGHBOR_TX_ALLOWED", TARGETS[0], 1200)
+                decision.update(reason="UNKNOWN_OR_NO_NEIGHBORS", neighbor_knowledge={str(expired["transmitter_id"]): state})
+                self.assertEqual("FAIL", self.checks([expired, decision])["EXPIRED_STATUS_UNKNOWN"])
+
+    def test_refresh_of_one_peer_cannot_mask_stale_other_peer(self):
+        a = ev("NEIGHBOR_STATUS_EXPIRED", TARGETS[0], 1100, tx=stable_id(TARGETS[2]))
+        b = {**a, "transmitter_id": stable_id(TARGETS[3])}
+        refresh = {**a, "event_type": "NEIGHBOR_STATUS_UPDATED", "timestamp_ms": 1150}
+        decision = ev("NEIGHBOR_TX_ALLOWED", TARGETS[0], 1200)
+        decision.update(reason="UNKNOWN_OR_NO_NEIGHBORS", neighbor_knowledge={
+            str(a["transmitter_id"]): "UNKNOWN", str(b["transmitter_id"]): "HAVE"})
+        self.assertEqual("FAIL", self.checks([a, b, refresh, decision])["EXPIRED_STATUS_UNKNOWN"])
+
+    def test_expiry_does_not_borrow_other_observer_unknown_or_refresh(self):
+        a = ev("NEIGHBOR_STATUS_EXPIRED", TARGETS[0], 1100, tx=stable_id(TARGETS[2]))
+        b = {**a, "node_id": TARGETS[1]}
+        refresh = {**b, "timestamp_ms": 1150, "event_type": "NEIGHBOR_STATUS_UPDATED"}
+        unknown = ev("NEIGHBOR_TX_ALLOWED", TARGETS[1], 1200)
+        unknown["neighbor_knowledge"] = {str(a["transmitter_id"]): "UNKNOWN"}
+        have = {**unknown, "node_id": TARGETS[0], "neighbor_knowledge": {str(a["transmitter_id"]): "HAVE"}}
+        self.assertEqual("FAIL", self.checks([a, b, refresh, unknown, have])["EXPIRED_STATUS_UNKNOWN"])
+        self.assertEqual("INCONCLUSIVE", self.checks([a, unknown])["EXPIRED_STATUS_UNKNOWN"])
+
+    def test_each_expiry_episode_requires_its_own_unknown_evidence(self):
+        expired = ev("NEIGHBOR_STATUS_EXPIRED", TARGETS[0], 1100, tx=stable_id(TARGETS[2]))
+        decision = ev("NEIGHBOR_TX_ALLOWED", TARGETS[0], 1200)
+        decision["neighbor_knowledge"] = {str(expired["transmitter_id"]): "UNKNOWN"}
+        refresh = {**expired, "event_type": "NEIGHBOR_STATUS_UPDATED", "timestamp_ms": 1300}
+        second = {**expired, "timestamp_ms": 1400}
+        self.assertEqual("INCONCLUSIVE", self.checks([expired, decision, refresh, second])["EXPIRED_STATUS_UNKNOWN"])
+        stale = {**decision, "timestamp_ms": 1500, "neighbor_knowledge": {str(expired["transmitter_id"]): "MISSING"}}
+        self.assertEqual("FAIL", self.checks([second, stale, decision, refresh, expired])["EXPIRED_STATUS_UNKNOWN"])
+        stale["neighbor_knowledge"] = decision["neighbor_knowledge"]
+        self.assertEqual("PASS", self.checks([second, stale, decision, refresh, expired])["EXPIRED_STATUS_UNKNOWN"])
+
+    def test_same_millisecond_expiry_uses_node_event_order(self):
+        expired = {**ev("NEIGHBOR_STATUS_EXPIRED", TARGETS[0], 1100, tx=stable_id(TARGETS[2])), "event_sequence": 7}
+        decision = {**ev("NEIGHBOR_TX_ALLOWED", TARGETS[0], 1100), "event_sequence": 8,
+                    "neighbor_knowledge": {str(expired["transmitter_id"]): "UNKNOWN"}}
+        self.assertEqual("PASS", self.checks([decision, expired])["EXPIRED_STATUS_UNKNOWN"])
+
+    def test_missing_peer_identity_or_snapshot_is_inconclusive(self):
+        expired = ev("NEIGHBOR_STATUS_EXPIRED", TARGETS[0], 1100, tx=stable_id(TARGETS[2]))
+        decision = ev("NEIGHBOR_TX_ALLOWED", TARGETS[0], 1200)
+        self.assertEqual("INCONCLUSIVE", self.checks([expired, decision])["EXPIRED_STATUS_UNKNOWN"])
+        expired.pop("transmitter_id")
+        decision["neighbor_knowledge"] = {"None": "UNKNOWN"}
+        self.assertEqual("INCONCLUSIVE", self.checks([expired, decision])["EXPIRED_STATUS_UNKNOWN"])
+
+    def test_expiry_android_db_order_and_same_peer_refresh(self):
+        expired = {**ev("NEIGHBOR_STATUS_EXPIRED", SOURCE, 1100, tx=stable_id(TARGETS[0])), "id": 20}
+        decision = {**ev("NEIGHBOR_TX_ALLOWED", SOURCE, 1100), "id": 21,
+                    "neighbor_knowledge": {str(expired["transmitter_id"]): "UNKNOWN"}}
+        refresh = {**expired, "id": 22, "event_type": "NEIGHBOR_STATUS_UPDATED"}
+        have = {**decision, "id": 23, "neighbor_knowledge": {str(expired["transmitter_id"]): "HAVE"}}
+        self.assertEqual("PASS", self.checks([have, refresh, decision, expired])["EXPIRED_STATUS_UNKNOWN"])
+
+    def test_validator_and_workbook_keep_negative_evidence_without_touching_raw(self):
+        from contextlib import redirect_stdout
+        from io import StringIO
+        from unittest.mock import patch
+        from resqmesh_controller.cli import main
+        for contradiction in (False, True):
+            with self.subTest(contradiction=contradiction), tempfile.TemporaryDirectory() as d:
+                path = Path(d)
+                raw = path/"raw"
+                raw.mkdir()
+                events = self.complete_archive()
+                for event in events:
+                    event.pop("event_sequence", None)
+                if contradiction:
+                    expired = ev("NEIGHBOR_STATUS_EXPIRED", TARGETS[0], 1300, tx=stable_id(TARGETS[2]))
+                    decision = ev("NEIGHBOR_TX_ALLOWED", TARGETS[0], 1400)
+                    decision.update(reason="UNKNOWN_OR_NO_NEIGHBORS",
+                                    neighbor_knowledge={str(expired["transmitter_id"]): "HAVE"})
+                    events.extend([expired, decision])
+                raw_file = raw/"events.jsonl"
+                raw_file.write_text("\n".join(json.dumps(e) for e in events), encoding="utf-8")
+                raw_bytes = raw_file.read_bytes()
+                r = record()
+                r["evidence"] = summarize_network(events, r)
+                manifest = {"session_id": "fixture", "synthetic_data": True, "trials": {"t1": r},
+                            "neighbor_scenarios": ["S0_MAIN"]}
+                manifest_file = path/"manifest.json"
+                manifest_file.write_text(json.dumps(manifest), encoding="utf-8")
+                args = ["run.py", "validate-neighbor", "--input", str(raw), "--output", str(path/"validation"),
+                        "--manifest", str(manifest_file)]
+                with patch("sys.argv", args), patch("resqmesh_controller.cli.build_nodes", side_effect=AssertionError("No hardware")), redirect_stdout(StringIO()):
+                    self.assertEqual(2 if contradiction else 3, main())
+                output = merge_neighbor(raw, path/"merged", manifest)
+                wb = load_workbook(output["workbook"])
+                try:
+                    ws = wb["Log Validation"]
+                    rows = [dict(zip([c.value for c in ws[1]], row)) for row in ws.iter_rows(min_row=2, values_only=True)]
+                    checks = {row["check"]: row for row in rows}
+                    self.assertEqual("INCONCLUSIVE", checks["LOG_COMPLETENESS"]["result"])
+                    self.assertEqual("INCONCLUSIVE", checks["METRICS_RECOMPUTE_MATCH"]["result"])
+                    if contradiction:
+                        self.assertEqual("FAIL", checks["EXPIRED_STATUS_UNKNOWN"]["result"])
+                        episode = json.loads(checks["EXPIRED_STATUS_UNKNOWN"]["evidence"])["expiry_episodes"][0]
+                        self.assertEqual((TARGETS[0], expired["transmitter_id"], ["HAVE"]),
+                                         (episode["node_id"], episode["transmitter_id"], episode["observed_states"]))
+                finally:
+                    wb.close()
+                self.assertEqual(raw_bytes, raw_file.read_bytes())
+                self.assertEqual(events, json.loads((path/"merged/all_events.json").read_text()))
 
 
 if __name__ == "__main__":

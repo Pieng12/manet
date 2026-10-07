@@ -5,6 +5,42 @@ import json
 from pathlib import Path
 
 
+def _positive_counter(value):
+    return type(value) is int and value > 0
+
+
+def _expiry_evidence(samples, at):
+    def order(e):
+        counter = e.get("event_sequence", e.get("id"))
+        return at(e), counter if _positive_counter(counter) else 0
+
+    cases = []
+    for expired in samples:
+        if expired.get("event_type") != "NEIGHBOR_STATUS_EXPIRED":
+            continue
+        node, peer = expired.get("node_id"), expired.get("transmitter_id")
+        case = {"node_id": node, "transmitter_id": peer, "expired_at": at(expired),
+                "event_sequence": expired.get("event_sequence"), "id": expired.get("id"),
+                "result": "INCONCLUSIVE", "observed_states": []}
+        cases.append(case)
+        if node is None or peer is None or at(expired) <= 0:
+            continue
+        # Keep observer, peer and expiry episode together; a different peer's refresh is irrelevant.
+        stream = [e for e in samples if e.get("node_id") == node and order(e) > order(expired)]
+        boundaries = [order(e) for e in stream if e.get("transmitter_id") == peer
+                      and e.get("event_type") in {"NEIGHBOR_STATUS_UPDATED", "NEIGHBOR_STATUS_EXPIRED"}]
+        end = min(boundaries) if boundaries else None
+        decisions = [e for e in stream if e.get("event_type") in {"NEIGHBOR_TX_ALLOWED", "NEIGHBOR_TX_SUPPRESSED"}
+                     and (end is None or order(e) < end)]
+        states = [e.get("neighbor_knowledge", {}).get(str(peer)) for e in decisions]
+        case["observed_states"] = states
+        if any(s in {"HAVE", "MISSING"} for s in states):
+            case["result"] = "FAIL"
+        elif states and all(s == "UNKNOWN" for s in states):
+            case["result"] = "PASS"
+    return cases
+
+
 def validate_logs(events, manifest):
     from .neighbor_experiment import SOURCE, TARGETS, flatten, stable_id, summarize_network
     results = []
@@ -48,16 +84,10 @@ def validate_logs(events, manifest):
                         and e.get("missing_count") == 0 and e.get("unknown_count") == 0]
             suppression_contradiction = any(e.get("event_type") == "NEIGHBOR_TX_ALLOWED" and e.get("reason") == "ALL_OBSERVED_HAVE" for e in samples)
             put("ALL_HAVE_SUPPRESSION_STATUS_CONTINUES", any(later(e, {"STATUS_BURST_STARTED"}) for e in all_have), suppression_contradiction)
-            expired = [e for e in samples if e.get("event_type") == "NEIGHBOR_STATUS_EXPIRED"]
-            stale_decisions = [v for e in expired for v in later(e, {"NEIGHBOR_TX_ALLOWED", "NEIGHBOR_TX_SUPPRESSED"})
-                               if str(e.get("transmitter_id")) in v.get("neighbor_knowledge", {})]
-            # Only evaluate a still-expired peer; a refreshed STATUS is legitimately HAVE again.
-            stale_decisions = [v for v in stale_decisions if any(
-                at(e) < at(v) and str(e.get("transmitter_id")) in v.get("neighbor_knowledge", {})
-                and not any(at(e) < at(s) <= at(v) and s.get("transmitter_id") == e.get("transmitter_id")
-                            for s in later(e, {"NEIGHBOR_STATUS_UPDATED"})) for e in expired)]
-            put("EXPIRED_STATUS_UNKNOWN", any(v.get("neighbor_knowledge", {}).get(str(e.get("transmitter_id"))) == "UNKNOWN" for v in stale_decisions for e in expired if at(e) < at(v)),
-                any(v.get("reason") == "ALL_OBSERVED_HAVE" for v in stale_decisions))
+            expiry_cases = _expiry_evidence(samples, at)
+            put("EXPIRED_STATUS_UNKNOWN", bool(expiry_cases) and all(e["result"] == "PASS" for e in expiry_cases),
+                any(e["result"] == "FAIL" for e in expiry_cases),
+                json.dumps({"expiry_episodes": expiry_cases}, ensure_ascii=False))
             empty = [e for e in samples if e.get("event_type") == "STATUS_RECEIVED"
                      and e.get("inventory_count") == 0 and e.get("snapshot_complete") is True]
             put("EMPTY_STATUS_DISCOVERY_REPAIR", any(
@@ -91,18 +121,36 @@ def validate_logs(events, manifest):
                                 (scenario == "S2_LATE_JOIN" and e.get("tx_enabled") is True)) for e in changes)
             put("ACTUAL_PARTICIPATION_OFF_ON", any(at(a) < at(b) for a in off for b in on), contradiction,
                 "Perlu perubahan hardware terkonfirmasi, OFF lalu ON pada D (S1) atau E (S2)")
-        missing, gaps = [], []
+        missing, gaps, missing_sequences, conflicts = [], [], [], []
         for node in (SOURCE, *TARGETS):
             node_events = [e for e in samples if e.get("node_id") == node]
             if not node_events:
                 missing.append(node)
-            seq = sorted(set(e["event_sequence"] for e in node_events if isinstance(e.get("event_sequence"), int)))
-            if seq and any(b != a+1 for a, b in zip(seq, seq[1:])):
+            # Only ESP serial logs promise contiguous event_sequence; Android DB IDs do not.
+            if node not in TARGETS:
+                continue
+            valid = bool(node_events) and all(_positive_counter(e.get("event_sequence")) for e in node_events)
+            if not valid:
+                missing_sequences.append(node)
+            by_sequence = {}
+            for e in node_events:
+                counter = e.get("event_sequence")
+                if not _positive_counter(counter):
+                    continue
+                if counter in by_sequence and by_sequence[counter] != e:
+                    if node not in conflicts:
+                        conflicts.append(node)
+                by_sequence[counter] = e
+            seq = sorted(by_sequence)
+            if valid and any(b != a+1 for a, b in zip(seq, seq[1:])):
                 gaps.append(node)
         # Contiguous interior events alone cannot prove start/end of an archive were retained.
-        complete = not missing and not gaps and all(all(any(e.get("node_id") == n and e.get("event_type") == marker for e in samples)
+        complete = not missing and not gaps and not missing_sequences and not conflicts and all(all(any(e.get("node_id") == n and e.get("event_type") == marker for e in samples)
                    for marker in ("TRIAL_WINDOW_STARTED", "TRIAL_WINDOW_ENDED")) for n in (SOURCE, *TARGETS))
-        put("LOG_COMPLETENESS", complete, bool(gaps), f"Node tanpa log: {missing}; gap event_sequence: {gaps}; perlu marker akhir keenam node")
+        put("LOG_COMPLETENESS", complete, bool(gaps or conflicts),
+            f"Node tanpa log: {missing}; counter ESP hilang/tidak valid: {missing_sequences}; "
+            f"gap event_sequence: {gaps}; counter berkonflik: {conflicts}; perlu marker awal/akhir keenam node; "
+            "Android tidak memiliki kontrak event_sequence kontigu")
         expected = record.get("evidence", {})
         actual = None
         if all(record.get(k) is not None for k in ("observation_started_at_ms", "observation_ended_at_ms")):

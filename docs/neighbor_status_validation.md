@@ -5,8 +5,12 @@ Branch: `metode-penerimaan`, dibuat dari `optimasi-jarak`.
 HEAD yang diperiksa pada audit pelaporan: `2ecdf8bf81f9cb9cbacca17e6f1bf27fae56f664`.
 Implementasi awal sudah ada dalam commit tersebut. Branch lokal melacak
 `origin/metode-penerimaan` menurut referensi Git lokal; audit ini tidak mengambil
-atau memverifikasi keadaan server remote. Perubahan audit berikutnya belum
-di-commit oleh audit ini. Tidak ada push, flash, install, atau eksperimen fisik.
+atau memverifikasi keadaan server remote. Saat audit awal berakhir, perubahan
+audit pelaporan belum di-commit oleh pelaksana audit. Pemeriksaan lokal pada
+2026-10-08 menunjukkan audit pelaporan kini ada dalam commit
+`9f64571480705641dc78c9798abadf02b5f4169d`; status push tidak diverifikasi.
+Koreksi validator sesudah commit tersebut dicatat terpisah dalam laporan
+di bawah. Tidak ada push, flash, install, atau eksperimen fisik oleh audit ini.
 
 Hasil audit terbaru dicatat terpisah dalam
 [audit pelaporan dan validator](neighbor_reporting_validation.md). Angka/build

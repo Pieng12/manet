@@ -1,14 +1,69 @@
 # Audit Pelaporan Profil Tetangga
 
-Pemeriksaan dimulai 2026-10-07 dan build final selesai 2026-10-08 pada
+Audit awal dimulai 2026-10-07 dan build final selesai 2026-10-08 pada
 `D:\PKM\Project\pkmproject`, branch
 `metode-penerimaan`, HEAD `2ecdf8bf81f9cb9cbacca17e6f1bf27fae56f664`.
-Working tree bersih saat mulai. Implementasi awal sudah di-commit pada HEAD;
-perubahan audit ini tidak di-commit/push. Referensi tracking origin dilihat lokal
-saja, bukan verifikasi server. Tidak ada install/flash/trial perangkat atau
+Working tree bersih saat audit awal dimulai. Pada saat audit awal selesai,
+perubahan audit belum di-commit/push oleh pelaksana audit. Pemeriksaan lokal
+2026-10-08 menunjukkan perubahan itu kini ada pada commit
+`9f64571480705641dc78c9798abadf02b5f4169d`. Ini bukan verifikasi bahwa commit
+sudah di-push: referensi tracking origin hanya dilihat lokal, bukan server.
+Tidak ada install/flash/trial perangkat atau
 penghapusan dataset, database, NVS, konfigurasi pribadi, raw log maupun arsip.
 
+## Koreksi Validator 2026-10-08
+
+Pemeriksaan lanjutan dimulai dari working tree bersih pada commit `9f645714`,
+tetap di branch `metode-penerimaan`. Kedua temuan berhasil direproduksi dengan
+tes regresi sebelum validator diperbaiki:
+
+- Keenam node memiliki marker awal/akhir tanpa `event_sequence`: sebelumnya
+  LOG_COMPLETENESS mendapat PASS. Sekarang setiap event serial pada kelima ESP
+  wajib memiliki counter integer positif (boolean/string tidak valid). Counter
+  hilang/tidak valid menghasilkan INCONCLUSIVE; gap yang terbukti atau counter
+  yang merujuk event berbeda menghasilkan FAIL. Replay event identik tidak
+  dihitung sebagai konflik. Android tidak diwajibkan memiliki event_sequence:
+  ekspornya memakai ID database global, yang tidak harus kontigu per trial.
+  PASS hanya menyatakan kontrak arsip ini terpenuhi, bukan kelengkapan RF atau
+  bukti independen bahwa semua event Android sudah tercatat.
+- EXPIRED_STATUS_UNKNOWN sebelumnya dapat mengambil UNKNOWN dari peer atau
+  pengamat lain. Sekarang bukti disimpan per node pengamat, transmitter_id,
+  dan episode expiry, hingga update yang diterima dari peer yang sama atau
+  expiry berikutnya. HAVE/MISSING sebelum refresh menghasilkan FAIL tanpa
+  bergantung pada reason keputusan. Episode tanpa snapshot yang cukup tetap
+  INCONCLUSIVE; satu episode benar tidak meluluskan episode lain yang tak
+  terbukti. Event pada milidetik sama diurutkan melalui event_sequence ESP
+  atau ID database Android jika tersedia. Rincian episode tersedia dalam
+  kolom evidence pada JSON dan sheet Log Validation.
+
+Tidak ada perubahan algoritma, scheduler, payload, firmware, APK, database,
+rumus metrik, atau dataset lama. Koreksi ini bekerja pada validator offline;
+arsip lama dapat divalidasi/di-merge ulang ke folder output baru tanpa trial
+ulang. Perubahan koreksi ini belum di-commit/push oleh pelaksana koreksi.
+
+Pemeriksaan yang benar-benar dijalankan pada koreksi ini:
+
+| Pemeriksaan | Hasil |
+| --- | --- |
+| Python unittest discover | Lulus, 132 tes (13 tes tambahan dibanding audit awal) |
+| Tes pelaporan/validator | Lulus, 29 tes termasuk CLI offline dan workbook negatif |
+| dart format --output=none --set-exit-if-changed . | Lulus, 97 file, 0 perubahan |
+| flutter analyze | Lulus, No issues found |
+| flutter test --reporter expanded | Lulus, 395 tes |
+| Exporter fixture sintetis baru | Workbook, JSON/CSV, 15 grafik SVG; 10 trial/71 event |
+| Validator CLI pada fixture parsial | Exit 3 sesuai harapan, 74 INCONCLUSIVE, 0 PASS/FAIL |
+
+Fixture baru ada di `build/neighbor-validator-SYNTHETIC-20261008-fix/`, bukan
+data perangkat. Log Flutter: `build/neighbor-validator-flutter-tests.log`;
+log CLI: `build/neighbor-validator-cli.log`. Tes juga memastikan raw log dan
+All Events tidak berubah, serta hasil negatif diteruskan ke CLI/Excel.
+Gradle, PlatformIO, dan paired build tidak dijalankan ulang untuk koreksi Python
+ini. Hash seluruh source pada manifest build lama adalah snapshot historis,
+bukan klaim cocok dengan working tree setelah koreksi validator.
+
 ## Perubahan Dan Alasan
+
+Bagian berikut merekam audit awal sebelum koreksi validator di atas.
 
 - Menambahkan `setup_plus_window_tx` tanpa mengganti field/rumus lama. Filter
   session/trial/scope berlaku juga sebelum menentukan SOS/t0; STATUS setup
@@ -37,9 +92,10 @@ segar mengalahkan HAVE, UNKNOWN/stale bukan HAVE, all-HAVE dapat menekan DATA
 tanpa menghapus queue, discovery STATUS kosong, repair cooldown, filter graph
 sebelum efek protokol, serta envelope DATA yang sama pada empat metode.
 
-## Pemeriksaan Audit Ini
+## Pemeriksaan Audit Awal
 
-Hasil berikut benar-benar dijalankan ulang, bukan disalin dari laporan historis:
+Hasil berikut dijalankan pada audit awal; bukan hasil menjalankan ulang koreksi
+validator. Gunakan tabel koreksi di atas untuk pemeriksaan working tree terbaru:
 
 | Pemeriksaan | Hasil |
 | --- | --- |
@@ -115,7 +171,7 @@ Unit analisis, efek blok, asumsi distribusi dan missing belum ditetapkan untuk
 uji inferensial. Warning macro NimBLE, Java 8 dependency dan deprecation Gradle
 masih perlu dicatat; tidak diperbaiki dengan perubahan protokol yang tak terkait.
 
-## File Audit
+## File Audit Awal
 
 ```text
 README.md
