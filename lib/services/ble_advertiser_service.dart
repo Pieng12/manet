@@ -587,6 +587,7 @@ class BleAdvertiserService {
       final queued = await _nextQueuedAdvertisement();
       final nextData = await _relayQueue.earliestNextEligibleAt();
       if (runtime.statusEnabled &&
+          !runtime.mplEnabled &&
           nextData != null &&
           nextData > _clock.monotonicTimeMs() &&
           nextData <=
@@ -598,14 +599,27 @@ class BleAdvertiserService {
             nextData + _relayQueue.slotDurationForMode().inMilliseconds;
       }
       if (queued == null &&
+          runtime.mplEnabled &&
+          _clock.monotonicTimeMs() >= runtime.nextStatusAt &&
+          !runtime.controller!.statusHasSlot(
+            _clock.monotonicTimeMs(),
+            nextData,
+          )) {
+        runtime.mpl!.controlDue(_clock.monotonicTimeMs(), slot: false);
+        await runtime.emitChanges(_clock.monotonicTimeMs());
+      }
+      if (queued == null &&
           runtime.statusEnabled &&
           _clock.monotonicTimeMs() >= runtime.nextStatusAt &&
           runtime.controller!.statusHasSlot(
             _clock.monotonicTimeMs(),
             nextData,
           )) {
-        await _startStatusBurst();
-        return;
+        if (!runtime.mplEnabled ||
+            runtime.mpl!.controlDue(_clock.monotonicTimeMs())) {
+          await _startStatusBurst();
+          return;
+        }
       }
       if (_researchObservationPaused) {
         await stopAdvertising();
@@ -884,15 +898,17 @@ class BleAdvertiserService {
         nowMs: now,
       );
       final decision = trickleDecision;
-      await _schedulerDiagnostic(
-        (wall, monotonic) => _logTrickleDecision(
-          message,
-          decision,
-          decisionWallMs: wall == null
-              ? null
-              : wall - (monotonic! - decision.state.updatedAt),
-        ),
-      );
+      if (_relayQueue.mode != ForwardingMode.trickleMpl) {
+        await _schedulerDiagnostic(
+          (wall, monotonic) => _logTrickleDecision(
+            message,
+            decision,
+            decisionWallMs: wall == null
+                ? null
+                : wall - (monotonic! - decision.state.updatedAt),
+          ),
+        );
+      }
       if (!trickleDecision.shouldAdvertise) {
         await _scheduleNextQueueWake();
         return;
@@ -910,6 +926,7 @@ class BleAdvertiserService {
     final inner = BlePacket.packSos(message);
     final runtime = NeighborRuntime.instance;
     await runtime.load();
+    final mplToken = runtime.mpl?.data[message.stateIdentity.value]?.generation;
     final frame = runtime.enabled ? await runtime.frame(inner: inner) : null;
     final payload = frame?.encode() ?? inner;
     if (frame != null) {
@@ -965,9 +982,34 @@ class BleAdvertiserService {
     );
 
     try {
+      if (mplToken != null) {
+        final timer = runtime.mpl!.data[message.stateIdentity.value];
+        timer?.advance(_clock.monotonicTimeMs());
+        if (timer == null ||
+            timer.generation != mplToken ||
+            !timer.active ||
+            !timer.pending) {
+          await _relayQueue.markAdvertisingBlocked(
+            queued.item,
+            restoreNextEligibleAt: timer?.nextAt ?? originalNextEligibleAt,
+          );
+          await runtime.emitChanges(_clock.monotonicTimeMs());
+          await _scheduleNextQueueWake();
+          return;
+        }
+        timer.log('NATIVE_REQUESTED', _clock.monotonicTimeMs());
+      }
       if (await _startNativePayload(payload)) {
         final succeededAt = _clock.wallTimeMs();
         final succeededAtMonotonic = _clock.monotonicTimeMs();
+        if (mplToken != null) {
+          runtime.mpl!.dataResult(
+            message.stateIdentity.value,
+            mplToken,
+            succeededAtMonotonic,
+            true,
+          );
+        }
         _isAdvertising = true;
         if (frame != null) {
           runtime.controller!.started(message.stateIdentity);
@@ -1013,7 +1055,9 @@ class BleAdvertiserService {
           queued.item,
           nowMs: succeededAtMonotonic,
           slotDuration: _relayQueue.slotDurationForMode(),
-          nextEligibleAtOverride: trickleDecision?.nextEligibleAt,
+          nextEligibleAtOverride:
+              runtime.mpl?.data[message.stateIdentity.value]?.nextAt ??
+              trickleDecision?.nextEligibleAt,
         );
         _resetTransientRetry();
         await _experimentLogger.logEvent(
@@ -1094,6 +1138,15 @@ class BleAdvertiserService {
     }
 
     final errorCode = await _lastNativeAdvertiseErrorCode();
+    if (mplToken != null) {
+      runtime.mpl!.dataResult(
+        message.stateIdentity.value,
+        mplToken,
+        _clock.monotonicTimeMs(),
+        false,
+      );
+      await runtime.emitChanges(_clock.monotonicTimeMs());
+    }
     if (frame != null) {
       await runtime.log(
         'DATA_BURST_FAILED',
@@ -1117,7 +1170,14 @@ class BleAdvertiserService {
       await _relayQueue.markAdvertisingFailed(
         queued.item,
         nowMs: _clock.monotonicTimeMs(),
-        retryDelay: _nextTransientRetryDelay(),
+        retryDelay: mplToken == null
+            ? _nextTransientRetryDelay()
+            : Duration(
+                milliseconds:
+                    (runtime.mpl!.data[message.stateIdentity.value]!.nextAt -
+                            _clock.monotonicTimeMs())
+                        .clamp(0, 86400000),
+              ),
       );
     } else {
       await _relayQueue.markAdvertisingBlocked(
@@ -1163,10 +1223,15 @@ class BleAdvertiserService {
 
   Future<void> _startStatusBurst() async {
     final runtime = NeighborRuntime.instance;
+    final mplToken = runtime.mpl?.control.generation;
+    final inventoryToken = runtime.mpl?.inventoryGeneration;
     final frame = await runtime.statusFrame();
     final now = _clock.monotonicTimeMs();
     final inventory = runtime.statusSchedule?.inventory ?? <String>[];
-    final statusReason = runtime.statusSchedule?.reason ?? 'PERIODIC';
+    final statusReason =
+        runtime.mpl?.control.reason ??
+        runtime.statusSchedule?.reason ??
+        'PERIODIC';
     runtime.statusAttempted(now);
     await runtime.log(
       'STATUS_BURST_REQUESTED',
@@ -1174,6 +1239,19 @@ class BleAdvertiserService {
       reason: statusReason,
     );
     try {
+      if (mplToken != null) {
+        final timer = runtime.mpl!.control;
+        timer.advance(_clock.monotonicTimeMs());
+        if (timer.generation != mplToken ||
+            runtime.mpl!.inventoryGeneration != inventoryToken ||
+            !timer.active ||
+            !timer.pending) {
+          await runtime.emitChanges(_clock.monotonicTimeMs());
+          await _scheduleNextQueueWake();
+          return;
+        }
+        timer.log('NATIVE_REQUESTED', _clock.monotonicTimeMs());
+      }
       if (await _startNativePayload(frame.encode())) {
         final startedWall = _clock.wallTimeMs();
         final startedMonotonic = _clock.monotonicTimeMs();
@@ -1199,6 +1277,15 @@ class BleAdvertiserService {
           reason: statusReason,
         );
         runtime.statusStarted(inventory, startedMonotonic);
+        if (mplToken != null) {
+          runtime.mpl!.controlResult(
+            mplToken,
+            inventoryToken!,
+            startedMonotonic,
+            true,
+          );
+        }
+        await runtime.emitChanges(startedMonotonic);
         _isAdvertisingController.add(true);
         _slotTimer = Timer(duration, () async {
           await stopAdvertising();
@@ -1210,6 +1297,14 @@ class BleAdvertiserService {
       // Failure must retain the DATA queue and recover via the same owner.
     }
     runtime.statusFailed(_clock.monotonicTimeMs());
+    if (mplToken != null) {
+      runtime.mpl!.controlResult(
+        mplToken,
+        inventoryToken!,
+        _clock.monotonicTimeMs(),
+        false,
+      );
+    }
     await runtime.log(
       'STATUS_BURST_FAILED',
       frame: frame,

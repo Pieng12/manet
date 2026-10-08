@@ -315,7 +315,10 @@ class ExperimentLogger {
     if (eventType.startsWith('TRICKLE_')) {
       detail = {
         ...?detail,
-        'suppression_enabled': session.forwardingMode == 'trickle',
+        'suppression_enabled': [
+          'trickle',
+          'trickle_mpl',
+        ].contains(session.forwardingMode),
         'k': MeshConfig.trickleRedundancyConstant,
       };
     }

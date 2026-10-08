@@ -52,7 +52,7 @@ Push-Location $Root
 $OldBuildId = $env:RESQMESH_BUILD_ID
 try {
     $Branch = (& git branch --show-current).Trim()
-    if ($Branch -ne 'metode-penerimaan') { throw "Branch salah: $Branch; gunakan metode-penerimaan" }
+    if ($Branch -notin @('metode-penerimaan', 'MPL')) { throw "Branch salah: $Branch; gunakan metode-penerimaan atau MPL" }
     $Fingerprint = Get-SourceFingerprint
     if ($FingerprintOnly) {
         [pscustomobject]@{ build_id = $Fingerprint.build_id; source_sha256 = $Fingerprint.source_sha256 }
@@ -68,6 +68,9 @@ try {
     $null = New-Item -ItemType Directory -Path $Archive
     Copy-Item -LiteralPath 'build/app/outputs/flutter-apk/app-debug.apk' -Destination $Archive
     Copy-Item -LiteralPath 'firmware/esp32c3/.pio/build/esp32c3/firmware.bin' -Destination $Archive
+    foreach ($Name in @('bootloader.bin', 'partitions.bin', 'firmware.factory.bin')) {
+        Copy-Item -LiteralPath (Join-Path 'firmware/esp32c3/.pio/build/esp32c3' $Name) -Destination $Archive
+    }
     $Fingerprint.branch = $Branch
     $Fingerprint.git_reference = (& git rev-parse HEAD).Trim()
     $Fingerprint.created_at = [DateTimeOffset]::Now.ToString('o')

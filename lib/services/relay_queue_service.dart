@@ -104,6 +104,7 @@ class RelayQueueService {
       'trickle' => ForwardingMode.trickle,
       'trickle_no_suppression' => ForwardingMode.trickleNoSuppression,
       'trickle_neighbor_status' => ForwardingMode.trickleNeighborStatus,
+      'trickle_mpl' => ForwardingMode.trickleMpl,
       'basic' || 'basic_flooding' => ForwardingMode.basicFlooding,
       _ => throw ArgumentError('Unknown forwarding mode: $value'),
     };
@@ -388,7 +389,7 @@ class RelayQueueService {
 
       var sosNextEligibleAt = nextEligibleAt;
       _TrickleSosPreparation? tricklePreparation;
-      if (mode.usesTrickle) {
+      if (mode.usesTrickle && mode != ForwardingMode.trickleMpl) {
         tricklePreparation = await _prepareTrickleForStoredSos(
           trickleScheduler,
           message: message,
@@ -578,7 +579,9 @@ class RelayQueueService {
         clock: _clock,
       );
       for (final message in latestBySender.values) {
-        final nextEligibleAt = mode.usesTrickle
+        final nextEligibleAt = mode == ForwardingMode.trickleMpl
+            ? now
+            : mode.usesTrickle
             ? (await trickleScheduler.ensureState(
                 messageId: message.id,
                 nowMs: now,
@@ -606,6 +609,42 @@ class RelayQueueService {
 
   Future<RelayQueueItem?> nextEligible(int nowMs) async {
     final db = await _db;
+    if (mode == ForwardingMode.trickleMpl) {
+      final runtime = NeighborRuntime.instance;
+      await runtime.synchronizeStatus(
+        nowMs,
+        readInventory: () async {
+          final rows = await db.query(
+            'sos_messages',
+            where:
+                "ack_received_at IS NULL AND local_state NOT IN ('acked', 'synced')",
+          );
+          return rows
+              .map((r) => SOSMessage.fromDbMap(r).stateIdentity)
+              .toList();
+        },
+      );
+      final items = await getAllItems();
+      for (final item in items.where((i) => i.isSos)) {
+        final rows = await db.query(
+          'sos_messages',
+          where: 'id = ?',
+          whereArgs: [item.messageId],
+          limit: 1,
+        );
+        if (rows.isEmpty) continue;
+        final key = SOSMessage.fromDbMap(rows.single).stateIdentity.value;
+        final timer = runtime.mpl?.data[key];
+        if (timer != null) {
+          await db.update(
+            'relay_queue',
+            {'next_eligible_at': timer.nextAt},
+            where: 'message_id = ? AND packet_type = ?',
+            whereArgs: [item.messageId, 'sos'],
+          );
+        }
+      }
+    }
     if (_consecutiveAckSlots >= MeshConfig.maxConsecutiveAckSlots) {
       final sos = await _nextEligibleOfType(db, nowMs, 'sos');
       if (sos != null) {
@@ -828,7 +867,9 @@ WHERE id = ?
       );
 
       var trickleRecorded = false;
-      if (mode.usesTrickle && countAsTrickleConsistency) {
+      if (mode.usesTrickle &&
+          mode != ForwardingMode.trickleMpl &&
+          countAsTrickleConsistency) {
         final effectiveObservationId = observationId?.trim().isNotEmpty == true
             ? observationId!.trim()
             : '$messageId|$observerKey|$nowMs';
@@ -928,6 +969,52 @@ WHERE id = ?
     required int nowMs,
   }) async {
     final db = await _db;
+    if (mode == ForwardingMode.trickleMpl) {
+      final runtime = NeighborRuntime.instance;
+      await runtime.load();
+      if (runtime.mpl == null) throw StateError('Scoped MPL runtime required');
+      final rows = await db.query(
+        'sos_messages',
+        where: 'id = ?',
+        whereArgs: [item.messageId],
+        limit: 1,
+      );
+      final identity = SOSMessage.fromDbMap(rows.single).stateIdentity;
+      final mpl = runtime.mpl!;
+      final allowed = mpl.dataDue(identity.value, nowMs);
+      final timer = mpl.data[identity.value]!;
+      final next = timer.nextAt;
+      final state = TrickleState(
+        messageId: item.messageId,
+        intervalMs: timer.interval,
+        intervalStartedAt: timer.start,
+        transmitAt: timer.transmit,
+        intervalEndAt: timer.end,
+        consistencyCount: timer.c,
+        phase: timer.evaluated
+            ? TricklePhase.waitingIntervalEnd
+            : TricklePhase.waitingTransmit,
+        updatedAt: nowMs,
+        lastResetReason: timer.reason,
+      );
+      final decision = TrickleTransmitDecision(
+        type: allowed
+            ? TrickleTransmitDecisionType.allowTransmit
+            : timer.evaluated && !timer.pending && timer.c >= timer.k
+            ? TrickleTransmitDecisionType.suppressTransmit
+            : TrickleTransmitDecisionType.wait,
+        state: state,
+        nextEligibleAt: next,
+      );
+      await db.update(
+        'relay_queue',
+        {'next_eligible_at': next, 'queue_state': stateQueued},
+        where: 'message_id = ? AND packet_type = ?',
+        whereArgs: [item.messageId, item.packetType],
+      );
+      await runtime.emitChanges(nowMs);
+      return decision;
+    }
     var decision = await TrickleScheduler(
       suppressionEnabled: mode.suppressionEnabled,
       database: db,

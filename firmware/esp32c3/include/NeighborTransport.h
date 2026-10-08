@@ -48,6 +48,7 @@ class NeighborController {
   bool repairAllowed(const Packet& local, uint32_t now, uint32_t interval, uint32_t imin);
   void requestMissingPeer(uint32_t transmitter, const Packet& local, uint32_t now);
   bool known(uint32_t transmitter) const;
+  bool fresh(uint32_t transmitter,uint32_t now) const;
   std::vector<NeighborFrame> newlyExpired(uint32_t now);
   KnowledgeCounts counts(const Packet& local,uint32_t now) const;
   std::vector<uint32_t> observedTransmitters() const;

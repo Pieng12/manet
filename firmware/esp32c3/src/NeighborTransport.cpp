@@ -99,6 +99,10 @@ Knowledge NeighborController::knowledge(uint32_t id, const Packet& local, uint32
   for (size_t i=0;i<count;++i) { const auto s=f.status ? f.inventory[i] : inventoryState(f.packet); if (s.sender==own.sender && (s.seconds>own.seconds || (s.seconds==own.seconds && (s.flags==own.flags || (s.flags & 128) || priority(s.flags)>priority(own.flags))))) return Knowledge::Have; }
   return f.status && f.complete ? Knowledge::Missing : Knowledge::Unknown;
 }
+bool NeighborController::fresh(uint32_t id,uint32_t now) const {
+  const auto it=std::find_if(entries_.begin(),entries_.end(),[&](const Entry& e){return e.frame.transmitter==id;});
+  return it!=entries_.end() && int32_t(now-it->at)>=0 && now-it->at<=parameters.freshness;
+}
 const char* NeighborController::decision(const Packet& p,uint32_t now,bool first) const {
   if (first) return "INITIAL_FORWARD_PENDING";
   bool unknown=entries_.empty();

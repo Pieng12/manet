@@ -207,6 +207,7 @@ class MainActivity : FlutterActivity() {
                             result.success(false)
                         }
                     }
+                    "getNativeBleElapsedRealtime" -> result.success(android.os.SystemClock.elapsedRealtime())
                     "getNativeBleAdvertisingStatus" -> {
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
                             result.success(NativeBleAdvertiser.statusMap(this))

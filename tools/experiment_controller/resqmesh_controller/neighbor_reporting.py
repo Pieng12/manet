@@ -46,6 +46,14 @@ def aggregate(rows, receivers, scenarios, methods):
                        "defined_delay_pairs": len(delays),
                        "e2e_mean_ms": statistics.mean(delays) if delays else None,
                        "aggregate_basis": "DSR/LDR: rasio jumlah; E2E: pasangan sukses, bukan rata-rata trial"}
+            recovery = [p['recovery_delay_ms'] for p in receivers if p['scenario']==scenario
+                        and p['method']==method and p['valid'] and p.get('recovery_delay_ms') is not None]
+            summary.update(failed_pairs=m*5-u, recovery_pairs=len(recovery),
+                           recovery_mean_ms=statistics.mean(recovery) if recovery else None)
+            stats.append({'method':method,'scenario':scenario,'metric':'recovery_delay_ms',
+                          'label':'Delay pemulihan setelah ON terkonfirmasi','unit':'ms',
+                          'valid_trials':len(valid),'invalid_trials':summary['invalid_trials'],
+                          **descriptive(recovery)})
             for k in ("data_tx", "control_tx", "network_overhead", "setup_control_tx", "setup_plus_window_tx"):
                 summary[k] = sum(t.get(k, 0) or 0 for t in valid)
             for metric, (label, unit) in METRICS.items():
@@ -83,9 +91,14 @@ def mechanism_counts(events, records):
                "NEIGHBOR_ALLOW_UNKNOWN": "allow_unknown", "NEIGHBOR_SUPPRESSED_ALL_HAVE": "suppressed_all_have",
                "REPAIR_NEEDED": "repair_performed", "REPAIR_DEFERRED_COOLDOWN": "repair_deferred_cooldown",
                "NEIGHBOR_STATUS_EXPIRED": "status_expired"}
+    mapping.update({'MPL_TX_ALLOWED':'mpl_allowed','MPL_TX_SUPPRESSED':'mpl_suppressed',
+                    'MPL_TX_MISSED':'mpl_missed','MPL_REPAIR_RESET':'mpl_repair_reset',
+                    'MPL_REPAIR_COMPLETED':'mpl_repair_completed','MPL_TIMER_STOPPED':'mpl_timer_stopped',
+                    'MPL_DISCOVERY':'mpl_discovery'})
     rows = []
     for trial_id, record in records.items():
         counts = dict.fromkeys(mapping.values(), 0)
+        counts.update(mpl_control_suppressed=0, mpl_data_suppressed=0)
         seen = set()
         for raw in events:
             e = flatten(raw)
@@ -105,6 +118,8 @@ def mechanism_counts(events, records):
                 continue
             seen.add(identity)
             counts[mapping[kind]] += 1
+            if kind == 'MPL_TX_SUPPRESSED' and e.get('timer_kind') in ('data','control'):
+                counts[f"mpl_{e['timer_kind']}_suppressed"] += 1
         rows.append({"trial_id": trial_id, "method": record["mode"], "scenario": record["hypothesis"],
                      "basis": "Event seluruh trial, termasuk sebelum window; frekuensi bukan metrik RF", **counts})
     return rows

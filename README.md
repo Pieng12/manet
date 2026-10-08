@@ -7,12 +7,30 @@ menjadi gateway ke server hanya saat mode gateway diaktifkan secara eksplisit.
 
 ## Status Project
 
-Rancangan eksperimen terbaru: **135 trial valid**, tiga metode
-`basic_flooding`, `trickle_no_suppression`, `trickle`, masing-masing H1/H2/H3
-sebanyak 15 trial. Varian Trickle menggunakan mesin yang sama; hanya flag
-suppression berbeda. Panduan build, smoke 9 kondisi, manifest acak seimbang,
-validasi PHY, metrik dan Excel: [eksperimen tiga metode](docs/three_method_experiment.md).
-Dataset 90 trial sebelumnya tetap arsip terpisah, bukan bagian dari 135 trial.
+Rancangan aktif pada branch **MPL**: `basic_flooding`, `trickle`, dan
+`trickle_mpl`, masing-masing S0/S1/S2. Smoke 9 kondisi, pilot terpisah 27 trial,
+dan utama **135 trial valid** dalam 15 blok acak seimbang. Android sumber S
+dan lima ESP receiver/relay memakai graph S-A, S-B, A-C, B-C, A-D, D-E.
+Semua metode memakai DATA 39 byte (envelope 22 + inner SOS 17).
+
+`trickle_mpl` adalah adaptasi diseminasi MPL berbasis Trickle pada BLE, bukan
+implementasi IPv6/ICMPv6 MPL penuh. DATA dan CONTROL mempunyai timer Trickle
+tersendiri; expiration menghentikan timer, tidak menghapus buffer SOS.
+Discovery dan repair terbatas merupakan ekstensi penelitian yang dihitung
+dalam overhead. Belum ada klaim keunggulan radio sebelum pilot fisik.
+
+Lihat [desain](docs/trickle_mpl_design.md),
+[validasi](docs/trickle_mpl_validation.md), dan
+[panduan Windows](docs/trickle_mpl_windows.md).
+
+### Arsip Eksperimen
+
+Profil H1/H2/H3 (90/135 trial, termasuk `trickle_no_suppression`) dijelaskan
+di [eksperimen tiga metode lama](docs/three_method_experiment.md).
+Profil empat metode `trickle_neighbor_status`, `periodic_v1` dan `adaptive_v2`
+tetap tersedia untuk arsip/regression; tidak diganti namanya menjadi MPL.
+Dataset, config pribadi, dan protokol durable tidak dihapus atau dimigrasikan.
+Bagian hop/layer di bawah merujuk profil historis, bukan graph MPL aktif.
 
 Project berada pada tahap implementasi dan pengujian skripsi. Fitur inti yang
 sudah tersedia:

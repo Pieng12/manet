@@ -214,7 +214,8 @@ class AndroidExperimentCommandService {
     final mode = _forwardingMode(_requiredString(args, 'mode'));
     final runtime = NeighborRuntime.instance;
     await runtime.load();
-    if (mode == ForwardingMode.trickleNeighborStatus &&
+    if ((mode == ForwardingMode.trickleNeighborStatus ||
+            mode == ForwardingMode.trickleMpl) &&
         runtime.configuration == null) {
       throw StateError(
         'Mode ini memerlukan konfigurasi neighbor_graph_v1 dari controller',
@@ -311,7 +312,8 @@ class AndroidExperimentCommandService {
   ) async {
     final mode = _forwardingMode(_requiredString(args, 'mode'));
     final mainExperiment = args['main_experiment'] != false;
-    if (mode == ForwardingMode.trickleNeighborStatus &&
+    if ((mode == ForwardingMode.trickleNeighborStatus ||
+            mode == ForwardingMode.trickleMpl) &&
         args['transport_profile'] != NeighborRuntime.profile) {
       throw ArgumentError('Neighbor mode requires neighbor_graph_v1');
     }
@@ -743,6 +745,19 @@ class AndroidExperimentCommandService {
           ? 39
           : 17,
       'neighbor_design_version': 1,
+      'supported_scheduler_semantics': ['resqmesh-trickle-mpl-v1'],
+      if (NeighborRuntime.instance.configuration?['scheduler_semantics'] !=
+          null) ...{
+        'scheduler_semantics':
+            NeighborRuntime.instance.configuration!['scheduler_semantics'],
+        'buffer_retention': 'persistent_until_supersession_ack_admin',
+        'mpl_parameters': {
+          for (final e in NeighborRuntime.instance.configuration!.entries.where(
+            (e) => e.key.startsWith('mpl_'),
+          ))
+            e.key: e.value,
+        },
+      },
       if (NeighborRuntime.instance.configuration != null) ...{
         'transmitter_id': NeighborRuntime.instance.transmitter,
         'scope': NeighborRuntime.instance.enabled
@@ -759,7 +774,10 @@ class AndroidExperimentCommandService {
       'supported_modes': ForwardingMode.values
           .map((mode) => mode.logValue)
           .toList(),
-      'suppression_enabled': session?.forwardingMode == 'trickle',
+      'suppression_enabled': [
+        'trickle',
+        'trickle_mpl',
+      ].contains(session?.forwardingMode),
       'trickle_imin_ms': MeshConfig.trickleIminMs,
       'trickle_imax_ms': MeshConfig.trickleImaxMs,
       'trickle_k': MeshConfig.trickleRedundancyConstant,
@@ -852,6 +870,7 @@ class AndroidExperimentCommandService {
       'trickle' => ForwardingMode.trickle,
       'trickle_no_suppression' => ForwardingMode.trickleNoSuppression,
       'trickle_neighbor_status' => ForwardingMode.trickleNeighborStatus,
+      'trickle_mpl' => ForwardingMode.trickleMpl,
       'basic' || 'basic_flooding' => ForwardingMode.basicFlooding,
       _ => throw ArgumentError('INVALID_FORWARDING_MODE: $value'),
     };

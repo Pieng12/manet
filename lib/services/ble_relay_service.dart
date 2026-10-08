@@ -416,10 +416,14 @@ class BleRelayService {
       return BleProcessingResult.invalid;
     }
     final now = _clock.monotonicTimeMs();
-    // Convert validated physical wall time into this isolate's monotonic domain.
-    final observed = now - (_clock.wallTimeMs() - receivedAtMs);
+    // MPL uses native elapsed time; the wall-time conversion is historical only.
+    final mplPhysical = runtime.mplEnabled
+        ? await runtime.physicalMonotonic(receivedElapsedRealtimeMs)
+        : null;
+    final observed = mplPhysical ?? now - (_clock.wallTimeMs() - receivedAtMs);
     final changed =
         runtime.statusEnabled &&
+        !runtime.mplEnabled &&
         runtime.controller!.observe(frame, observed, now);
     await runtime.emitChanges(now);
     if (changed && runtime.statusEnabled) {
@@ -469,6 +473,20 @@ class BleRelayService {
       await runtime.emitChanges(now);
     }
     if (frame.type == NeighborFrameType.status) {
+      if (runtime.mplEnabled) {
+        await runtime.synchronizeStatus(now);
+        if (mplPhysical != null) {
+          runtime.mpl!.receive(frame, observed, _clock.monotonicTimeMs());
+        } else {
+          await runtime.log(
+            'MPL_RX_TIME_UNVERIFIED',
+            frame: frame,
+            reason: 'NATIVE_MONOTONIC_MISSING',
+          );
+        }
+        await runtime.emitChanges(now);
+        await _advertiser.advertiseLatestOrStop();
+      }
       final claim = await _dbHelper.claimBleObservation(
         observationId: observation,
         packetType: 'status',
@@ -504,6 +522,9 @@ class BleRelayService {
       return BleProcessingResult.accepted;
     }
     final packet = BlePacket.unpack(frame.inner!)!;
+    final mplNewState =
+        runtime.mplEnabled &&
+        !runtime.mpl!.data.containsKey(packet.stateIdentity.value);
     if (packet.isAck && !session!.ackEnabled) {
       return BleProcessingResult.invalid;
     }
@@ -538,6 +559,27 @@ class BleRelayService {
         rssi: rssi,
         clockDomain: 'android_elapsed_realtime',
       );
+      if (runtime.mplEnabled &&
+          result != BleProcessingResult.transportDuplicate &&
+          result != BleProcessingResult.transportInProgress) {
+        await runtime.synchronizeStatus(now);
+        if (mplPhysical != null) {
+          runtime.mpl!.receive(
+            frame,
+            observed,
+            _clock.monotonicTimeMs(),
+            newState: mplNewState,
+          );
+        } else {
+          await runtime.log(
+            'MPL_RX_TIME_UNVERIFIED',
+            frame: frame,
+            reason: 'NATIVE_MONOTONIC_MISSING',
+          );
+        }
+        await runtime.emitChanges(now);
+        await _advertiser.advertiseLatestOrStop();
+      }
       if (result == BleProcessingResult.accepted && runtime.statusEnabled) {
         await runtime.log(
           'INITIAL_FORWARD_PENDING',

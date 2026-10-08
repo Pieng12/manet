@@ -2,14 +2,15 @@ enum ForwardingMode {
   basicFlooding('basic_flooding'),
   trickleNoSuppression('trickle_no_suppression'),
   trickle('trickle'),
-  trickleNeighborStatus('trickle_neighbor_status');
+  trickleNeighborStatus('trickle_neighbor_status'),
+  trickleMpl('trickle_mpl');
 
   const ForwardingMode(this.logValue);
 
   final String logValue;
 
   bool get usesTrickle => this != basicFlooding;
-  bool get suppressionEnabled => this == trickle;
+  bool get suppressionEnabled => this == trickle || this == trickleMpl;
 }
 
 enum ResqMeshMode { offline, gateway }
@@ -56,6 +57,8 @@ class MeshConfig {
       ? ForwardingMode.trickleNoSuppression
       : forwardingModeName == 'trickle_neighbor_status'
       ? ForwardingMode.trickleNeighborStatus
+      : forwardingModeName == 'trickle_mpl'
+      ? ForwardingMode.trickleMpl
       : ForwardingMode.trickle;
 
   static const int protocolLength = 17;

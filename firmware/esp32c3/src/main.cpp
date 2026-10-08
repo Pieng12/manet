@@ -15,6 +15,7 @@
 #include "TrickleTiming.h"
 #include "NeighborTransport.h"
 #include "NeighborStatusSchedule.h"
+#include "MplScheduler.h"
 #include <set>
 
 #ifndef RESQMESH_FIRMWARE_BUILD_ID
@@ -35,10 +36,10 @@ constexpr uint32_t kNativeStartRetryMs = 1000;
 constexpr size_t kSerialRxBufferBytes = 2048;
 
 enum class Role { Source, Relay, Destination, Observer };
-enum class Mode { Basic, TrickleNoSuppression, Trickle, NeighborStatus };
+enum class Mode { Basic, TrickleNoSuppression, Trickle, NeighborStatus, Mpl };
 
 bool usesTrickle(Mode mode) { return mode != Mode::Basic; }
-bool suppressionEnabled(Mode mode) { return mode == Mode::Trickle; }
+bool suppressionEnabled(Mode mode) { return mode == Mode::Trickle || mode == Mode::Mpl; }
 
 struct NodeConfig {
   String nodeId = "esp32-unconfigured";
@@ -92,6 +93,9 @@ String serialBuffer;
 ObservationTracker observationTracker(kDefaultRxBurstGapMs);
 NeighborController neighbors;
 NeighborStatusSchedule statusSchedule;
+MplScheduler mpl;
+const MplEvent* mplEvent=nullptr;
+void emitMplEvent(const MplEvent& event);
 uint32_t incarnation = 0, transportSequence = 0, trialScope = 0, nextStatusAt = 0;
 bool rxParticipation = true, txParticipation = true;
 bool adaptiveStatus() { return config.mode==Mode::NeighborStatus && neighbors.parameters.adaptive(); }
@@ -100,12 +104,17 @@ bool allObservedHave(uint32_t now) {
   return scheduler.hasPacket && std::string(neighbors.decision(scheduler.packet,now,false))=="ALL_OBSERVED_HAVE";
 }
 void syncStatus(uint32_t now) {
+  if(config.mode==Mode::Mpl) {
+    mpl.sync(scheduler.hasPacket ? std::vector<Packet>{scheduler.packet} : std::vector<Packet>{},now);
+    return;
+  }
   if(!adaptiveStatus()) return;
   statusSchedule.syncInventory(scheduler.hasPacket ? std::vector<std::string>{stateIdentity(scheduler.packet)} : std::vector<std::string>{},now,statusJitter());
   statusSchedule.stable(now,allObservedHave(now),statusJitter());
   nextStatusAt=statusSchedule.nextAt;
 }
 void restartStatus() {
+  if(config.mode==Mode::Mpl) { mpl.discover(millis());return; }
   nextStatusAt=millis()+1000+statusJitter();
   if(adaptiveStatus()) {
     statusSchedule.parameters=neighbors.parameters;
@@ -155,6 +164,7 @@ const char* roleName(Role role) {
 }
 
 const char* modeName(Mode mode) {
+  if(mode==Mode::Mpl) return "trickle_mpl";
   if (mode == Mode::NeighborStatus) return "trickle_neighbor_status";
   if (mode == Mode::TrickleNoSuppression) return "trickle_no_suppression";
   return mode == Mode::Trickle ? "trickle" : "basic_flooding";
@@ -194,6 +204,20 @@ void emit(const char* eventType, const Packet* packet = nullptr,
   document["trial_id"] = config.trialId;
   document["mode"] = modeName(config.mode);
   document["role"] = roleName(config.role);
+  if(config.mode==Mode::Mpl) document["scheduler_semantics"]=kMplSemantics;
+  if(mplEvent) {
+    const auto& v=*mplEvent;
+    document["timer_kind"]=v.kind;document["timer_key"]=v.key;
+    document["interval_ms"]=v.interval;document["interval_started_at_monotonic_ms"]=v.start;
+    document["transmit_at_monotonic_ms"]=v.transmit;document["interval_end_at_monotonic_ms"]=v.end;
+    document["consistency_count"]=v.c;document["k"]=v.k;document["expiration_count"]=v.e;
+    document["expiration_limit"]=v.limit;document["generation"]=v.generation;document["active"]=v.active;
+    document["override"]=v.overrideUsed;document["inventory_generation"]=mpl.inventoryGeneration;
+    if(v.retained) document["buffer_retained"]=true;
+    if(v.peer) {document["peer_id"]=v.peer;document["transmitter_id"]=v.peer;document["peer_boot"]=v.peerBoot;
+      document["budget_used"]=v.budget;document["budget_limit"]=v.budgetLimit;document["episode_until"]=v.episodeUntil;}
+    if(v.physical) document["physical_received_monotonic_ms"]=v.physical;
+  }
   if(config.mode==Mode::NeighborStatus) {
     document["neighbor_status_policy"]=neighbors.parameters.policy;
     if(adaptiveStatus()) document["status_reason"]=statusSchedule.reason;
@@ -305,6 +329,12 @@ void respond(const String& command, const String& commandId, bool ok,
   if (serialOutputMutex != nullptr) xSemaphoreGive(serialOutputMutex);
 }
 
+void emitMplEvent(const MplEvent& event) {
+  mplEvent=&event;
+  emit(event.event.c_str(),nullptr,event.reason.c_str(),0,String(),String(),&event.now);
+  mplEvent=nullptr;
+}
+
 Role parseRole(const String& value) {
   if (value == "SOURCE") return Role::Source;
   if (value == "RELAY") return Role::Relay;
@@ -313,6 +343,7 @@ Role parseRole(const String& value) {
 }
 
 Mode parseMode(const String& value) {
+  if(value=="trickle_mpl") return Mode::Mpl;
   if (value == "trickle_neighbor_status") return Mode::NeighborStatus;
   if (value == "trickle_no_suppression") return Mode::TrickleNoSuppression;
   return value == "basic" || value == "basic_flooding" ? Mode::Basic
@@ -401,6 +432,7 @@ void scheduleNewState(const char* reason) {
   scheduler.firstAdvertiseStarted = false;
   if (config.mode==Mode::NeighborStatus) emit("INITIAL_FORWARD_PENDING",&scheduler.packet);
   const uint32_t now = millis();
+  if(config.mode==Mode::Mpl) {syncStatus(now);return;}
   scheduler.intervalMs = kIminMs;
   if (usesTrickle(config.mode)) {
     chooseTrickleTransmit(now, reason);
@@ -574,6 +606,7 @@ void processFrame(const ReceivedPacket& rx) {
   const String observation=(config.nodeId+"|"+String(identity.c_str()));
   const uint32_t at=rx.receivedAt;
   const bool discovered=!neighbors.known(f.transmitter);
+  if(config.mode==Mode::Mpl && f.status) {syncStatus(millis());mpl.receive(f,at,millis());}
   if (config.mode==Mode::NeighborStatus && neighbors.observe(f,at,millis())) {
     if(adaptiveStatus() && neighbors.peerChanged) statusSchedule.peerChanged(millis(),statusJitter());
     if(f.status && scheduler.hasPacket) neighbors.requestMissingPeer(f.transmitter,scheduler.packet,millis());
@@ -611,11 +644,12 @@ void processFrame(const ReceivedPacket& rx) {
   const bool same=scheduler.hasPacket && stateIdentity(p)==stateIdentity(scheduler.packet);
   if(same) {
     emit("BLE_PACKET_DUPLICATE",&p,nullptr,rx.rssi,observation);
-    if(usesTrickle(config.mode) && f.transmitter!=p.senderCrc && !due(at,scheduler.intervalEndAt) && due(at,scheduler.intervalStartedAt)) {
+    if(usesTrickle(config.mode) && config.mode!=Mode::Mpl && f.transmitter!=p.senderCrc && !due(at,scheduler.intervalEndAt) && due(at,scheduler.intervalStartedAt)) {
       scheduler.consistencyCount++;
       emit("TRICKLE_CONSISTENT_HEARD",&p,nullptr,0,observation);
     }
   } else if(config.role!=Role::Source) storeForRelay(p,"GRAPH_NEW_STATE",&at);
+  if(config.mode==Mode::Mpl) {syncStatus(millis());mpl.receive(f,at,millis(),!same);}
   eventFrame=nullptr;
 }
 
@@ -640,8 +674,10 @@ void drainReceivedPackets() {
 
 void startBurst() {
   if (!scheduler.hasPacket || advertising == nullptr) return;
+  const auto mplKey=stateIdentity(scheduler.packet);
+  const uint32_t mplToken=config.mode==Mode::Mpl ? mpl.data.at(mplKey).generation : 0;
   // Recheck after scheduler logging; its serial output can cross an interval end.
-  if (usesTrickle(config.mode) &&
+  if (usesTrickle(config.mode) && config.mode!=Mode::Mpl &&
       (scheduler.waitingIntervalEnd ||
        !trickleTransmitDue(millis(), scheduler.intervalStartedAt,
                            scheduler.intervalMs, scheduler.transmitAt))) {
@@ -674,6 +710,7 @@ void startBurst() {
   if(config.neighborProfile) emit("DATA_BURST_REQUESTED",&scheduler.packet,nullptr,0,String(),scheduler.burstId);
 
   if (!pauseScanner()) {
+    if(config.mode==Mode::Mpl) {auto& t=mpl.data.at(stateIdentity(scheduler.packet));mpl.dataResult(t.key,t.generation,millis(),false);}
     scheduler.transmitAt = millis() + kNativeStartRetryMs;
     emit("ADVERTISE_BURST_FAILED", &scheduler.packet, "SCAN_STOP_FAILED", 0,
          String(), scheduler.burstId);
@@ -684,7 +721,15 @@ void startBurst() {
     eventFrame=nullptr;
     return;
   }
+  if(config.mode==Mode::Mpl) {
+    auto& t=mpl.data.at(mplKey);
+    t.advance(millis());
+    if(t.generation!=mplToken || !t.pending || !t.active) {resumeScanner();eventFrame=nullptr;return;}
+    t.log("NATIVE_REQUESTED",millis());
+    if(due(millis(),t.end)) {t.advance(millis());resumeScanner();eventFrame=nullptr;return;}
+  }
   if (!(config.neighborProfile ? advertising->start(framed.data(),framed.size()) : advertising->start(payload))) {
+    if(config.mode==Mode::Mpl) {auto& t=mpl.data.at(stateIdentity(scheduler.packet));mpl.dataResult(t.key,t.generation,millis(),false);}
     resumeScanner();
     scheduler.transmitAt = millis() + kNativeStartRetryMs;
     emit("ADVERTISE_BURST_FAILED", &scheduler.packet, "NATIVE_START_FAILED",
@@ -698,6 +743,7 @@ void startBurst() {
   }
   scheduler.advertising = true;
   const uint32_t succeededAt = millis();
+  if(config.mode==Mode::Mpl) {auto& t=mpl.data.at(stateIdentity(scheduler.packet));mpl.dataResult(t.key,t.generation,succeededAt,true);}
   scheduler.burstEndsAt = succeededAt + kBurstMs;
   emit("ADVERTISE_BURST_STARTED", &scheduler.packet, nullptr, 0, String(),
        scheduler.burstId, &succeededAt);
@@ -753,6 +799,7 @@ void finishBurst() {
 }
 
 void startStatusBurst() {
+  const uint32_t mplToken=mpl.control.generation, inventoryToken=mpl.inventoryGeneration;
   activeFrame=NeighborFrame{}; activeFrame.status=true;
   activeFrame.transmitter=crc32(config.nodeId.c_str());
   const uint32_t oldBoot=incarnation;
@@ -765,18 +812,31 @@ void startStatusBurst() {
   std::vector<uint8_t> bytes;
   const auto& params=neighbors.parameters;
   const auto inventory=statusSchedule.inventory;
-  const char* statusReason=adaptiveStatus() ? statusSchedule.reason : "PERIODIC";
-  if(!adaptiveStatus()) nextStatusAt=millis()+params.statusPeriod+random(0,params.jitter+1);
+  const char* statusReason=config.mode==Mode::Mpl ? mpl.control.reason.c_str() : adaptiveStatus() ? statusSchedule.reason : "PERIODIC";
+  if(!adaptiveStatus() && config.mode!=Mode::Mpl) nextStatusAt=millis()+params.statusPeriod+random(0,params.jitter+1);
   if(!encodeFrame(activeFrame,bytes)) return;
   eventFrame=&activeFrame;
   scheduler.burstId=String(burstIdentity(activeFrame).c_str());
   emit("STATUS_BURST_REQUESTED",nullptr,statusReason,0,String(),scheduler.burstId);
-  if(!pauseScanner() || !advertising->start(bytes.data(),bytes.size())) {
+  if(config.mode==Mode::Mpl) {
+    mpl.control.advance(millis());
+    if(mpl.control.generation!=mplToken || !mpl.control.pending || !mpl.control.active) {eventFrame=nullptr;return;}
+    mpl.control.log("NATIVE_REQUESTED",millis());
+    if(due(millis(),mpl.control.end)) {mpl.control.advance(millis());eventFrame=nullptr;return;}
+  }
+  const bool paused=pauseScanner();
+  if(config.mode==Mode::Mpl && paused) {
+    mpl.control.advance(millis());
+    if(mpl.control.generation!=mplToken || !mpl.control.pending || !mpl.control.active) {resumeScanner();eventFrame=nullptr;return;}
+  }
+  if(!paused || !advertising->start(bytes.data(),bytes.size())) {
+    if(config.mode==Mode::Mpl) mpl.controlResult(mplToken,inventoryToken,millis(),false);
     if(adaptiveStatus()) { statusSchedule.failed(millis(),statusJitter());nextStatusAt=statusSchedule.nextAt; }
     resumeScanner(); emit("STATUS_BURST_FAILED",nullptr,"NATIVE_START_FAILED"); emit("SCANNER_RECOVERY_CHECK",nullptr,"FAILED"); eventFrame=nullptr; return;
   }
   scheduler.advertising=true; scheduler.statusAdvertising=true;
   const uint32_t now=millis(); scheduler.burstEndsAt=now+params.statusBurst;
+  if(config.mode==Mode::Mpl) mpl.controlResult(mplToken,inventoryToken,now,true);
   emit("STATUS_BURST_STARTED",nullptr,statusReason,0,String(),scheduler.burstId,&now);
   if(adaptiveStatus()) { statusSchedule.statusSucceeded(inventory,now,allObservedHave(now),statusJitter());nextStatusAt=statusSchedule.nextAt; }
   eventFrame=nullptr;
@@ -795,6 +855,17 @@ void tickScheduler() {
   }
   if (scheduler.advertising) {
     if (due(now, scheduler.burstEndsAt)) finishBurst();
+    return;
+  }
+  if(config.mode==Mode::Mpl) {
+    const auto key=scheduler.hasPacket ? stateIdentity(scheduler.packet) : std::string();
+    if(scheduler.hasPacket && mpl.dataDue(key,now)) {startBurst();return;}
+    bool slot=true;
+    if(scheduler.hasPacket) {
+      const auto& t=mpl.data.at(key);
+      slot=!t.active || (!due(now,t.nextAt()) && t.nextAt()-now>neighbors.parameters.statusBurst+250);
+    }
+    if(mpl.controlDue(now,slot)) startStatusBurst();
     return;
   }
   // Never occupy set 0 across an imminent DATA opportunity. Empty inventory still discovers peers.
@@ -889,6 +960,15 @@ void emitReadiness(const String& commandId) {
   document["transport_version"] = config.neighborProfile ? kNeighborProtocol : kProtocolVersion;
   document["data_frame_length"] = config.neighborProfile ? 39 : 17;
   document["neighbor_design_version"] = 1;
+  document["supported_scheduler_semantics"].to<JsonArray>().add(kMplSemantics);
+  if(config.neighborProfile) {
+    document["scheduler_semantics"]=preferences.getString("mplsem","");
+    if(preferences.getString("mplsem","")==kMplSemantics) {
+      document["buffer_retention"]="persistent_until_supersession_ack_admin";
+      auto params=document["mpl_parameters"].to<JsonObject>();
+      for(const auto& e:mpl.parameters.values) params[e.first]=e.second;
+    }
+  }
   if(config.neighborProfile) {
     document["transmitter_id"]=crc32(config.nodeId.c_str());
     document["scope"]=trialScope;
@@ -1000,7 +1080,7 @@ void handleCommand(const String& line) {
       return;
     }
     if (requestedMode != "trickle" && requestedMode != "basic" &&
-        requestedMode != "basic_flooding" && requestedMode != "trickle_no_suppression" && requestedMode != "trickle_neighbor_status") {
+        requestedMode != "basic_flooding" && requestedMode != "trickle_no_suppression" && requestedMode != "trickle_neighbor_status" && requestedMode != "trickle_mpl") {
       respond(command, commandId, false, "INVALID_MODE");
       return;
     }
@@ -1012,7 +1092,17 @@ void handleCommand(const String& line) {
     }
     const String requestedProfile=document["transport_profile"] | "legacy";
     if(requestedProfile!="legacy" && requestedProfile!="neighbor_graph_v1") { respond(command,commandId,false,"UNSUPPORTED_TRANSPORT_PROFILE");return; }
-    if(requestedMode=="trickle_neighbor_status" && requestedProfile!="neighbor_graph_v1") { respond(command,commandId,false,"NEIGHBOR_PROFILE_REQUIRED");return; }
+    if((requestedMode=="trickle_neighbor_status" || requestedMode=="trickle_mpl") && requestedProfile!="neighbor_graph_v1") { respond(command,commandId,false,"NEIGHBOR_PROFILE_REQUIRED");return; }
+    MplParameters candidateMpl;
+    const String semantics=document["scheduler_semantics"] | "";
+    if(requestedMode=="trickle_mpl" && semantics!=kMplSemantics) {respond(command,commandId,false,"MPL_SEMANTICS_REQUIRED");return;}
+    if(semantics==kMplSemantics) {
+      for(auto& entry:candidateMpl.values) {
+        if(!document[entry.first].is<uint32_t>()) {respond(command,commandId,false,"INVALID_MPL_PARAMETERS");return;}
+        entry.second=document[entry.first].as<uint32_t>();
+      }
+      if(!candidateMpl.valid()) {respond(command,commandId,false,"INVALID_MPL_PARAMETERS");return;}
+    }
     if(requestedProfile=="neighbor_graph_v1") {
       const String node=document["node_id"] | "";
       const auto ids=document["allowed_transmitters"].as<JsonArray>();
@@ -1037,6 +1127,13 @@ void handleCommand(const String& line) {
     config.hypothesis = String(document["hypothesis"] | "");
     config.role = parseRole(requestedRole);
     config.mode = parseMode(requestedMode);
+    mpl.parameters=candidateMpl;
+    preferences.putString("mplsem",semantics);
+    if(semantics==kMplSemantics) {
+      JsonDocument saved;
+      for(const auto& entry:mpl.parameters.values) saved[entry.first]=entry.second;
+      String serialized;serializeJson(saved,serialized);preferences.putString("mplparams",serialized);
+    }
     config.nodeLayer = document["node_layer"] | 0;
     config.expectedHopIn = document["expected_hop_in"] | 0;
     config.hopOut = document["hop_out"] | 0;
@@ -1085,10 +1182,14 @@ void handleCommand(const String& line) {
     config.trialId = String(document["trial_id"] | "");
     trialScope=crc32(config.trialId.c_str());
     neighbors.reset(trialScope);
+    if(config.mode==Mode::Mpl) {
+      mpl.random=[](uint32_t span){return static_cast<uint32_t>(random(0,span));};
+      mpl.emit=emitMplEvent;mpl.initialize(trialScope,millis());
+    }
     rxParticipation=txParticipation=true;
     if(config.neighborProfile) { preferences.putBool("nrx",true);preferences.putBool("ntx",true); }
     resumeScanner();
-    restartStatus();
+    if(config.mode!=Mode::Mpl) restartStatus();
     observationWindowOpen = true;
     if(config.neighborProfile) preferences.putBool("nwindow",true);
     persistConfig();
@@ -1117,7 +1218,7 @@ void handleCommand(const String& line) {
     if(config.neighborProfile) preferences.putBool("nrx",enabled);
     bool confirmed=true;
     if(command=="set_node_participation") { txParticipation=enabled; if(config.neighborProfile) preferences.putBool("ntx",enabled); if(!enabled) cancelActiveBurst("PARTICIPATION_DISABLED"); }
-    if(enabled) { resumeScanner(); confirmed=scanner && scanner->isScanning(); if(confirmed && adaptiveStatus()) restartStatus(); }
+    if(enabled) { resumeScanner(); confirmed=scanner && scanner->isScanning(); if(confirmed && (adaptiveStatus() || config.mode==Mode::Mpl)) restartStatus(); }
     else confirmed=pauseScanner();
     receiveEnabled.store(enabled && observationWindowOpen);
     emit(command=="set_rx_participation" ? "RX_PARTICIPATION_CHANGED" : "NODE_PARTICIPATION_CHANGED",nullptr,confirmed ? (enabled ? "ENABLED_CONFIRMED" : "DISABLED_CONFIRMED") : "FAILED");
@@ -1182,6 +1283,10 @@ void loadPersistentState() {
   config.hypothesis = preferences.getString("hyp", "");
   config.role = parseRole(preferences.getString("role", "OBSERVER"));
   config.mode = parseMode(preferences.getString("mode", "trickle"));
+  JsonDocument savedMpl;deserializeJson(savedMpl,preferences.getString("mplparams","{}"));
+  for(auto& e:mpl.parameters.values) if(savedMpl[e.first].is<uint32_t>()) e.second=savedMpl[e.first].as<uint32_t>();
+  mpl.random=[](uint32_t span){return static_cast<uint32_t>(random(0,span));};
+  mpl.emit=emitMplEvent;
   config.nodeLayer = preferences.getUChar("layer", 0);
   config.expectedHopIn = preferences.getUChar("hopin", 0);
   config.hopOut = preferences.getUChar("hopout", 0);
@@ -1200,6 +1305,7 @@ void loadPersistentState() {
     p.freshness=preferences.getUInt("nfresh",45000); p.jitter=preferences.getUInt("njitter",1500);
     p.resetCooldown=preferences.getUInt("ncool",8000); p.capacity=preferences.getUInt("ncap",16);
     trialScope=crc32(config.trialId.c_str()); neighbors.reset(trialScope);
+    if(config.mode==Mode::Mpl) mpl.initialize(trialScope,millis());
     rxParticipation=preferences.getBool("nrx",true);txParticipation=preferences.getBool("ntx",true);
     if(!rxParticipation) pauseScanner();
   }

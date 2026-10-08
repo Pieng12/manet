@@ -183,7 +183,10 @@ class ExperimentExportService {
       'trickle_imax_ms': session.trickleImaxMs,
       'trickle_imax_doublings': session.trickleImaxDoublings,
       'trickle_k': session.trickleK,
-      'suppression_enabled': session.forwardingMode == 'trickle',
+      'suppression_enabled': [
+        'trickle',
+        'trickle_mpl',
+      ].contains(session.forwardingMode),
       'sos_advertise_burst_ms': session.sosAdvertiseBurstMs,
       'trial_timeout_seconds': session.trialTimeoutSeconds,
       'session_code': session.sessionCode,

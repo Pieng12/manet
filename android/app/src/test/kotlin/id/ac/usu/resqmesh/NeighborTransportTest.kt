@@ -6,7 +6,7 @@ class NeighborTransportTest {
     @Test fun neighborRecoveryNeverStartsAnIndependentEvidenceOwner() {
         assertFalse(NeighborTransport.requiresSchedulerOwner(null))
         assertFalse(NeighborTransport.requiresSchedulerOwner(""))
-        for (mode in listOf("basic_flooding","trickle_no_suppression","trickle","trickle_neighbor_status")) {
+        for (mode in listOf("basic_flooding","trickle_no_suppression","trickle","trickle_neighbor_status","trickle_mpl")) {
             assertTrue(NeighborTransport.requiresSchedulerOwner("{\"mode\":\"$mode\",\"scope\":4}"))
         }
         assertTrue(NeighborTransport.requiresSchedulerOwner("corrupt-profile-retained-for-recovery"))

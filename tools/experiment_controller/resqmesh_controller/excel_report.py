@@ -321,7 +321,7 @@ def _method_parameter_rows(manifest: dict[str, Any]) -> list[dict[str, Any]]:
                 "SOS pertama langsung dapat dijadwalkan; pengulangan setelah burst selesai + jeda Basic + jitter"
             )
             row["parameter_notes"] = "Tidak memakai interval Trickle atau suppression berdasarkan c < k"
-        elif mode in {"trickle", "trickle_no_suppression"}:
+        elif mode in {"trickle", "trickle_no_suppression", "trickle_mpl"}:
             for field in ("basic_wait_ms", "jitter_min_ms", "jitter_max_ms"):
                 row[field] = "N/A"
             row["transmission_timing"] = (
@@ -335,6 +335,9 @@ def _method_parameter_rows(manifest: dict[str, Any]) -> list[dict[str, Any]]:
                 )
             else:
                 row["parameter_notes"] = "Transmisi hanya jika c < k pada waktu yang dipilih"
+            if mode == 'trickle_mpl':
+                row['parameter_notes']='DATA dan CONTROL Trickle; override terbatas untuk MISSING fresh, bukan UNKNOWN/HAVE'
+                row['termination']='Expiration menghentikan timer, bukan buffer; ACK/state baru/penghapusan administratif menghentikan retensi'
         if row.get("termination") == "ACK/newer state/admin deletion; no hard TTL/hop/count":
             row["termination"] = "ACK/state lebih baru/penghapusan administratif; tanpa batas keras TTL/hop/relay count"
         rows.append(row)

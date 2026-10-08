@@ -60,6 +60,10 @@ def validate_logs(events, manifest):
                             "check": check, "result": "FAIL" if bad else "PASS" if good else "INCONCLUSIVE",
                             "evidence": evidence or "Bukti wajib belum tersedia / kasus belum teramati",
                             "evidence_origin": "SYNTHETIC_FIXTURE_NOT_HARDWARE" if synthetic else "RECORDED_LOG_NOT_INDEPENDENT_RF_VERIFICATION"})
+        if record['mode'] == 'trickle_mpl':
+            from .mpl_validation import checks
+            for name, good, bad, evidence in checks(samples,manifest.get('mpl_parameters',{})):
+                put(name,good,bad,evidence)
         if record["mode"] == "trickle_neighbor_status":
             decisions = [e for e in samples if e.get("event_type") in {"NEIGHBOR_TX_ALLOWED", "NEIGHBOR_TX_SUPPRESSED"}
                          and all(isinstance(e.get(k), int) for k in ("have_count", "missing_count", "unknown_count"))]

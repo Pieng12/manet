@@ -15,6 +15,7 @@ from .controller import ExperimentController, TrialSpec
 from .config import ConfigError, _valid_research_build_id
 from .devices import DeviceError
 from .radio import radio_readiness_errors
+from . import mpl_config
 
 PROFILE = "neighbor_graph_v1"
 VERSION = "resqmesh-neighbor-v1"
@@ -68,8 +69,19 @@ def validate_neighbor_config(config: dict[str, Any]) -> None:
             errors.append(f"missing/duplicate {key}")
     if any(n.get("transport") != ("adb" if n.get("node_id") == SOURCE else "serial") for n in nodes):
         errors.append("source must be ADB, all targets serial")
-    if tuple(config.get("modes", METHODS)) != METHODS:
-        errors.append("all four methods required in canonical order; trial plan randomizes them")
+    if tuple(config.get("modes", mpl_config.methods(config))) != mpl_config.methods(config):
+        errors.append("required methods in canonical order; trial plan randomizes them")
+    if 'trickle_mpl' in config.get('modes',[]) and not mpl_config.enabled(config):
+        errors.append("MPL scheduler semantics required")
+    if mpl_config.enabled(config):
+        mpl_config.parameters(config)
+        if config.get('buffer_retention', 'persistent_until_supersession_ack_admin') != 'persistent_until_supersession_ack_admin':
+            errors.append('MPL timers must not delete persistent protocol buffers')
+        p = mpl_config.parameters(config)
+        if float(config.get('observation_window_seconds',0)) * 1000 < float(config.get('perturbation_delay_seconds',30))*1000 + p['mpl_discovery_jitter_ms'] + p['mpl_control_imin_ms'] + p['mpl_data_imin_ms']:
+            errors.append('MPL discovery and first repair cannot fit recovery window')
+        if set(config.get('scenarios',[])) != set(SCENARIOS):
+            errors.append('MPL profile requires all three scenarios')
     scenarios = config.get("scenarios", ["S0_MAIN"])
     if not scenarios or len(scenarios) != len(set(scenarios)) or not set(scenarios) <= set(SCENARIOS):
         errors.append("invalid scenarios")
@@ -124,6 +136,9 @@ def neighbor_fingerprint(config: dict[str, Any]) -> str:
         parameters.pop("neighbor_status_policy")
     relevant.update(transport_version=VERSION, design_version=1, measurement_version=1, graph=EDGES,
                     neighbor_parameters=parameters)
+    if mpl_config.enabled(config):
+        relevant.update(scheduler_semantics=mpl_config.SEMANTICS,
+                        mpl_parameters=mpl_config.parameters(config),buffer_retention='persistent_until_supersession_ack_admin')
     return hashlib.sha256(json.dumps(relevant, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
@@ -131,7 +146,7 @@ def neighbor_plan(config: dict[str, Any]) -> list[TrialSpec]:
     rng = random.Random(int(config.get("random_seed", 231402095)))
     rows = []
     for block in range(1, int(config.get("valid_trials_per_condition", 15)) + 1):
-        combinations = [TrialSpec(m, s, block, block) for m in METHODS for s in config.get("scenarios", ["S0_MAIN"])]
+        combinations = [TrialSpec(m, s, block, block) for m in mpl_config.methods(config) for s in config.get("scenarios", ["S0_MAIN"])]
         rng.shuffle(combinations)
         rows.extend(combinations)
     return rows
@@ -200,7 +215,16 @@ def summarize_network(events: list[dict[str, Any]], record: dict[str, Any]) -> d
         clocks = record.get("clock_samples", {})
         bounds = [clocks.get(n, {}).get("uncertainty_ms") for n in (SOURCE, node)]
         uncertainty = sum(bounds) if all(v is not None for v in bounds) else None
+        on = [p for p in record.get('participation',[]) if p.get('node')==node and p.get('enabled') is True
+              and p.get('response',{}).get('confirmed_enabled') is True]
+        resumed = None
+        if on:
+            response=on[-1]['response']
+            resumed=response.get('timestamp_ms')
+            if resumed is not None: resumed += clocks.get(node,{}).get('offset_ms',0)
         latency.append({"message_key": message, "receiver": node, "first_rx_at_ms": t,
+                        'recovery_on_confirmed_at_ms':resumed,
+                        'recovery_delay_ms':t-resumed if resumed is not None and t>=resumed else None,
                         "e2e_latency_ms": None if source_at is None else t - source_at,
                         "clock_uncertainty_ms": uncertainty,
                         "clock_tolerance_ms": record.get("clock_tolerance_ms")})
@@ -211,6 +235,7 @@ def summarize_network(events: list[dict[str, Any]], record: dict[str, Any]) -> d
             "ldr_percent": 100 * (r-u) / r if r else None,
             "e2e_mean_ms": sum(values)/len(values) if values else None,
             "successful_pairs": u, "data_tx": len(data_tx), "control_tx": len(control_tx),
+            'failed_pairs':m*5-u,
             "network_overhead": len(data_tx)+len(control_tx), "setup_control_tx": len(setup_control),
             "setup_plus_window_tx": len(setup_control)+len(data_tx)+len(control_tx),
             "per_receiver": latency}
@@ -218,14 +243,14 @@ def summarize_network(events: list[dict[str, Any]], record: dict[str, Any]) -> d
 
 class NeighborExperimentController(ExperimentController):
     def __init__(self, config, nodes, output_dir, sleep=time.sleep):
-        normalized = {**config, "hypotheses": config.get("scenarios", ["S0_MAIN"]), "modes": list(METHODS)}
+        normalized = {**config, "hypotheses": config.get("scenarios", ["S0_MAIN"]), "modes": list(mpl_config.methods(config))}
         super().__init__(normalized, nodes, output_dir, sleep)
 
     def _load_manifest(self):
         value = super()._load_manifest()
         value.update(transport_profile=PROFILE, transport_version=VERSION, neighbor_design_version=1,
                      measurement_version="all-node-burst-v1", topology_basis="stable_transmitter_logical_graph_not_RF_isolation",
-                     target_valid_trials=4 * len(self.config["hypotheses"]) * self.valid_target,
+                     target_valid_trials=len(mpl_config.methods(self.config)) * len(self.config["hypotheses"]) * self.valid_target,
                      neighbor_scenarios=list(self.config["hypotheses"]),
                      graph=EDGES, target_node_ids=list(TARGETS), neighbor_parameters=neighbor_parameters(self.config),
                      neighbor_status_policy=self.config.get("neighbor_status_policy", "periodic_v1"))
@@ -240,6 +265,18 @@ class NeighborExperimentController(ExperimentController):
             "imin_ms": 8000, "imax_ms": 256000, "imax_doublings":5,
             "k": 1, "burst_ms": 2000,"c_suppression_enabled":False,"neighbor_suppression_enabled":True,
             **value["neighbor_parameters"]}}
+        if mpl_config.enabled(self.config):
+            value.update(scheduler_semantics=mpl_config.SEMANTICS,
+                         mpl_parameters=mpl_config.parameters(self.config),
+                         buffer_retention='persistent_until_supersession_ack_admin',
+                         experiment_methods=list(mpl_config.METHODS),
+                         rfc_claim='BLE adaptation, not full RFC 7731 interoperability')
+            value['method_parameters'] = {m:value['method_parameters'][m] for m in mpl_config.METHODS if m != 'trickle_mpl'}
+            value['method_parameters']['trickle_mpl'] = {
+                'scheduler':'trickle', 'suppression_enabled':True,
+                'imin_ms':8000,'imax_ms':256000,'imax_doublings':5,'k':1,'burst_ms':2000,
+                'suppression_basis':'c/k with bounded MISSING repair override',
+                **value['mpl_parameters']}
         return value
 
     def _node_topology(self, node, hypothesis):
@@ -316,6 +353,8 @@ class NeighborExperimentController(ExperimentController):
             errors.append("neighbor design version mismatch")
         if result.get("build_id") != self.config["android_build_id"]:
             errors.append("build mismatch")
+        if mpl_config.enabled(self.config) and mpl_config.SEMANTICS not in result.get('supported_scheduler_semantics',[]):
+            errors.append('MPL scheduler unavailable')
         if node.node_id == SOURCE and result.get("radio", {}).get("maximum_advertising_data_length", 0) < 90:
             errors.append("adapter cannot fit largest STATUS plus manufacturer header")
         if result.get("protocol_version") != "resqmesh-ble17-v1" or result.get("payload_length") != 17 or result.get("manufacturer_id") != 65535:
@@ -337,12 +376,15 @@ class NeighborExperimentController(ExperimentController):
         if after_reset and result.get("trial_id"):
             errors.append("trial still active after reset")
         if spec is not None and not after_reset:
-            expected = {"suppression_enabled": spec.mode == 'trickle', "trickle_imin_ms":8000,
+            expected = {"suppression_enabled": spec.mode in ('trickle','trickle_mpl'), "trickle_imin_ms":8000,
                         "trickle_imax_ms":256000,"trickle_k":1,"burst_duration_ms":2000,
                         "session_id":self.manifest['session_id'], "transmitter_id":stable_id(node.node_id),
                         "allowed_transmitters":adjacency(node.node_id),
                         "neighbor_parameters":neighbor_parameters(self.config),
                         "transport_version":VERSION, "data_frame_length":39}
+            if mpl_config.enabled(self.config):
+                expected['buffer_retention']='persistent_until_supersession_ack_admin'
+                expected.update(scheduler_semantics=mpl_config.SEMANTICS,mpl_parameters=mpl_config.parameters(self.config))
             for key, value in expected.items():
                 actual=result.get(key)
                 if key=='allowed_transmitters':
@@ -376,6 +418,8 @@ class NeighborExperimentController(ExperimentController):
                     "clock_offset_ms": self.clock_offsets.get(node.node_id, 0),
                     "clock_tolerance_ms": self.config["clock_tolerance_ms"],
                     **neighbor_parameters(self.config)}
+            if mpl_config.enabled(self.config):
+                args.update(scheduler_semantics=mpl_config.SEMANTICS,**mpl_config.parameters(self.config))
             result = node.command("configure_session", args)
             if result.get("ok") is not True:
                 raise DeviceError(f"configuration failed: {node.node_id}: {result}")
@@ -471,7 +515,7 @@ class NeighborExperimentController(ExperimentController):
 
     def smoke_report(self):
         rows = [{"mode": m, "hypothesis": s, "result": next((r["result"] for r in self.manifest["trials"].values() if r["mode"] == m and r["hypothesis"] == s), "MISSING")}
-                for m in METHODS for s in self.config["hypotheses"]]
+                for m in mpl_config.methods(self.config) for s in self.config["hypotheses"]]
         report = {"passed": all(r["result"] in {"SUCCESS", "FAILED_DELIVERY"} for r in rows),
                   "config_fingerprint": self.config_fingerprint, "session_id": self.manifest["session_id"], "conditions": rows}
         (self.output_dir/"smoke_report.json").write_text(json.dumps(report,indent=2),encoding="utf-8")
@@ -496,12 +540,14 @@ def merge_neighbor(input_dir: Path, output_dir: Path, manifest: dict[str, Any]):
         rows.append({"trial_id": trial_id, "method": record["mode"], "scenario": record["hypothesis"], "analysis_group": "utama" if record["hypothesis"] == "S0_MAIN" else "pendukung", "result": record["result"], "valid": record["result"] in {"SUCCESS","FAILED_DELIVERY"}, "invalid_reasons": record.get("invalid_reasons",[]), "block": record.get("block"), "observation_started_at_ms": record.get("observation_started_at_ms"), "observation_ended_at_ms": record.get("observation_ended_at_ms"), "config_fingerprint": record.get("config_fingerprint"), **{k:v for k,v in metrics.items() if k!="per_receiver"}})
         for target in TARGETS:
             pair = next((p for p in metrics.get("per_receiver", []) if p["receiver"] == target), {})
-            receivers.append({"trial_id": trial_id, "method": record["mode"], "scenario": record["hypothesis"], "valid": rows[-1]["valid"], "receiver": target, "received": bool(pair), "first_rx_at_ms":pair.get("first_rx_at_ms"), "e2e_latency_ms": pair.get("e2e_latency_ms"), "clock_uncertainty_ms": pair.get("clock_uncertainty_ms"), "clock_tolerance_ms": record.get("clock_tolerance_ms")})
+            receivers.append({"trial_id": trial_id, "method": record["mode"], "scenario": record["hypothesis"], "valid": rows[-1]["valid"], "receiver": target, "received": bool(pair), "first_rx_at_ms":pair.get("first_rx_at_ms"), "e2e_latency_ms": pair.get("e2e_latency_ms"), "clock_uncertainty_ms": pair.get("clock_uncertainty_ms"), "clock_tolerance_ms": record.get("clock_tolerance_ms"),
+                              'recovery_on_confirmed_at_ms':pair.get('recovery_on_confirmed_at_ms'),'recovery_delay_ms':pair.get('recovery_delay_ms')})
     scenarios = manifest.get("neighbor_scenarios", sorted({r["scenario"] for r in rows}))
     policy = manifest.get("neighbor_status_policy", "periodic_v1")
     for row in rows:
         row["neighbor_status_policy"] = policy if row["method"] == "trickle_neighbor_status" else "N/A"
-    summaries, stats = aggregate(rows, receivers, scenarios, METHODS)
+    methods = tuple(manifest.get('experiment_methods', METHODS))
+    summaries, stats = aggregate(rows, receivers, scenarios, methods)
     diagnostics = mechanism_counts(events, manifest["trials"])
     phy = [{"node_id": node, **phy_evidence(radio)} for node, radio in manifest.get("radio_readiness", {}).items()]
     validation = validate_logs(events, manifest)
@@ -516,8 +562,13 @@ def merge_neighbor(input_dir: Path, output_dir: Path, manifest: dict[str, Any]):
         {"metrik":"Setup + window","rumus":"setup_control_tx + network_overhead","catatan":"STATUS persiapan trial yang sama + window; bukan seluruh biaya siklus hidup"},
         {"metrik":"Statistik per trial","rumus":"Mean, median, SD sampel, min, max atas trial valid","catatan":"FAILED_DELIVERY termasuk; INVALID terpisah; nilai tidak terdefinisi kosong; SD kosong bila n terdefinisi < 2"},
         {"metrik":"Delay per trial vs pasangan","rumus":"e2e_mean_ms_trial_mean vs e2e_mean_ms","catatan":"Rata-rata trial tanpa bobot vs rata-rata semua pasangan sukses; bukan nilai nol untuk kegagalan"}])
-    _write_table(wb,"Trial Metrics",rows)
-    _write_table(wb,"Method Scenario Summary",summaries)
+    _write_table(wb,"Trial Metrics",rows, ('trial_id','method','scenario','block','result','valid',
+                 'dsr_percent','e2e_mean_ms','ldr_percent','network_overhead','data_tx','control_tx',
+                 'setup_control_tx','setup_plus_window_tx','M','N','R','U','failed_pairs','invalid_reasons'))
+    _write_table(wb,"Method Scenario Summary",summaries, ('method','scenario','analysis_group',
+                 'valid_trials','invalid_trials','failed_delivery_trials','dsr_percent','e2e_mean_ms',
+                 'ldr_percent','network_overhead_trial_mean','data_tx_trial_mean','control_tx_trial_mean',
+                 'setup_control_tx_trial_mean','setup_plus_window_tx_trial_mean','successful_pairs','failed_pairs'))
     pilot_review = []
     baseline = manifest.get("pilot_baseline", {})
     if policy == "adaptive_v2" and baseline:
@@ -536,8 +587,11 @@ def merge_neighbor(input_dir: Path, output_dir: Path, manifest: dict[str, Any]):
                 'dsr_percent':neighbor['dsr_percent'],'e2e_mean_ms':neighbor['e2e_mean_ms'],
                 'catatan':'Diagnostik terhadap satu trial lama per skenario; bukan bukti statistik atau aturan INVALID. Periksa DSR, delay dan pemulihan S1/S2.'})
         _write_table(wb,'Adaptive Pilot Review',pilot_review)
-    _write_table(wb,"Descriptive Statistics",stats)
-    _write_table(wb,"Mechanism Diagnostics",diagnostics)
+    _write_table(wb,"Descriptive Statistics",stats, ('method','scenario','metric','label','unit',
+                 'valid_trials','invalid_trials','defined_trials','mean','median','sample_sd','min','max'))
+    _write_table(wb,"Mechanism Diagnostics",diagnostics, ('trial_id','method','scenario','basis',
+                 'mpl_allowed','mpl_data_suppressed','mpl_control_suppressed','mpl_missed',
+                 'mpl_repair_reset','mpl_repair_completed','mpl_timer_stopped','mpl_discovery'))
     reasons = []
     for trial_id in manifest["trials"]:
         scoped = [e for e in events if e.get("trial_id") == trial_id and e.get("event_type") in {"STATUS_BURST_REQUESTED", "STATUS_BURST_STARTED", "STATUS_BURST_FAILED", "STATUS_COALESCED_WITH_DATA"}]
@@ -548,8 +602,12 @@ def merge_neighbor(input_dir: Path, output_dir: Path, manifest: dict[str, Any]):
     _write_table(wb,"STATUS Diagnostics",reasons)
     _write_table(wb,"PHY Evidence",phy)
     _write_table(wb,"Log Validation",validation)
-    _write_table(wb,"Receivers",receivers)
-    _write_table(wb,"All Events",events)
+    _write_table(wb,"Receivers",receivers, ('trial_id','method','scenario','receiver','valid','received',
+                 'e2e_latency_ms','first_rx_at_ms','recovery_on_confirmed_at_ms','recovery_delay_ms',
+                 'clock_uncertainty_ms','clock_tolerance_ms'))
+    _write_table(wb,"All Events",events, ('session_id','trial_id','node_id','event_sequence',
+                 'event_type','timestamp_ms','monotonic_ms','message_key','state_identity','scope',
+                 'transmitter_id','boot_id','transmission_sequence'))
     _write_table(wb,"Participation",[{"trial_id":trial_id,**p} for trial_id, record in manifest["trials"].items() for p in record.get("participation",[])])
     from .excel_report import _method_parameter_rows
     parameters = _method_parameter_rows(manifest)
@@ -563,13 +621,25 @@ def merge_neighbor(input_dir: Path, output_dir: Path, manifest: dict[str, Any]):
             row.update(manifest.get("neighbor_parameters", {}))
             row['neighbor_status_policy'] = policy
             row['status_notes'] = 'Discovery 1 detik + jitter; DATA sukses menggantikan pengumuman state yang sama; retry inventory kosong tidak berhenti' if policy == 'adaptive_v2' else 'STATUS periodik; kebijakan lama'
-    _write_table(wb,"Method Parameters",parameters)
+    _write_table(wb,"Method Parameters",parameters, ('mode','scheduler','suppression_enabled',
+                 'imin_ms','imax_ms','imax_doublings','k','burst_ms','basic_wait_ms',
+                 'jitter_min_ms','jitter_max_ms','transmission_timing','parameter_notes','termination'))
     _write_table(wb,"Invalid Trials",[r for r in rows if r["result"]=="INVALID"])
-    chart_paths = write_charts(output_dir/"charts", summaries, stats, scenarios, METHODS, manifest.get("synthetic_data") is True)
+    mpl_events=[]
+    if mpl_config.enabled(manifest):
+        from .neighbor_excel_layout import mpl_parameter_rows
+        _write_table(wb,'MPL Parameters',mpl_parameter_rows(manifest['mpl_parameters']),
+                     ('parameter','value','unit','penjelasan'))
+        mpl_events=[e for e in events if str(e.get('event_type','')).startswith('MPL_')]
+        _write_table(wb,'MPL Diagnostics',mpl_events)
+        (output_dir/'mpl_diagnostics.json').write_text(json.dumps(mpl_events,indent=2),encoding='utf-8')
+    chart_paths = write_charts(output_dir/"charts", summaries, stats, scenarios, methods, manifest.get("synthetic_data") is True)
     _write_table(wb,"Charts",[{"artifact":Path(p).name,"catatan":"Buka SVG; grafik delay menyertakan jumlah pasangan sukses dan DSR agregat","path":str(Path("charts")/Path(p).name)} for p in chart_paths])
     for row in range(2, len(chart_paths)+2):
         wb["Charts"].cell(row, 3).hyperlink = str(Path("charts")/Path(chart_paths[row-2]).name)
         wb["Charts"].cell(row, 3).style = "Hyperlink"
+    from .neighbor_excel_layout import decorate_neighbor_workbook
+    decorate_neighbor_workbook(wb, manifest, rows, summaries)
     path=output_dir/"resqmesh_neighbor_analysis.xlsx"; wb.save(path)
     (output_dir/"network_metrics.json").write_text(json.dumps(rows,indent=2),encoding="utf-8")
     (output_dir/"all_events.json").write_text(json.dumps(raw_events,indent=2),encoding="utf-8")
@@ -578,7 +648,7 @@ def merge_neighbor(input_dir: Path, output_dir: Path, manifest: dict[str, Any]):
     for name, data in (("descriptive_statistics", stats), ("mechanism_diagnostics", diagnostics), ("status_diagnostics", reasons), ("adaptive_pilot_review",pilot_review), ("phy_evidence", phy), ("log_validation", validation)):
         (output_dir/f"{name}.json").write_text(json.dumps(data,indent=2),encoding="utf-8")
     import csv
-    for name, data in (("trial_metrics",rows),("receivers",receivers),("all_events",events),("method_scenario_summary",summaries), ("descriptive_statistics",stats), ("mechanism_diagnostics",diagnostics), ("status_diagnostics",reasons), ("adaptive_pilot_review",pilot_review), ("phy_evidence",phy), ("log_validation",validation)):
+    for name, data in (("trial_metrics",rows),("receivers",receivers),("all_events",events),("method_scenario_summary",summaries), ("descriptive_statistics",stats), ("mechanism_diagnostics",diagnostics), ("status_diagnostics",reasons), ("adaptive_pilot_review",pilot_review), ("phy_evidence",phy), ("log_validation",validation), ('mpl_diagnostics',mpl_events)):
         with (output_dir/f"{name}.csv").open("w",newline="",encoding="utf-8-sig") as f:
             fields=list(dict.fromkeys(k for row in data for k in row)) or ["trial_id"]
             writer=csv.DictWriter(f,fieldnames=fields); writer.writeheader()

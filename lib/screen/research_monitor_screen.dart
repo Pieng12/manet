@@ -787,7 +787,7 @@ class _ResearchMonitorScreenState extends State<ResearchMonitorScreen>
 
   Future<void> _changeMode(String value) async {
     if (_session == null) {
-      if (value == 'trickle_neighbor_status') {
+      if (value == 'trickle_neighbor_status' || value == 'trickle_mpl') {
         ResqFeedback.error(
           context,
           'Konfigurasikan profil graph melalui controller terlebih dahulu',

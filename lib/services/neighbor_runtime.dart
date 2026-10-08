@@ -1,6 +1,6 @@
 import 'dart:convert';
 import 'dart:math';
-import 'dart:typed_data';
+import 'package:flutter/services.dart';
 
 import 'package:pkmproject/models/message_identity.dart';
 import 'package:pkmproject/models/sos_message.dart';
@@ -11,6 +11,7 @@ import 'package:pkmproject/services/experiment_logger.dart';
 import 'package:pkmproject/services/neighbor_status_controller.dart';
 import 'package:pkmproject/services/neighbor_status_schedule.dart';
 import 'package:pkmproject/services/neighbor_transport.dart';
+import 'package:pkmproject/services/mpl_scheduler.dart';
 import 'package:pkmproject/utils/hash_utils.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -27,8 +28,12 @@ class NeighborRuntime {
   int _boot = 0, _sequence = 0;
   int _nextStatusAt = 0;
   NeighborStatusSchedule? statusSchedule;
+  MplScheduler? mpl;
+  final List<Map<String, Object>> _mplEvents = [];
+  bool get mplEnabled => enabled && configuration!['mode'] == 'trickle_mpl';
   List<StateIdentity> _inventory = [];
-  int get nextStatusAt => statusSchedule?.nextAt ?? _nextStatusAt;
+  int get nextStatusAt =>
+      mpl?.nextControlAt ?? statusSchedule?.nextAt ?? _nextStatusAt;
   set nextStatusAt(int value) {
     if (statusSchedule != null) {
       statusSchedule!.nextAt = value;
@@ -40,10 +45,25 @@ class NeighborRuntime {
   int _jitter() => _rng.nextInt(controller!.parameters.discoveryJitterMs + 1);
   bool get enabled => configuration != null && configuration!['scope'] != null;
   bool get statusEnabled =>
-      enabled && configuration!['mode'] == 'trickle_neighbor_status';
+      enabled &&
+      (configuration!['mode'] == 'trickle_neighbor_status' || mplEnabled);
   int get transmitter => crc32(configuration!['node_id'] as String);
   int get scope => configuration!['scope'] as int;
   String get nodeId => configuration!['node_id'] as String;
+  Future<int?> physicalMonotonic(int? receivedElapsed) async {
+    if (receivedElapsed == null) return null;
+    try {
+      final nativeNow = await const MethodChannel(
+        'id.ac.usu.resqmesh/mesh',
+      ).invokeMethod<int>('getNativeBleElapsedRealtime');
+      if (nativeNow == null || receivedElapsed > nativeNow) return null;
+      return ExperimentClock.instance.monotonicTimeMs() -
+          (nativeNow - receivedElapsed);
+    } catch (_) {
+      return null;
+    }
+  }
+
   bool allows(NeighborFrame f) =>
       enabled &&
       f.scope == scope &&
@@ -72,6 +92,10 @@ class NeighborRuntime {
         throw ArgumentError('Invalid stable transmitter adjacency');
       }
       final parameters = NeighborParameters.fromMap(args)..validate();
+      if (args['mode'] == 'trickle_mpl' &&
+          args['scheduler_semantics'] != MplScheduler.semantics) {
+        throw ArgumentError('MPL scheduler semantics required');
+      }
       await prefs.setString(
         _key,
         jsonEncode({
@@ -80,6 +104,10 @@ class NeighborRuntime {
           'allowed_transmitters': allowed,
           'scope': null,
           ...parameters.toMap(),
+          if (args['scheduler_semantics'] == MplScheduler.semantics)
+            'scheduler_semantics': MplScheduler.semantics,
+          if (args['scheduler_semantics'] == MplScheduler.semantics)
+            ...MplParameters(args).values,
         }),
       );
     }
@@ -119,6 +147,8 @@ class NeighborRuntime {
         : Map<String, dynamic>.from(jsonDecode(raw) as Map);
     controller = null;
     statusSchedule = null;
+    mpl = null;
+    _mplEvents.clear();
     _inventory = [];
     if (!enabled) {
       _loaded = raw;
@@ -140,6 +170,18 @@ class NeighborRuntime {
     }
     _loaded = raw;
     _sequence = 0;
+    if (mplEnabled) {
+      if (cfg['scheduler_semantics'] != MplScheduler.semantics) {
+        throw StateError('MPL scheduler semantics required');
+      }
+      mpl = MplScheduler(
+        scope: scope,
+        parameters: MplParameters(cfg),
+        diagnostic: _mplEvents.add,
+      )..discover(ExperimentClock.instance.monotonicTimeMs());
+      controller = mpl!.neighbors;
+      return;
+    }
     if (statusEnabled && params.adaptive) {
       statusSchedule = NeighborStatusSchedule(params)
         ..start(ExperimentClock.instance.monotonicTimeMs(), _jitter());
@@ -200,6 +242,12 @@ class NeighborRuntime {
     int now, {
     Future<List<StateIdentity>> Function()? readInventory,
   }) async {
+    if (mpl != null) {
+      _inventory = await (readInventory ?? inventoryStates)();
+      mpl!.sync(_inventory, now);
+      await emitChanges(now);
+      return;
+    }
     if (statusSchedule == null) return;
     _inventory = await (readInventory ?? inventoryStates)();
     statusSchedule!.syncInventory(
@@ -215,6 +263,7 @@ class NeighborRuntime {
   }
 
   void restartStatus(int now) {
+    mpl?.discover(now);
     statusSchedule?.start(now, _jitter());
   }
 
@@ -244,7 +293,7 @@ class NeighborRuntime {
   void statusFailed(int now) => statusSchedule?.failed(now, _jitter());
 
   Future<NeighborFrame> statusFrame() async {
-    final states = statusSchedule == null
+    final states = statusSchedule == null && mpl == null
         ? await inventoryStates()
         : _inventory;
     return frame(
@@ -273,6 +322,15 @@ class NeighborRuntime {
   };
   Future<void> emitChanges(int nowMs) async {
     if (!statusEnabled) return;
+    final events = List<Map<String, Object>>.of(_mplEvents);
+    _mplEvents.clear();
+    for (final event in events) {
+      await log(
+        event['event'] as String,
+        monotonic: event['monotonic_ms'] as int? ?? nowMs,
+        detail: event,
+      );
+    }
     for (final change in controller!.takeChanges(nowMs)) {
       await log(change['event'] as String, monotonic: nowMs, detail: change);
     }
@@ -313,6 +371,7 @@ class NeighborRuntime {
         eventKey: observation == null ? null : '$event|$observation',
         detail: {
           ...detail,
+          if (mplEnabled) 'scheduler_semantics': MplScheduler.semantics,
           if (enabled) 'scope': scope,
           if (frame != null) ...fields(frame),
           if (statusEnabled)
