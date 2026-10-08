@@ -29,7 +29,7 @@ di [desain](trickle_mpl_design.md).
 
 ## Validator
 
-`validate-neighbor` menambahkan MPL_LISTEN_ONLY_AND_BOUNDS, C_K_DECISIONS,
+`validate-neighbor` menambahkan MPL_PARAMETERS_MATCH, LISTEN_ONLY_AND_BOUNDS, C_K_DECISIONS,
 OPPORTUNITY_ACCOUNTING, EXPIRATION_RETAINS_BUFFER, EXPIRATION_AND_DOUBLING,
 NATIVE_INSIDE_INTERVAL, PHYSICAL_FRESHNESS, REPAIR_BOUNDS,
 REPAIR_RESET_STORM, REPAIR_PEER_EVIDENCE dan SEMANTICS_PROVENANCE.
@@ -37,6 +37,15 @@ Interval menggunakan selisih wrap-safe; native alias bukan overhead baru.
 Log timer incomplete tidak dapat PASS. Expiry historis tetap observer-peer-
 episode tertentu; ESP tanpa sequence tidak dapat LOG_COMPLETENESS PASS.
 Tidak ada validator yang membuktikan RF tidak mengalami loss dari log saja.
+PARAMETERS_MATCH membandingkan k dan expiration_limit event dengan manifest,
+bukan mempercayai parameter yang event laporkan sendiri. Rantai interval yang
+selesai wajib mempunyai penerus, reset eksplisit yang cocok, atau TIMER_STOPPED
+pada batas expiration; penerus hilang menjadi INCONCLUSIVE.
+REPAIR_PEER_EVIDENCE memeriksa state repair terhadap isi inventory lengkap
+peer/incarnation/frame yang sama, termasuk timestamp baru, ACK dan prioritas
+status. Jika inventory membuktikan HAVE, hasil FAIL; isi inventory hilang
+menjadi INCONCLUSIVE. ESP/Dart merekam inventory canonical sebagai array pada
+MPL_RX_CLASSIFIED. Log lama tanpa isi inventory tidak direkayasa menjadi PASS.
 
 ## Pemeriksaan Lokal
 
@@ -75,8 +84,10 @@ dependency/toolchain dipisahkan dari error/failure test.
 
 ## Hasil Lokal
 
-Pemeriksaan dijalankan pada 8 Oktober 2026, branch MPL, working tree belum
-di-commit. Ini hasil software lokal, bukan hasil perangkat fisik:
+Pemeriksaan implementasi awal dijalankan pada 8 Oktober 2026, branch MPL.
+Saat hasil berikut dicatat, working tree belum di-commit; perubahan tersebut
+kemudian masuk riwayat sampai commit `3141363`. Ini hasil software lokal lama,
+bukan hasil perangkat fisik atau bukti revisi episode repair berikutnya:
 
 | Pemeriksaan | Hasil aktual |
 | --- | --- |
@@ -99,11 +110,11 @@ CONFIG_BT_NIMBLE_TRANSPORT_EVT_SIZE pada dependency NimBLE, dan Windows long
 paths nonaktif. Warning bukan failure test, tetapi bukan bukti kestabilan RF.
 Tidak mengubah dependency atau registry Windows untuk menghilangkan warning.
 
-Artifact final: `build/neighbor-b848eb5f59da-20261008-172423-310/`.
+Artifact implementasi awal: `build/neighbor-b848eb5f59da-20261008-172423-310/`.
 Build ID `b848eb5f59da` diperiksa langsung pada kernel debug APK dan binary
 firmware. Source SHA pada build_manifest.json cocok dengan FingerprintOnly
 setelah build selesai. Artifact sebelum build ID ini bukan pasangan final
-pekerjaan ini; arsipnya tetap dibiarkan, tidak dihapus.
+implementasi awal; bukan artifact revisi repair. Arsip tetap dibiarkan, tidak dihapus.
 
 | Artifact | SHA256 |
 | --- | --- |
@@ -115,9 +126,81 @@ build_manifest.json. Tidak ada install, flashing, atau batch perangkat fisik
 yang dijalankan dalam pekerjaan ini. Pengurangan overhead, DSR/recovery nyata
 dan PHY on-air tetap harus diverifikasi melalui acceptance fisik.
 
-## File Yang Diubah Atau Ditambahkan
+## Revisi Episode Repair Dan Validator
 
-Daftar pekerjaan lokal pada branch MPL, tanpa commit/push:
+Audit terhadap source acuan `3141363` direproduksi pada 8 Oktober 2026:
+test inventory berubah gagal di Dart/C++, dan tiga test Python membuktikan
+false PASS untuk inventory sudah HAVE, k berbeda dari manifest, serta interval
+selesai tanpa penerus. Reproduksi S1 juga menghabiskan dua repair sebelum ON;
+STATUS dengan sequence baru saja tidak membukanya lagi.
+
+Perbaikan: incarnation persisten baru pada MPL participation OFF -> ON,
+episode berdasarkan inventory lengkap yang benar-benar berubah, dan bukti
+validator peer/state/frame serta parameter/interval yang lebih ketat.
+Pengulangan ON/sequence tidak memperbarui episode; partial/replay tidak dapat
+membuka repair. Overflow atau kegagalan aktivasi tidak melaporkan ON sukses.
+Buffer, scope, payload, scheduler pembanding dan rumus metrik tidak diubah.
+
+| Pemeriksaan ulang revisi | Hasil aktual |
+| --- | --- |
+| dart format --output=none --set-exit-if-changed . | PASS, 103 file, 0 perubahan |
+| flutter analyze | PASS, No issues found |
+| flutter test | PASS, 454 test |
+| Gradle test | PASS, debug 54, profile 50, release 50; failure/error 0 |
+| PlatformIO native | PASS, 44 kasus: MPL 16, neighbor 12, protocol 16 |
+| Python unittest discover -s tests | PASS, 166 test |
+| Build pasangan tools/build_neighbor.ps1 | PASS, APK debug dan firmware ESP32-C3 |
+| git diff --check | PASS |
+
+Test tambahan meliputi episode exhausted lalu activation baru, incarnation
+tersimpan, ON berulang, overflow, native ON gagal, inventory berubah,
+supersession/ACK/HAVE, bukti peer/boot/sequence berbeda, parameter k/expiration,
+interval terputus/reset/stop, dan ekspor inventory canonical tanpa mengubah raw.
+Log kurang lengkap menjadi INCONCLUSIVE; kontradiksi eksplisit menjadi FAIL.
+
+Revisi ini belum di-commit/push. Tidak melakukan install/flash, penghapusan
+dataset, smoke fisik atau pilot fisik. Untuk acceptance gunakan pasangan APK
+dan firmware revisi ini di semua node, config/session/output baru, kemudian
+smoke 9 kondisi dan pilot 27 trial sebelum membekukan pengujian utama135.
+Warning dependency/toolchain yang dicatat di atas masih ada.
+
+Artifact final revisi: `build/neighbor-9c0e2ddc5760-20261008-212536-974/`.
+Build ID `9c0e2ddc5760` ada di kernel APK dan binary firmware. Source SHA
+`9c0e2ddc57602829bfa10918488946cdb801107f224327d458dafb57c5cf113f`
+cocok antara manifest dan FingerprintOnly setelah build. Acuan Git di manifest
+tetap `3141363`, sementara build ID mencakup perubahan source belum di-commit.
+
+| Artifact revisi | SHA256 |
+| --- | --- |
+| app-debug.apk | 229f494736a9acb080158d0a5069f72d85837240791226e282f798bbf1e6d831 |
+| firmware.bin | ddbd7a6b86e2219817bbe729d0a737d3cd1961774c3848b465d2c3e3dca30bd1 |
+
+File revisi:
+
+```text
+android/app/src/main/kotlin/com/example/pkmproject/ResearchParticipation.kt
+android/app/src/test/kotlin/id/ac/usu/resqmesh/ResearchParticipationTest.kt
+lib/services/android_experiment_command_service.dart
+lib/services/neighbor_runtime.dart
+lib/services/mpl_scheduler.dart
+firmware/esp32c3/include/NeighborTransport.h
+firmware/esp32c3/include/MplScheduler.h
+firmware/esp32c3/src/NeighborTransport.cpp
+firmware/esp32c3/src/main.cpp
+firmware/esp32c3/test/test_mpl/test_main.cpp
+tools/experiment_controller/resqmesh_controller/mpl_validation.py
+tools/experiment_controller/tests/test_mpl_experiment.py
+test/android_experiment_command_service_test.dart
+test/mpl_advertiser_callback_test.dart
+test/mpl_scheduler_test.dart
+docs/trickle_mpl_design.md
+docs/trickle_mpl_validation.md
+```
+
+## File Implementasi Awal
+
+Daftar pekerjaan implementasi awal pada branch MPL, tanpa commit/push ketika
+daftar ini dicatat; bukan status Git terkini:
 
 ```text
 README.md

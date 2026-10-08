@@ -40,6 +40,10 @@ bool advanceBurstIdentity(uint32_t& incarnation,uint32_t& sequence) {
   else sequence++;
   return true;
 }
+bool advanceActivationIdentity(uint32_t& incarnation,uint32_t& sequence) {
+  if(!incarnation || incarnation==UINT32_MAX) return false;
+  ++incarnation;sequence=0;return true;
+}
 bool frameTimeValid(const NeighborFrame& f,uint64_t nowSeconds,uint32_t skewSeconds) {
   if(!epochValid(nowSeconds)) return false;
   if(!f.status) return f.packet.timestampSeconds<=nowSeconds+skewSeconds;

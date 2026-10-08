@@ -116,6 +116,29 @@ void expired_deficit_new_incarnation() {
   m.receive(summary(3,true),100,100);TEST_ASSERT_TRUE(m.deficit());m.tick(4101);TEST_ASSERT_FALSE(m.deficit());
   auto f=summary();f.boot=2;m.receive(f,4200,4200);TEST_ASSERT_FALSE(m.deficit());
 }
-int main(int,char**) {UNITY_BEGIN();RUN_TEST(expired_deficit_new_incarnation);RUN_TEST(upper_rng_and_late_callback);RUN_TEST(first_data_and_ambiguous_inventory);RUN_TEST(settled_late_join_branch);RUN_TEST(timer_rules);RUN_TEST(duplicate_freshness);RUN_TEST(inventory_classification);
+void inventory_change_renews_repair() {
+  MplScheduler m;init(m);m.sync({p()},0);m.receive(summary(30),100,100);
+  auto& t=m.data.at(stateIdentity(p()));
+  TEST_ASSERT_TRUE(m.dataDue(t.key,4000));m.dataResult(t.key,t.generation,4000,true);
+  m.tick(8100);TEST_ASSERT_TRUE(m.dataDue(t.key,t.transmit));m.dataResult(t.key,t.generation,t.transmit,true);
+  m.receive(summary(30,false,2),13000,13000);TEST_ASSERT_FALSE(m.repairProtected(t.key,13000));
+  auto changed=summary(30,false,3);changed.count=1;changed.inventory[0]=inventoryState(p(456));
+  m.receive(changed,14000,14000);TEST_ASSERT_TRUE(m.repairProtected(t.key,14000));
+}
+void activation_renews_exhausted_repair() {
+  MplScheduler m;init(m);m.sync({p()},0);auto d=summary(30);m.receive(d,100,100);
+  auto& t=m.data.at(stateIdentity(p()));
+  TEST_ASSERT_TRUE(m.dataDue(t.key,4000));m.dataResult(t.key,t.generation,4000,true);
+  m.tick(8100);TEST_ASSERT_TRUE(m.dataDue(t.key,t.transmit));m.dataResult(t.key,t.generation,t.transmit,true);
+  d.sequence=2;m.receive(d,30000,30000);TEST_ASSERT_FALSE(m.repairProtected(t.key,30000));
+  TEST_ASSERT_TRUE(advanceActivationIdentity(d.boot,d.sequence));TEST_ASSERT_EQUAL_UINT32(0,d.sequence);
+  TEST_ASSERT_TRUE(advanceBurstIdentity(d.boot,d.sequence));TEST_ASSERT_EQUAL_UINT32(1,d.sequence);
+  TEST_ASSERT_TRUE(m.receive(d,30100,30100));t.consistent(30200,30200);
+  TEST_ASSERT_TRUE(m.repairProtected(t.key,30200));TEST_ASSERT_TRUE(m.dataDue(t.key,t.transmit));
+  d.boot=1;d.sequence=99;TEST_ASSERT_FALSE(m.receive(d,35000,35000));
+  uint32_t boot=UINT32_MAX,seq=10;TEST_ASSERT_FALSE(advanceActivationIdentity(boot,seq));
+  TEST_ASSERT_EQUAL_UINT32(UINT32_MAX,boot);TEST_ASSERT_EQUAL_UINT32(10,seq);
+}
+int main(int,char**) {UNITY_BEGIN();RUN_TEST(activation_renews_exhausted_repair);RUN_TEST(inventory_change_renews_repair);RUN_TEST(expired_deficit_new_incarnation);RUN_TEST(upper_rng_and_late_callback);RUN_TEST(first_data_and_ambiguous_inventory);RUN_TEST(settled_late_join_branch);RUN_TEST(timer_rules);RUN_TEST(duplicate_freshness);RUN_TEST(inventory_classification);
  RUN_TEST(bounded_branch_repair);RUN_TEST(bootstrap_restart);RUN_TEST(retained_buffer);RUN_TEST(multi_peer_state_bounds);
  RUN_TEST(native_failure_generation);RUN_TEST(control_slot_and_wrap);RUN_TEST(replay_boot_partial_and_supersession);return UNITY_END();}

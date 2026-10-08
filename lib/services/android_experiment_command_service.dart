@@ -178,15 +178,33 @@ class AndroidExperimentCommandService {
     required bool rxOnly,
   }) async {
     final enabled = args['enabled'] == true;
+    final runtime = NeighborRuntime.instance;
+    await runtime.load();
     final result = await NativeBridgeService.setResearchParticipation(
       enabled,
       rxOnly: rxOnly,
     );
-    if (enabled && result['confirmed_enabled'] == true) {
-      NeighborRuntime.instance.restartStatus(_clock.monotonicTimeMs());
+    if (enabled &&
+        result['ok'] == true &&
+        result['confirmed_enabled'] == true) {
+      try {
+        await runtime.participationActivated(
+          _clock.monotonicTimeMs(),
+          reactivated: result['reactivated'] == true,
+        );
+        if (runtime.mplEnabled) result['local_boot_id'] = runtime.localBootId;
+      } catch (_) {
+        await NativeBridgeService.setResearchParticipation(
+          false,
+          rxOnly: false,
+        );
+        rethrow;
+      }
     }
     if (!rxOnly) {
-      if (enabled) {
+      if (enabled &&
+          result['ok'] == true &&
+          result['confirmed_enabled'] == true) {
         _startObservationWindow();
         await BleAdvertiserService().advertiseLatestOrStop();
       } else {

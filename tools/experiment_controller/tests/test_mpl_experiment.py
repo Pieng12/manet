@@ -34,10 +34,94 @@ def timer(kind='MPL_INTERVAL_STARTED',**overrides):
             'scheduler_semantics':SEMANTICS,'generation':1,'interval_ms':8000,
             'interval_started_at_monotonic_ms':1000,'transmit_at_monotonic_ms':5000,
             'interval_end_at_monotonic_ms':9000,'consistency_count':0,'k':1,
-            'expiration_count':0,'monotonic_ms':1000,**overrides}
+            'expiration_count':0,'expiration_limit':5,'monotonic_ms':1000,**overrides}
 
 
 class MplExperimentTest(unittest.TestCase):
+    def test_validator_rejects_claimed_missing_state_present_in_inventory(self):
+        target='123:456:1:0:0'
+        pending=timer('MPL_REPAIR_PENDING',peer_id=3,peer_boot=1)
+        rx=timer('MPL_RX_CLASSIFIED',peer_id=3,peer_boot=1,
+                 physical_received_monotonic_ms=1000,frame_type='status',
+                 snapshot_complete=True,inventory=[target])
+        self.assertTrue(next(r[2] for r in checks([rx,pending],DEFAULTS)
+                             if r[0]=='MPL_REPAIR_PEER_EVIDENCE'))
+
+    def test_validator_rejects_k_different_from_manifest(self):
+        decision=timer('MPL_TX_ALLOWED',k=99,consistency_count=1)
+        self.assertTrue(next(r[2] for r in checks([decision],DEFAULTS)
+                             if r[0]=='MPL_C_K_DECISIONS'))
+
+    def test_validator_cannot_pass_missing_interval_successor(self):
+        values=[timer(),timer('MPL_INTERVAL_ENDED',expiration_count=1)]
+        self.assertFalse(next(r[1] for r in checks(values,DEFAULTS)
+                              if r[0]=='MPL_EXPIRATION_AND_DOUBLING'))
+
+    def test_validator_inventory_supersession_and_missing_proof_are_conservative(self):
+        def result(inventory=None, **overrides):
+            proof=timer('MPL_RX_CLASSIFIED',peer_id=3,peer_boot=1,
+                        physical_received_monotonic_ms=1000,frame_type='status',
+                        snapshot_complete=True,transmission_sequence=2,**overrides)
+            if inventory is not None: proof['inventory']=inventory
+            repair=timer('MPL_REPAIR_PENDING',peer_id=3,peer_boot=1,transmission_sequence=2)
+            return next(r for r in checks([proof,repair],DEFAULTS) if r[0]=='MPL_REPAIR_PEER_EVIDENCE')
+        for have in ['123:456:1:0:0','123:457:1:0:0','123:456:0:0:0',
+                     '123:456:2:0:0','123:456:1:1:0']:
+            with self.subTest(have=have): self.assertTrue(result([have])[2])
+        for missing in [[],['456:999:1:0:0'],['123:455:2:1:0']]:
+            with self.subTest(missing=missing): self.assertTrue(result(missing)[1])
+        for absent in [None,['malformed'],['123:456:1:0:0','123:457:1:0:0']]:
+            with self.subTest(absent=absent): self.assertFalse(result(absent)[1])
+        self.assertTrue(result('')[1])
+        self.assertTrue(result('123:457:1:0:0')[2])
+
+    def test_validator_evidence_cannot_be_shared_between_episodes(self):
+        proof=timer('MPL_RX_CLASSIFIED',peer_id=3,peer_boot=1,physical_received_monotonic_ms=1000,
+                    frame_type='status',snapshot_complete=True,inventory=[],transmission_sequence=2)
+        repair=timer('MPL_REPAIR_PENDING',peer_id=3,peer_boot=1,transmission_sequence=2)
+        for missing in [{**repair,'peer_id':4},{**repair,'peer_boot':2},
+                        {**repair,'transmission_sequence':3}]:
+            values=[proof,repair,missing]
+            self.assertFalse(next(r[1] for r in checks(values,DEFAULTS) if r[0]=='MPL_REPAIR_PEER_EVIDENCE'))
+
+    def test_validator_interval_chain_success_reset_stop_and_wrong_doubling(self):
+        def result(values):
+            return next(r for r in checks(values,DEFAULTS) if r[0]=='MPL_EXPIRATION_AND_DOUBLING')
+        end=timer('MPL_INTERVAL_ENDED',expiration_count=1)
+        successor=timer(generation=2,interval_ms=16000,expiration_count=1,
+                        interval_started_at_monotonic_ms=9000,transmit_at_monotonic_ms=17000,
+                        interval_end_at_monotonic_ms=25000,monotonic_ms=9000)
+        self.assertTrue(result([timer(),end,successor])[1])
+        self.assertTrue(result([timer(),end,{**successor,'interval_ms':8000}])[2])
+        reset={**successor,'expiration_count':0,'interval_ms':8000,
+               'transmit_at_monotonic_ms':13000,'interval_end_at_monotonic_ms':17000}
+        self.assertFalse(result([timer(),end,reset])[1])
+        self.assertTrue(result([timer(),end,reset,{**reset,'event_type':'MPL_TIMER_RESTARTED'}])[1])
+        final_start=timer(expiration_count=4)
+        final_end=timer('MPL_INTERVAL_ENDED',expiration_count=5)
+        stop=timer('MPL_TIMER_STOPPED',expiration_count=5,active=False,
+                   reason='EXPIRATION_LIMIT',buffer_retained=True)
+        self.assertFalse(result([final_start,final_end])[1])
+        self.assertTrue(result([final_start,final_end,stop])[1])
+        for missing_field in ('active','reason'):
+            partial=dict(stop);partial.pop(missing_field)
+            verdict=result([final_start,final_end,partial])
+            self.assertFalse(verdict[1]);self.assertFalse(verdict[2])
+        self.assertTrue(result([final_start,final_end,{**stop,'active':True}])[2])
+        self.assertTrue(result([timer(),end,{**stop,'expiration_count':1}])[2])
+
+    def test_validator_timer_parameters_match_manifest_for_both_timer_kinds(self):
+        for kind in ('data','control'):
+            event=timer(timer_kind=kind,expiration_limit=DEFAULTS[f'mpl_{kind}_expirations'])
+            def result(value,params=DEFAULTS):
+                return next(r for r in checks([value],params) if r[0]=='MPL_PARAMETERS_MATCH')
+            self.assertTrue(result(event)[1])
+            self.assertTrue(result({**event,'k':99})[2])
+            self.assertTrue(result({**event,'expiration_limit':99})[2])
+            missing=dict(event);missing.pop('expiration_limit')
+            self.assertFalse(result(missing)[1])
+            self.assertFalse(result(event,{})[1])
+
     def test_balanced_main135_pilot27_smoke9_and_historical_profiles(self):
         for main,n in ((True,135),(False,27)):
             c=config(main);validate_config(c);plan=build_plan(c)
@@ -106,6 +190,11 @@ class MplExperimentTest(unittest.TestCase):
             ev('STATUS_BURST_STARTED',TARGETS[0],950),ev('STATUS_BURST_STARTED',TARGETS[0],1300,2),
             ev('MPL_TX_SUPPRESSED',TARGETS[0],1400,3)]
         events[-1].update(timer_kind='control',scheduler_semantics=SEMANTICS)
+        events.append({**ev('MPL_RX_CLASSIFIED',TARGETS[0],1500,4),
+                       'inventory':['123:456:1:0:0'], 'snapshot_complete':True,
+                       'frame_type':'status','peer_id':3,'peer_boot':2,
+                       'physical_received_monotonic_ms':900,'monotonic_ms':1000,
+                       'transmission_sequence':1,'scheduler_semantics':SEMANTICS})
         manifest={'session_id':'fixture','scheduler_semantics':SEMANTICS,'mpl_parameters':DEFAULTS,
                   'experiment_methods':list(METHODS),'neighbor_scenarios':['S0_MAIN'],
                   'synthetic_data':True,'trials':{'t1':{**record(),'mode':'trickle_mpl'}}}
@@ -119,6 +208,8 @@ class MplExperimentTest(unittest.TestCase):
             rows=json.loads((root/'merged/network_metrics.json').read_text())
             self.assertEqual((1,1,2,1,3),(rows[0]['data_tx'],rows[0]['control_tx'],rows[0]['network_overhead'],rows[0]['setup_control_tx'],rows[0]['setup_plus_window_tx']))
             self.assertEqual(events,json.loads((root/'merged/all_events.json').read_text()))
+            proof=json.loads((root/'merged/mpl_diagnostics.json').read_text())[-1]
+            self.assertEqual(['123:456:1:0:0'],proof['inventory'])
             self.assertTrue((root/'merged/mpl_diagnostics.csv').exists())
             self.assertEqual(4,wb['Method Scenario Summary'].max_row)
             headers=[c.value for c in wb['Trial Metrics'][1]]

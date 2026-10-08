@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pkmproject/config/mesh_config.dart';
 import 'package:pkmproject/database_schema.dart';
+import 'package:pkmproject/models/message_identity.dart';
 import 'package:pkmproject/models/sos_message.dart';
 import 'package:pkmproject/services/ble_advertiser_service.dart';
 import 'package:pkmproject/services/experiment_clock.dart';
@@ -134,6 +135,83 @@ void main() {
         .setMockMethodCallHandler(channel, null);
     await db.close();
   });
+
+  test(
+    'S1 activation renews exhausted repair without clearing durable state',
+    () async {
+      final first = await runtime.statusFrame();
+      final a = MplScheduler(scope: runtime.scope, random: ZeroRandom())
+        ..discover(0);
+      a.sync([message.stateIdentity], 0);
+      a.receive(first, 100, 100);
+      final t = a.data[message.stateIdentity.value]!;
+      expect(a.dataDue(t.key, 4000), true);
+      a.dataResult(t.key, t.generation, 4000, true);
+      a.tick(8100);
+      expect(a.dataDue(t.key, t.transmit), true);
+      a.dataResult(t.key, t.generation, t.transmit, true);
+      expect(a.repairProtected(t.key, 13000), false);
+      final unchanged = await runtime.statusFrame();
+      a.receive(unchanged, 30000, 30000);
+      expect(a.repairProtected(t.key, 30000), false);
+
+      final retained = StateIdentity(
+        messageKey: MessageKey(
+          senderCrc: 456,
+          protocolTimestampMs:
+              message.stateIdentity.messageKey.protocolTimestampMs,
+        ),
+        statusIndex: 1,
+        isAck: false,
+        fromServer: false,
+      );
+      runtime.mpl!.sync([retained], 30000);
+      await runtime.participationActivated(30100, reactivated: true);
+      expect(runtime.mpl!.buffer.containsKey(retained.value), true);
+      final activated = await runtime.frame(inventory: [retained]);
+      expect(activated.boot, first.boot + 1);
+      expect(activated.sequence, 1);
+      expect(
+        (await SharedPreferences.getInstance()).getInt('neighbor_incarnation'),
+        activated.boot,
+      );
+      a.receive(activated, 30100, 30100);
+      t.consistent(30200, 30200);
+      expect(t.c, 1);
+      expect(a.repairProtected(t.key, 30200), true);
+      expect(a.dataDue(t.key, t.transmit), true);
+      expect(a.receive(unchanged, 30300, 30300), false);
+    },
+  );
+
+  test(
+    'repeated confirmed ON does not change boot, sequence or discovery',
+    () async {
+      final first = await runtime.frame();
+      final generation = runtime.mpl!.control.generation;
+      await runtime.participationActivated(30000, reactivated: false);
+      final second = await runtime.frame();
+      expect(second.boot, first.boot);
+      expect(second.sequence, first.sequence + 1);
+      expect(runtime.mpl!.control.generation, generation);
+    },
+  );
+
+  test(
+    'activation incarnation overflow fails closed without wrap or discovery',
+    () async {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setInt('neighbor_incarnation', 0xffffffff);
+      final generation = runtime.mpl!.control.generation;
+      await expectLater(
+        runtime.participationActivated(30000, reactivated: true),
+        throwsStateError,
+      );
+      expect(prefs.getInt('neighbor_incarnation'), 0xffffffff);
+      expect(runtime.mpl!.control.generation, generation);
+      await expectLater(runtime.frame(), throwsStateError);
+    },
+  );
   for (final success in [false, true]) {
     test(
       'MPL CONTROL $success consumes bootstrap only after real native success',

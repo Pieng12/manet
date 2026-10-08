@@ -112,7 +112,7 @@ class MplScheduler {
   std::map<std::string,Packet> buffer;
   uint32_t scope=0,bootstrap=0,inventoryGeneration=0,probes=0,probeAt=0,lastNow=0;
   bool probeScheduled=false;
-  struct Repair {std::string state;uint32_t peer=0,boot=0,until=0,used=0,next=0,resets=0;bool scheduled=false,expiryReported=false;};
+  struct Repair {std::string state,inventorySignature;uint32_t peer=0,boot=0,until=0,used=0,next=0,resets=0;bool scheduled=false,expiryReported=false;};
   std::map<std::string,Repair> repairs;
   struct Demand {uint32_t peer=0,boot=0,until=0,next=0,resets=0;std::string signature;std::vector<InventoryState> offered;bool scheduled=false;};
   std::map<uint32_t,Demand> demands;
@@ -210,14 +210,19 @@ class MplScheduler {
       std::vector<std::string> signatures;
       for(size_t i=0;i<f.count;i++) {const auto& s=f.inventory[i];signatures.push_back(std::to_string(s.sender)+":"+std::to_string(s.seconds)+":"+std::to_string(s.flags));}
       std::sort(signatures.begin(),signatures.end());std::string signature;
-      for(const auto& s:signatures) signature+=s+"|";signature+="@"+std::to_string(inventoryGeneration);
+      for(const auto& s:signatures) signature+=s+"|";
+      const auto inventorySignature=signature;
+      signature+="@"+std::to_string(inventoryGeneration);
       auto old=demands.find(f.transmitter);
       if(old==demands.end() || old->second.boot!=f.boot || old->second.signature!=signature) {
         Demand d;d.peer=f.transmitter;d.boot=f.boot;d.signature=signature;d.until=now+parameters.get("repair_expiry_ms");d.offered=offered;demands[f.transmitter]=d;
       }
       for(const auto& key:missing) {
         const auto id=key+"|"+std::to_string(f.transmitter)+"|"+std::to_string(f.boot);
-        if(!repairs.count(id)) {Repair r;r.state=key;r.peer=f.transmitter;r.boot=f.boot;r.until=now+parameters.get("repair_expiry_ms");repairs.emplace(id,r);repairEvent("MPL_REPAIR_PENDING",r,now);}
+        if(!repairs.count(id) || repairs.at(id).inventorySignature!=inventorySignature) {
+          Repair r;r.state=key;r.peer=f.transmitter;r.boot=f.boot;r.until=now+parameters.get("repair_expiry_ms");
+          r.inventorySignature=inventorySignature;repairs[id]=r;repairEvent("MPL_REPAIR_PENDING",r,now);
+        }
       }
       tick(now);
     }

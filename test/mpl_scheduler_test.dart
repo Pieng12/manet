@@ -52,6 +52,31 @@ MplScheduler scheduler([
   diagnostic: events?.add,
 )..discover(0);
 void main() {
+  test('inventory change renews exhausted repair, sequence alone does not', () {
+    final m = scheduler();
+    m.sync([state], 0);
+    m.receive(status(peer: 30), 100, 100);
+    final t = m.data[state.value]!;
+    expect(m.dataDue(state.value, 4000), true);
+    m.dataResult(state.value, t.generation, 4000, true);
+    m.tick(8100);
+    expect(m.dataDue(state.value, t.transmit), true);
+    m.dataResult(state.value, t.generation, t.transmit, true);
+    expect(m.repairProtected(state.value, t.transmit), false);
+    m.receive(status(peer: 30, seq: 2), 13000, 13000);
+    expect(m.repairProtected(state.value, 13000), false);
+    final other = StateIdentity(
+      messageKey: MessageKey(
+        senderCrc: 456,
+        protocolTimestampMs: 1780272042000,
+      ),
+      statusIndex: 1,
+      isAck: false,
+      fromServer: false,
+    );
+    m.receive(status(peer: 30, seq: 3, states: [other]), 14000, 14000);
+    expect(m.repairProtected(state.value, 14000), true);
+  });
   test('stopped timers keep wakeups in the future in a long-lived runtime', () {
     final m = scheduler();
     m.sync([state], 0);

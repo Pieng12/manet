@@ -26,6 +26,7 @@ class NeighborRuntime {
   Map<String, dynamic>? configuration;
   NeighborStatusController? controller;
   int _boot = 0, _sequence = 0;
+  Future<void>? _activation;
   int _nextStatusAt = 0;
   NeighborStatusSchedule? statusSchedule;
   MplScheduler? mpl;
@@ -50,6 +51,7 @@ class NeighborRuntime {
   int get transmitter => crc32(configuration!['node_id'] as String);
   int get scope => configuration!['scope'] as int;
   String get nodeId => configuration!['node_id'] as String;
+  int get localBootId => _boot;
   Future<int?> physicalMonotonic(int? receivedElapsed) async {
     if (receivedElapsed == null) return null;
     try {
@@ -198,6 +200,10 @@ class NeighborRuntime {
     List<StateIdentity> inventory = const [],
     bool complete = true,
   }) async {
+    await _activation;
+    if (controller == null || _boot <= 0 || _boot > 0xffffffff) {
+      throw StateError('Transport identity unavailable');
+    }
     if (++_sequence > 0xffffffff) {
       final prefs = await SharedPreferences.getInstance();
       _boot++;
@@ -265,6 +271,43 @@ class NeighborRuntime {
   void restartStatus(int now) {
     mpl?.discover(now);
     statusSchedule?.start(now, _jitter());
+  }
+
+  Future<void> participationActivated(
+    int now, {
+    required bool reactivated,
+  }) async {
+    if (!mplEnabled) {
+      restartStatus(now);
+      return;
+    }
+    if (!reactivated) return;
+    _activation = _renewActivation(now);
+    try {
+      await _activation;
+    } finally {
+      _activation = null;
+    }
+  }
+
+  Future<void> _renewActivation(int now) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.reload();
+      final nextBoot =
+          max(_boot, prefs.getInt('neighbor_incarnation') ?? 0) + 1;
+      if (nextBoot > 0xffffffff) throw StateError('Incarnation exhausted');
+      if (!await prefs.setInt('neighbor_incarnation', nextBoot)) {
+        throw StateError('Incarnation persistence failed');
+      }
+      _boot = nextBoot;
+      _sequence = 0;
+      restartStatus(now);
+    } catch (_) {
+      controller = null;
+      _loaded = null;
+      rethrow;
+    }
   }
 
   Future<void> dataStarted(StateIdentity state, int now) async {
@@ -372,6 +415,7 @@ class NeighborRuntime {
         detail: {
           ...detail,
           if (mplEnabled) 'scheduler_semantics': MplScheduler.semantics,
+          if (mplEnabled) 'local_boot_id': _boot,
           if (enabled) 'scope': scope,
           if (frame != null) ...fields(frame),
           if (statusEnabled)

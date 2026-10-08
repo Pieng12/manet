@@ -21,12 +21,17 @@ void main() {
   var activated = 0;
   var observationStarts = 0;
   var observationStops = 0;
+  var participationOk = true;
+  var previousRx = true;
+  var previousTx = true;
 
   setUp(() async {
     SharedPreferences.setMockInitialValues({});
     activated = 0;
     observationStarts = 0;
     observationStops = 0;
+    participationOk = true;
+    previousRx = previousTx = true;
     sqfliteFfiInit();
     db = await databaseFactoryFfi.openDatabase(inMemoryDatabasePath);
     for (final sql in [
@@ -55,7 +60,22 @@ void main() {
             };
           }
           if (call.method == 'setResearchParticipation') {
-            return <String, Object?>{'ok': true, 'confirmed_enabled': true};
+            final args = Map<String, dynamic>.from(call.arguments as Map);
+            final enabled = args['enabled'] == true;
+            final rxOnly = args['rxOnly'] == true;
+            final reactivated =
+                participationOk &&
+                enabled &&
+                (!previousRx || (!rxOnly && !previousTx));
+            if (participationOk) {
+              previousRx = enabled;
+              if (!rxOnly) previousTx = enabled;
+            }
+            return <String, Object?>{
+              'ok': participationOk,
+              'confirmed_enabled': participationOk ? enabled : null,
+              'reactivated': reactivated,
+            };
           }
           return true;
         });
@@ -89,6 +109,65 @@ void main() {
         .setMockMethodCallHandler(channel, null);
     await db.close();
   });
+
+  test('MPL command OFF then ON renews identity only once', () async {
+    final runtime = NeighborRuntime.instance;
+    await runtime.configure({
+      'transport_profile': NeighborRuntime.profile,
+      'node_id': 'android-source',
+      'mode': 'trickle_mpl',
+      'allowed_transmitters': [3],
+      'scheduler_semantics': 'resqmesh-trickle-mpl-v1',
+    });
+    await runtime.startTrial('activation-test');
+    final before = await runtime.frame();
+    await commands.execute('set_rx_participation', {
+      'command_id': 'rx-off',
+      'enabled': false,
+    });
+    final on = await commands.execute('set_rx_participation', {
+      'command_id': 'rx-on',
+      'enabled': true,
+    });
+    expect(on['ok'], true);
+    expect(on['local_boot_id'], before.boot + 1);
+    final after = await runtime.frame();
+    expect(after.boot, before.boot + 1);
+    expect(after.sequence, 1);
+    await commands.execute('set_rx_participation', {
+      'command_id': 'rx-on-again',
+      'enabled': true,
+    });
+    expect((await runtime.frame()).boot, after.boot);
+    await runtime.endTrial();
+  });
+
+  test(
+    'failed native activation cannot restart MPL discovery or consume an incarnation',
+    () async {
+      final runtime = NeighborRuntime.instance;
+      await runtime.configure({
+        'transport_profile': NeighborRuntime.profile,
+        'node_id': 'android-source',
+        'mode': 'trickle_mpl',
+        'allowed_transmitters': [3],
+        'scheduler_semantics': 'resqmesh-trickle-mpl-v1',
+      });
+      await runtime.startTrial('failed-activation-test');
+      final before = await runtime.frame();
+      final generation = runtime.mpl!.control.generation;
+      previousRx = false;
+      participationOk = false;
+      final response = await commands.execute('set_rx_participation', {
+        'command_id': 'rx-on-failed',
+        'enabled': true,
+      });
+      expect(response['ok'], false);
+      expect(runtime.mpl!.control.generation, generation);
+      expect((await runtime.frame()).boot, before.boot);
+      await runtime.endTrial();
+    },
+  );
 
   Map<String, dynamic> configureArgs({bool mainExperiment = true}) => {
     'command_id': 'configure-1',

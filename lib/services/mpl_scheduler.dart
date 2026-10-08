@@ -216,8 +216,14 @@ class MplTimer {
 }
 
 class _Repair {
-  _Repair(this.state, this.peer, this.boot, this.until);
-  final String state;
+  _Repair(
+    this.state,
+    this.peer,
+    this.boot,
+    this.until,
+    this.inventorySignature,
+  );
+  final String state, inventorySignature;
   final int peer, boot, until;
   int used = 0, next = 0, resets = 0;
   bool expiryReported = false;
@@ -456,7 +462,7 @@ class MplScheduler {
       'transmission_sequence': frame.sequence,
       'frame_type': frame.type.name,
       'snapshot_complete': frame.complete,
-      'inventory': frame.inventory.map((s) => s.value).join('|'),
+      'inventory': frame.inventory.map((s) => s.value).toList(),
     });
     _repairs.removeWhere(
       (key, r) =>
@@ -518,23 +524,22 @@ class MplScheduler {
       for (final s in missing) {
         final key = '${s.value}|${frame.transmitter}|${frame.boot}';
         // An unchanged request with a new sequence is still the same bounded episode.
-        final isNew = !_repairs.containsKey(key);
-        _repairs.putIfAbsent(
-          key,
-          () => _Repair(
+        final isNew = _repairs[key]?.inventorySignature != sorted;
+        if (isNew) {
+          _repairs[key] = _Repair(
             s.value,
             frame.transmitter,
             frame.boot,
             now + parameters['repair_expiry_ms'],
-          ),
-        );
-        if (isNew) {
+            sorted,
+          );
           _emit({
             'event': 'MPL_REPAIR_PENDING',
             'timer_key': s.value,
             'monotonic_ms': now,
             'peer_id': frame.transmitter,
             'peer_boot': frame.boot,
+            'transmission_sequence': frame.sequence,
             'budget_used': 0,
             'budget_limit': parameters['repair_budget'],
             'episode_until': now + parameters['repair_expiry_ms'],

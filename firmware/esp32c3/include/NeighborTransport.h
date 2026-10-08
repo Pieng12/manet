@@ -24,6 +24,7 @@ bool decodeFrame(const uint8_t* bytes, size_t length, NeighborFrame& frame);
 InventoryState inventoryState(const Packet& packet);
 std::string burstIdentity(const NeighborFrame& frame);
 bool advanceBurstIdentity(uint32_t& incarnation, uint32_t& sequence);
+bool advanceActivationIdentity(uint32_t& incarnation, uint32_t& sequence);
 bool frameTimeValid(const NeighborFrame& frame, uint64_t nowSeconds, uint32_t skewSeconds=300);
 
 enum class Knowledge { Have, Missing, Unknown };

@@ -71,17 +71,28 @@ Lokal punya/peer kurang memicu repair; lokal kurang/peer punya memicu ringkasan
 deficit dan menunggu DATA asli. Partial, replay, salah scope, stale, ambigu
 tidak menjadi bukti konsisten lengkap. UNKNOWN bukan HAVE atau MISSING.
 
-Repair: bukti MISSING valid -> episode (scope,state,peer,boot) -> reset/wake
+Repair: bukti MISSING valid -> episode (scope,state,peer,boot,inventory) -> reset/wake
 DATA relevan -> maksimal dua override DATA sukses dan dua evaluasi reset
 berjeda -> HAVE peer yang sama, budget habis, supersession atau expiry.
 Snapshot identik dengan sequence baru tidak membuka episode tak terbatas.
 Perubahan inventory/boot nyata membentuk episode baru. Reset Imin tidak
 memindahkan t. Wake cooldown tidak bergantung pada datangnya frame baru.
+Inventory episode memakai urutan state yang dinormalisasi, bukan sequence
+STATUS atau generation inventory lokal. Snapshot partial/replay/stale tidak
+membuka episode baru.
 
 Discovery: trial start/scanner ON/node ON -> jitter -> dua CONTROL sukses
 terlindungi dari c/k; tiga retry native gagal per interval. Kehilangan seluruh
 bootstrap di radio tetap dapat menggagalkan recovery. Probe default nonaktif;
 opsional probe mempunyai interval dan jumlah maksimum, seluruhnya berbiaya.
+Pada MPL saja, transisi participation OFF -> ON memperbarui incarnation yang
+disimpan dan memulai sequence dari 1 pada frame berikutnya. Scanner OFF pada
+S1 tetap dapat mengirim STATUS lama; ketika scanner ON, incarnation baru
+membedakannya dari episode yang budget-nya habis sebelum scanner siap.
+Pengulangan ON tidak memperbarui incarnation atau timer discovery. Incarnation
+disimpan sebelum frame discovery baru; overflow/kegagalan simpan menghentikan
+aktivasi. Buffer SOS, scope, payload dan metode pembanding tidak di-reset.
+`local_boot_id` pada respons/event dan `peer_boot` pada bukti RX memudahkan audit.
 
 ## Parameter Kandidat
 

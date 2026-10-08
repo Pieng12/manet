@@ -204,7 +204,7 @@ void emit(const char* eventType, const Packet* packet = nullptr,
   document["trial_id"] = config.trialId;
   document["mode"] = modeName(config.mode);
   document["role"] = roleName(config.role);
-  if(config.mode==Mode::Mpl) document["scheduler_semantics"]=kMplSemantics;
+  if(config.mode==Mode::Mpl) {document["scheduler_semantics"]=kMplSemantics;document["local_boot_id"]=incarnation;}
   if(mplEvent) {
     const auto& v=*mplEvent;
     document["timer_kind"]=v.kind;document["timer_key"]=v.key;
@@ -217,6 +217,7 @@ void emit(const char* eventType, const Packet* packet = nullptr,
     if(v.peer) {document["peer_id"]=v.peer;document["transmitter_id"]=v.peer;document["peer_boot"]=v.peerBoot;
       document["budget_used"]=v.budget;document["budget_limit"]=v.budgetLimit;document["episode_until"]=v.episodeUntil;}
     if(v.physical) document["physical_received_monotonic_ms"]=v.physical;
+    if(v.event=="MPL_RX_CLASSIFIED") document["physical_received_monotonic_ms"]=v.physical;
   }
   if(config.mode==Mode::NeighborStatus) {
     document["neighbor_status_policy"]=neighbors.parameters.policy;
@@ -233,6 +234,15 @@ void emit(const char* eventType, const Packet* packet = nullptr,
       document["frame_type"] = eventFrame->status ? "status" : "data";
       document["inventory_count"] = eventFrame->count;
       document["snapshot_complete"] = eventFrame->complete;
+      if(config.mode==Mode::Mpl && eventFrame->status) {
+        auto inventory=document["inventory"].to<JsonArray>();
+        for(size_t i=0;i<eventFrame->count;++i) {
+          const auto& s=eventFrame->inventory[i];
+          Packet p;p.senderCrc=s.sender;p.timestampSeconds=s.seconds;
+          p.status=static_cast<Status>(s.flags&63);p.kind=(s.flags&128) ? PacketKind::Ack : PacketKind::Sos;
+          p.fromServer=(s.flags&64)!=0;inventory.add(stateIdentity(p));
+        }
+      }
     }
   }
   if (strncmp(eventType, "ADVERTISE_BURST_", 16) == 0 ||
@@ -317,6 +327,7 @@ void respond(const String& command, const String& commandId, bool ok,
     else document["confirmed_enabled"] = nullptr;
     document["rx_enabled"] = rxParticipation;
     document["tx_enabled"] = txParticipation;
+    if(config.mode==Mode::Mpl) document["local_boot_id"]=incarnation;
     document["native_monotonic_ms"] = millis();
     if(wallClockValid) document["timestamp_ms"] = wallTimeMs();
   }
@@ -1213,14 +1224,26 @@ void handleCommand(const String& line) {
   }
   if(command=="set_rx_participation" || command=="set_node_participation") {
     const bool enabled=document["enabled"] | false;
+    const bool reactivating=enabled && (!rxParticipation || (command=="set_node_participation" && !txParticipation));
     emit(command=="set_rx_participation" ? "RX_PARTICIPATION_REQUESTED" : "NODE_PARTICIPATION_REQUESTED",nullptr,enabled ? "ENABLE" : "DISABLE");
+    if(reactivating && config.mode==Mode::Mpl) {
+      auto nextBoot=incarnation,nextSequence=transportSequence;
+      if(!advanceActivationIdentity(nextBoot,nextSequence) || preferences.putUInt("incarnation",nextBoot)!=sizeof(uint32_t)) {
+        rxParticipation=txParticipation=false;receiveEnabled.store(false);
+        preferences.putBool("nrx",false);preferences.putBool("ntx",false);
+        cancelActiveBurst("ACTIVATION_IDENTITY_FAILED");pauseScanner();
+        respond(command,commandId,false,"ACTIVATION_IDENTITY_FAILED");return;
+      }
+      incarnation=nextBoot;transportSequence=nextSequence;
+    }
     rxParticipation=enabled;
     if(config.neighborProfile) preferences.putBool("nrx",enabled);
     bool confirmed=true;
     if(command=="set_node_participation") { txParticipation=enabled; if(config.neighborProfile) preferences.putBool("ntx",enabled); if(!enabled) cancelActiveBurst("PARTICIPATION_DISABLED"); }
-    if(enabled) { resumeScanner(); confirmed=scanner && scanner->isScanning(); if(confirmed && (adaptiveStatus() || config.mode==Mode::Mpl)) restartStatus(); }
+    if(enabled) { resumeScanner(); confirmed=scanner && scanner->isScanning(); if(confirmed && (adaptiveStatus() || (config.mode==Mode::Mpl && reactivating))) restartStatus(); }
     else confirmed=pauseScanner();
-    receiveEnabled.store(enabled && observationWindowOpen);
+    if(enabled && !confirmed) {rxParticipation=false;if(config.neighborProfile) preferences.putBool("nrx",false);}
+    receiveEnabled.store(enabled && confirmed && observationWindowOpen);
     emit(command=="set_rx_participation" ? "RX_PARTICIPATION_CHANGED" : "NODE_PARTICIPATION_CHANGED",nullptr,confirmed ? (enabled ? "ENABLED_CONFIRMED" : "DISABLED_CONFIRMED") : "FAILED");
     respond(command,commandId,confirmed,confirmed ? nullptr : "PARTICIPATION_NOT_CONFIRMED");
     return;
