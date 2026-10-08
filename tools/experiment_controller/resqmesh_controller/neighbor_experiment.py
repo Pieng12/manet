@@ -26,6 +26,23 @@ EDGES = ((SOURCE, TARGETS[0]), (SOURCE, TARGETS[1]), (TARGETS[0], TARGETS[2]),
          (TARGETS[1], TARGETS[2]), (TARGETS[0], TARGETS[3]), (TARGETS[3], TARGETS[4]))
 DEFAULTS = {"status_period_ms": 12000, "status_burst_ms": 500, "freshness_ms": 45000,
             "discovery_jitter_ms": 1500, "reset_cooldown_ms": 8000, "neighbor_capacity": 16}
+ADAPTIVE_DEFAULTS = {**DEFAULTS, "status_period_ms": 60000, "freshness_ms": 150000,
+                     "status_min_period_ms": 15000, "empty_retry_min_ms": 4000,
+                     "empty_retry_max_ms": 32000, "data_grace_ms": 10000}
+
+
+def neighbor_parameters(config: dict[str, Any]) -> dict[str, Any]:
+    policy = config.get("neighbor_status_policy", "periodic_v1")
+    if policy not in {"periodic_v1", "adaptive_v2"}:
+        raise ConfigError("unknown neighbor_status_policy")
+    overrides = config.get("neighbor_parameters", {})
+    defaults = ADAPTIVE_DEFAULTS if policy == "adaptive_v2" else DEFAULTS
+    if not isinstance(overrides, dict) or set(overrides) - set(defaults):
+        raise ConfigError("unknown neighbor parameter")
+    values = {**defaults, **overrides, "neighbor_status_policy": policy}
+    if any(type(v) is not int or v < 0 for k, v in values.items() if k != "neighbor_status_policy"):
+        raise ConfigError("neighbor parameters must be nonnegative integers")
+    return values
 
 
 def stable_id(node: str) -> int:
@@ -81,11 +98,19 @@ def validate_neighbor_config(config: dict[str, Any]) -> None:
             errors.append("new profile requires balanced randomized blocks")
         if int(config.get("clock_tolerance_ms", -1)) < 0:
             errors.append("clock tolerance required")
-        p = {**DEFAULTS, **config.get("neighbor_parameters", {})}
+        p = neighbor_parameters(config)
         if (p["status_period_ms"] < 1000 or not 250 <= p["status_burst_ms"] <= 2000 or
                 p["freshness_ms"] < p["status_period_ms"] * 2 or p["discovery_jitter_ms"] < 0 or
                 p["reset_cooldown_ms"] < 1000 or not 5 <= p["neighbor_capacity"] <= 64):
             errors.append("unsafe neighbor parameters")
+        if p["neighbor_status_policy"] == "adaptive_v2" and (
+                not 1000 <= p["status_min_period_ms"] <= p["status_period_ms"] or
+                not 1000 <= p["empty_retry_min_ms"] <= p["empty_retry_max_ms"] or
+                p["data_grace_ms"] < 1000 or
+                p["freshness_ms"] < 2 * (p["status_period_ms"] + p["discovery_jitter_ms"] + p["status_burst_ms"])):
+            errors.append("unsafe adaptive neighbor parameters")
+        if any(p[k] > 0x7fffffff // 4 for k in ("status_period_ms", "discovery_jitter_ms", "empty_retry_max_ms", "data_grace_ms") if k in p) or p["freshness_ms"] > 0x7fffffff:
+            errors.append("neighbor timer exceeds monotonic range")
     except (KeyError, ValueError, TypeError):
         errors.append("invalid duration/parameter")
     if errors:
@@ -94,8 +119,11 @@ def validate_neighbor_config(config: dict[str, Any]) -> None:
 
 def neighbor_fingerprint(config: dict[str, Any]) -> str:
     relevant = {k: v for k, v in config.items() if k not in {"session_id", "session_label", "valid_trials_per_condition", "trials_per_condition", "max_attempts_per_condition", "trial_order", "hypotheses"}}
+    parameters = neighbor_parameters(config)
+    if "neighbor_status_policy" not in config:
+        parameters.pop("neighbor_status_policy")
     relevant.update(transport_version=VERSION, design_version=1, measurement_version=1, graph=EDGES,
-                    neighbor_parameters={**DEFAULTS, **config.get("neighbor_parameters", {})})
+                    neighbor_parameters=parameters)
     return hashlib.sha256(json.dumps(relevant, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
@@ -199,10 +227,13 @@ class NeighborExperimentController(ExperimentController):
                      measurement_version="all-node-burst-v1", topology_basis="stable_transmitter_logical_graph_not_RF_isolation",
                      target_valid_trials=4 * len(self.config["hypotheses"]) * self.valid_target,
                      neighbor_scenarios=list(self.config["hypotheses"]),
-                     graph=EDGES, target_node_ids=list(TARGETS), neighbor_parameters={**DEFAULTS, **self.config.get("neighbor_parameters", {})})
+                     graph=EDGES, target_node_ids=list(TARGETS), neighbor_parameters=neighbor_parameters(self.config),
+                     neighbor_status_policy=self.config.get("neighbor_status_policy", "periodic_v1"))
         value["reporting_version"] = "neighbor-descriptive-v1"
         value["phy_claim_limit"] = "LE Coded; coding aktual UNKNOWN/UNVERIFIED kecuali ada bukti on-air; bukan otomatis S=8/125 kbps"
         value["cost_basis"] = "Burst logis berhasil dimulai; setup_plus_window_tx bukan seluruh biaya siklus hidup"
+        if self.config.get("pilot_baseline") is not None:
+            value["pilot_baseline"] = self.config["pilot_baseline"]
         from .config import METHOD_PARAMETERS
         value["method_parameters"] = {**METHOD_PARAMETERS, "trickle_neighbor_status": {
             "scheduler": "trickle", "suppression_basis": "fresh_observed_neighbor_inventory",
@@ -247,18 +278,30 @@ class NeighborExperimentController(ExperimentController):
 
     def synchronize_clocks(self, spec):
         samples={}
+        record=self.manifest['trials'].get(spec.trial_id,{})
+        attempts=record.setdefault('clock_sync_attempts',{})
         for node in self.nodes:
-            before=time.time_ns()/1_000_000
-            if hasattr(node,"host_clock_offset_ms"):
-                offset=float(node.host_clock_offset_ms())
+            node_attempts=attempts.setdefault(node.node_id,[])
+            # Retry only pre-trial measurement; never relax the bound or resync live data.
+            for attempt in range(1,4):
+                before=time.time_ns()/1_000_000
+                if hasattr(node,"host_clock_offset_ms"):
+                    offset=float(node.host_clock_offset_ms())
+                    after=time.time_ns()/1_000_000
+                else:
+                    response=node.command("clock_sync",{"command_id":self._command_id("clock",spec.trial_id,node.node_id,str(attempt)),"wall_time_ms":int(before)})
+                    if response.get("ok") is not True: raise DeviceError(f"clock sync failed: {node.node_id}")
+                    after=time.time_ns()/1_000_000
+                    offset=(after-before)/2
+                uncertainty=(after-before)/2+1
+                accepted=0 <= uncertainty <= self.config['clock_tolerance_ms'] and after >= before
+                node_attempts.append({'attempt':attempt,'offset_ms':offset,'uncertainty_ms':uncertainty,
+                                      'before_ms':before,'after_ms':after,'accepted':accepted})
+                if accepted:
+                    break
             else:
-                response=node.command("clock_sync",{"command_id":self._command_id("clock",spec.trial_id,node.node_id),"wall_time_ms":int(before)})
-                if response.get("ok") is not True: raise DeviceError(f"clock sync failed: {node.node_id}")
-                offset=(time.time_ns()/1_000_000-before)/2
-            after=time.time_ns()/1_000_000
-            uncertainty=(after-before)/2+1
-            if uncertainty > self.config['clock_tolerance_ms']:
-                raise DeviceError(f"clock uncertainty exceeds tolerance: {node.node_id}: {uncertainty:.1f}ms")
+                self._save_manifest()
+                raise DeviceError(f"clock uncertainty exceeds tolerance: {node.node_id}: {uncertainty:.1f}ms after 3 attempts")
             self.clock_offsets[node.node_id]=offset
             samples[node.node_id]={"offset_ms":offset,"uncertainty_ms":uncertainty,"before_ms":before,"after_ms":after}
         self.manifest['clock_sync']={"valid":True,"captured_at_ms":time.time_ns()//1_000_000,"offset_ms_by_node":self.clock_offsets,"samples":samples}
@@ -298,12 +341,14 @@ class NeighborExperimentController(ExperimentController):
                         "trickle_imax_ms":256000,"trickle_k":1,"burst_duration_ms":2000,
                         "session_id":self.manifest['session_id'], "transmitter_id":stable_id(node.node_id),
                         "allowed_transmitters":adjacency(node.node_id),
-                        "neighbor_parameters":{**DEFAULTS, **self.config.get('neighbor_parameters',{})},
+                        "neighbor_parameters":neighbor_parameters(self.config),
                         "transport_version":VERSION, "data_frame_length":39}
             for key, value in expected.items():
                 actual=result.get(key)
                 if key=='allowed_transmitters':
                     actual=sorted(actual or []);value=sorted(value)
+                if key=='neighbor_parameters' and isinstance(actual, dict):
+                    actual={"neighbor_status_policy":"periodic_v1", **actual}
                 if actual!=value: errors.append(f"{key} mismatch")
             if require_active_trial and result.get('scope')!=stable_id(self._device_trial_id(spec)):
                 errors.append('on-air trial scope mismatch')
@@ -330,7 +375,7 @@ class NeighborExperimentController(ExperimentController):
                     "allowed_transmitters": adjacency(node.node_id),
                     "clock_offset_ms": self.clock_offsets.get(node.node_id, 0),
                     "clock_tolerance_ms": self.config["clock_tolerance_ms"],
-                    **DEFAULTS, **self.config.get("neighbor_parameters", {})}
+                    **neighbor_parameters(self.config)}
             result = node.command("configure_session", args)
             if result.get("ok") is not True:
                 raise DeviceError(f"configuration failed: {node.node_id}: {result}")
@@ -453,6 +498,9 @@ def merge_neighbor(input_dir: Path, output_dir: Path, manifest: dict[str, Any]):
             pair = next((p for p in metrics.get("per_receiver", []) if p["receiver"] == target), {})
             receivers.append({"trial_id": trial_id, "method": record["mode"], "scenario": record["hypothesis"], "valid": rows[-1]["valid"], "receiver": target, "received": bool(pair), "first_rx_at_ms":pair.get("first_rx_at_ms"), "e2e_latency_ms": pair.get("e2e_latency_ms"), "clock_uncertainty_ms": pair.get("clock_uncertainty_ms"), "clock_tolerance_ms": record.get("clock_tolerance_ms")})
     scenarios = manifest.get("neighbor_scenarios", sorted({r["scenario"] for r in rows}))
+    policy = manifest.get("neighbor_status_policy", "periodic_v1")
+    for row in rows:
+        row["neighbor_status_policy"] = policy if row["method"] == "trickle_neighbor_status" else "N/A"
     summaries, stats = aggregate(rows, receivers, scenarios, METHODS)
     diagnostics = mechanism_counts(events, manifest["trials"])
     phy = [{"node_id": node, **phy_evidence(radio)} for node, radio in manifest.get("radio_readiness", {}).items()]
@@ -470,8 +518,34 @@ def merge_neighbor(input_dir: Path, output_dir: Path, manifest: dict[str, Any]):
         {"metrik":"Delay per trial vs pasangan","rumus":"e2e_mean_ms_trial_mean vs e2e_mean_ms","catatan":"Rata-rata trial tanpa bobot vs rata-rata semua pasangan sukses; bukan nilai nol untuk kegagalan"}])
     _write_table(wb,"Trial Metrics",rows)
     _write_table(wb,"Method Scenario Summary",summaries)
+    pilot_review = []
+    baseline = manifest.get("pilot_baseline", {})
+    if policy == "adaptive_v2" and baseline:
+        for scenario in scenarios:
+            neighbor = next(s for s in summaries if s['method']=='trickle_neighbor_status' and s['scenario']==scenario)
+            trickle = next(s for s in summaries if s['method']=='trickle' and s['scenario']==scenario)
+            old = baseline.get('network_overhead_by_scenario', {}).get(scenario)
+            mean = neighbor['network_overhead_trial_mean']
+            reduction = 100 * (1-mean/old) if mean is not None and isinstance(old, (int,float)) and old>0 else None
+            target = baseline.get('s0_reduction_target_percent',50) if scenario=='S0_MAIN' else None
+            pilot_review.append({'scenario':scenario,'policy':policy,'baseline_session_id':baseline.get('session_id'),
+                'baseline_trials':baseline.get('trials_per_scenario'),'baseline_overhead':old,
+                'neighbor_valid_trials':neighbor['valid_trials'],'neighbor_overhead_mean':mean,
+                'trickle_overhead_mean':trickle['network_overhead_trial_mean'],'reduction_percent':reduction,
+                'exploration_target_percent':target,'exploration_target_met':reduction>=target if reduction is not None and target is not None else None,
+                'dsr_percent':neighbor['dsr_percent'],'e2e_mean_ms':neighbor['e2e_mean_ms'],
+                'catatan':'Diagnostik terhadap satu trial lama per skenario; bukan bukti statistik atau aturan INVALID. Periksa DSR, delay dan pemulihan S1/S2.'})
+        _write_table(wb,'Adaptive Pilot Review',pilot_review)
     _write_table(wb,"Descriptive Statistics",stats)
     _write_table(wb,"Mechanism Diagnostics",diagnostics)
+    reasons = []
+    for trial_id in manifest["trials"]:
+        scoped = [e for e in events if e.get("trial_id") == trial_id and e.get("event_type") in {"STATUS_BURST_REQUESTED", "STATUS_BURST_STARTED", "STATUS_BURST_FAILED", "STATUS_COALESCED_WITH_DATA"}]
+        scoped = list({json.dumps(e,sort_keys=True,separators=(",", ":")):e for e in scoped}.values())
+        from collections import Counter
+        counts = Counter((e["node_id"], e["event_type"], e.get("reason", e.get("status_reason", "UNSPECIFIED"))) for e in scoped)
+        reasons.extend({"trial_id":trial_id,"node_id":node,"event_type":kind,"reason":reason,"count":count,"neighbor_status_policy":policy} for (node,kind,reason),count in sorted(counts.items()))
+    _write_table(wb,"STATUS Diagnostics",reasons)
     _write_table(wb,"PHY Evidence",phy)
     _write_table(wb,"Log Validation",validation)
     _write_table(wb,"Receivers",receivers)
@@ -486,6 +560,9 @@ def merge_neighbor(input_dir: Path, output_dir: Path, manifest: dict[str, Any]):
             row['suppression_enabled'] = True
             row['parameter_notes'] = 'Keputusan DATA berdasarkan HAVE/MISSING/UNKNOWN tetangga teramati; bukan c/k'
             row['transmission_timing'] = 't acak dalam [I/2,I); STATUS terpisah memakai discovery jitter'
+            row.update(manifest.get("neighbor_parameters", {}))
+            row['neighbor_status_policy'] = policy
+            row['status_notes'] = 'Discovery 1 detik + jitter; DATA sukses menggantikan pengumuman state yang sama; retry inventory kosong tidak berhenti' if policy == 'adaptive_v2' else 'STATUS periodik; kebijakan lama'
     _write_table(wb,"Method Parameters",parameters)
     _write_table(wb,"Invalid Trials",[r for r in rows if r["result"]=="INVALID"])
     chart_paths = write_charts(output_dir/"charts", summaries, stats, scenarios, METHODS, manifest.get("synthetic_data") is True)
@@ -498,10 +575,10 @@ def merge_neighbor(input_dir: Path, output_dir: Path, manifest: dict[str, Any]):
     (output_dir/"all_events.json").write_text(json.dumps(raw_events,indent=2),encoding="utf-8")
     (output_dir/"method_scenario_summary.json").write_text(json.dumps(summaries,indent=2),encoding="utf-8")
     (output_dir/"manifest_snapshot.json").write_text(json.dumps(manifest,indent=2),encoding="utf-8")
-    for name, data in (("descriptive_statistics", stats), ("mechanism_diagnostics", diagnostics), ("phy_evidence", phy), ("log_validation", validation)):
+    for name, data in (("descriptive_statistics", stats), ("mechanism_diagnostics", diagnostics), ("status_diagnostics", reasons), ("adaptive_pilot_review",pilot_review), ("phy_evidence", phy), ("log_validation", validation)):
         (output_dir/f"{name}.json").write_text(json.dumps(data,indent=2),encoding="utf-8")
     import csv
-    for name, data in (("trial_metrics",rows),("receivers",receivers),("all_events",events),("method_scenario_summary",summaries), ("descriptive_statistics",stats), ("mechanism_diagnostics",diagnostics), ("phy_evidence",phy), ("log_validation",validation)):
+    for name, data in (("trial_metrics",rows),("receivers",receivers),("all_events",events),("method_scenario_summary",summaries), ("descriptive_statistics",stats), ("mechanism_diagnostics",diagnostics), ("status_diagnostics",reasons), ("adaptive_pilot_review",pilot_review), ("phy_evidence",phy), ("log_validation",validation)):
         with (output_dir/f"{name}.csv").open("w",newline="",encoding="utf-8-sig") as f:
             fields=list(dict.fromkeys(k for row in data for k in row)) or ["trial_id"]
             writer=csv.DictWriter(f,fieldnames=fields); writer.writeheader()

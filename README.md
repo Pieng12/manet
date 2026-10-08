@@ -412,6 +412,7 @@ penerima, LDR burst, dan overhead DATA/control. Build serta smoke perangkat baru
 wajib sebelum batch; keberhasilan build bukan validasi RF.
 
 - [Spesifikasi, migrasi, dan batas klaim](docs/neighbor_status_experiment.md)
+- [STATUS adaptif v2 dan profil pilot 36 trial](docs/neighbor_adaptive_status.md)
 - [Panduan Windows: build, flash manual, pilot, 60/180 trial](docs/neighbor_status_windows.md)
 - [Hasil pemeriksaan otomatis dan daftar file berubah](docs/neighbor_status_validation.md)
 - Config contoh: `tools/experiment_controller/config.neighbor.main.example.json`

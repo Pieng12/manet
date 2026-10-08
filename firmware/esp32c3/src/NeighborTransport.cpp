@@ -46,7 +46,14 @@ bool frameTimeValid(const NeighborFrame& f,uint64_t nowSeconds,uint32_t skewSeco
   for(size_t i=0;i<f.count;++i) if(f.inventory[i].seconds>nowSeconds+skewSeconds) return false;
   return true;
 }
-bool NeighborParameters::valid() const { return statusPeriod>=1000 && statusBurst>=250 && statusBurst<=2000 && freshness>=statusPeriod*2 && resetCooldown>=1000 && capacity>=5 && capacity<=64; }
+bool NeighborParameters::valid() const {
+  return (policy=="periodic_v1" || adaptive()) && statusPeriod>=1000 && statusPeriod<=INT32_MAX/4 &&
+    statusBurst>=250 && statusBurst<=2000 && uint64_t(freshness)>=uint64_t(statusPeriod)*2 && freshness<=INT32_MAX &&
+    jitter<=INT32_MAX/4 && resetCooldown>=1000 && capacity>=5 && capacity<=64 &&
+    (!adaptive() || (statusMinPeriod>=1000 && statusMinPeriod<=statusPeriod && emptyRetryMin>=1000 &&
+      emptyRetryMax>=emptyRetryMin && emptyRetryMax<=INT32_MAX/4 && dataGrace>=1000 && dataGrace<=INT32_MAX/4 &&
+      uint64_t(freshness)>=2*(uint64_t(statusPeriod)+jitter+statusBurst)));
+}
 void NeighborController::reset(uint32_t scope) { scope_=scope; entries_.clear(); repaired_=false; repairPending_.clear(); deferred_=false; cooldownReported_=false; }
 bool NeighborController::known(uint32_t transmitter) const {
   return std::any_of(entries_.begin(),entries_.end(),[&](const Entry& e){return e.frame.transmitter==transmitter;});
@@ -59,6 +66,7 @@ std::vector<NeighborFrame> NeighborController::newlyExpired(uint32_t now) {
   return result;
 }
 bool NeighborController::observe(const NeighborFrame& f, uint32_t at, uint32_t now) {
+  peerChanged=false;
   if (f.scope!=scope_ || int32_t(now-at)<0 || now-at>parameters.freshness) return false;
   auto it=std::find_if(entries_.begin(),entries_.end(),[&](const Entry& e){return e.frame.transmitter==f.transmitter;});
   bool needsReview=false;
@@ -68,8 +76,16 @@ bool NeighborController::observe(const NeighborFrame& f, uint32_t at, uint32_t n
     if (!f.status && !changed) changed=stateIdentity(f.packet)!=stateIdentity(it->frame.packet);
     if (f.status && !changed) for (size_t i=0;i<f.count;++i) { const auto& a=f.inventory[i]; const auto& b=it->frame.inventory[i]; changed=changed || a.sender!=b.sender || a.seconds!=b.seconds || a.flags!=b.flags; }
     needsReview=changed || now-it->at>parameters.freshness;
+    auto signature=[](const NeighborFrame& frame) {
+      std::vector<std::string> values;
+      const size_t count=frame.status ? (frame.complete ? frame.count : 0) : 1;
+      for(size_t i=0;i<count;++i) { const auto s=frame.status ? frame.inventory[i] : inventoryState(frame.packet);
+        values.push_back(std::to_string(s.sender)+":"+std::to_string(s.seconds)+":"+std::to_string(s.flags)); }
+      std::sort(values.begin(),values.end()); return values;
+    };
+    peerChanged=it->frame.boot!=f.boot || now-it->at>parameters.freshness || signature(it->frame)!=signature(f);
     *it={f,at};
-  } else { if (entries_.size()>=parameters.capacity) return false; entries_.push_back({f,at}); needsReview=true; }
+  } else { if (entries_.size()>=parameters.capacity) return false; entries_.push_back({f,at}); needsReview=true;peerChanged=true; }
   if(needsReview && std::find(repairPending_.begin(),repairPending_.end(),f.transmitter)==repairPending_.end()) repairPending_.push_back(f.transmitter);
   return true;
 }
@@ -102,6 +118,10 @@ bool NeighborController::repairAllowed(const Packet& p,uint32_t now,uint32_t int
   repairPending_.clear();
   if (!need) return false;
   repaired_=true; lastRepair_=now; cooldownReported_=false; return true;
+}
+void NeighborController::requestMissingPeer(uint32_t id,const Packet& p,uint32_t now) {
+  if(parameters.adaptive() && knowledge(id,p,now)==Knowledge::Missing &&
+      std::find(repairPending_.begin(),repairPending_.end(),id)==repairPending_.end()) repairPending_.push_back(id);
 }
 bool NeighborController::takeRepairDeferred() { const bool result=deferred_;deferred_=false;return result; }
 std::vector<uint32_t> NeighborController::observedTransmitters() const {

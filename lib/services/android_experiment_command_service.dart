@@ -14,6 +14,7 @@ import 'package:pkmproject/services/research_session_service.dart';
 import 'package:pkmproject/services/protocol_epoch_readiness.dart';
 import 'package:pkmproject/services/range_test_service.dart';
 import 'package:pkmproject/services/neighbor_runtime.dart';
+import 'package:pkmproject/services/neighbor_status_controller.dart';
 import 'package:pkmproject/sync_service.dart';
 import 'package:pkmproject/utils/hash_utils.dart';
 import 'package:sqflite/sqflite.dart';
@@ -181,6 +182,9 @@ class AndroidExperimentCommandService {
       enabled,
       rxOnly: rxOnly,
     );
+    if (enabled && result['confirmed_enabled'] == true) {
+      NeighborRuntime.instance.restartStatus(_clock.monotonicTimeMs());
+    }
     if (!rxOnly) {
       if (enabled) {
         _startObservationWindow();
@@ -746,17 +750,9 @@ class AndroidExperimentCommandService {
             : null,
         'allowed_transmitters':
             NeighborRuntime.instance.configuration!['allowed_transmitters'],
-        'neighbor_parameters': {
-          for (final key in [
-            'status_period_ms',
-            'status_burst_ms',
-            'freshness_ms',
-            'discovery_jitter_ms',
-            'reset_cooldown_ms',
-            'neighbor_capacity',
-          ])
-            key: NeighborRuntime.instance.configuration![key],
-        },
+        'neighbor_parameters': NeighborParameters.fromMap(
+          NeighborRuntime.instance.configuration!,
+        ).toMap(),
       },
       'measurement_timing_version': 2,
       'method_design_version': 3,

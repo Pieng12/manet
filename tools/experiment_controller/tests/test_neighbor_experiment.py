@@ -3,14 +3,16 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from openpyxl import load_workbook
 from resqmesh_controller.config import ConfigError, validate_config, research_fingerprint
 from resqmesh_controller.controller import build_plan, TrialSpec, BatchIncompleteError
-from resqmesh_controller.devices import DeviceError
+from resqmesh_controller.devices import DeviceError, SerialNode
 from resqmesh_controller.neighbor_experiment import (
     SOURCE, TARGETS, METHODS, SCENARIOS, EDGES, adjacency, stable_id,
     NeighborExperimentController, summarize_network, merge_neighbor,
+    neighbor_parameters, neighbor_plan,
 )
 from test_controller import FakeNode
 
@@ -48,11 +50,11 @@ class NeighborFake(FakeNode):
             result.update(build_id=self.config['android_build_id'],neighbor_design_version=1,
                           transport_profile='neighbor_graph_v1')
             result['radio']['maximum_advertising_data_length'] = 1650
-            from resqmesh_controller.neighbor_experiment import DEFAULTS
+            from resqmesh_controller.neighbor_experiment import neighbor_parameters
             result.update(transmitter_id=stable_id(self.node_id),allowed_transmitters=adjacency(self.node_id),
                           scope=stable_id(self.trial_id) if self.trial_id else None,
                           transport_version='resqmesh-neighbor-v1', data_frame_length=39,
-                          neighbor_parameters={**DEFAULTS,**self.config.get('neighbor_parameters',{})})
+                          neighbor_parameters=neighbor_parameters(self.config))
         if name in {'set_rx_participation','set_node_participation'}:
             result['confirmed_enabled']=args['enabled']
         return result
@@ -72,6 +74,126 @@ class NeighborFake(FakeNode):
         return values
 
 class NeighborExperimentTest(unittest.TestCase):
+    def test_adaptive_pilot_has_three_randomized_complete_blocks(self):
+        c=json.loads((ROOT/'tools/experiment_controller/config.neighbor.adaptive.pilot.example.json').read_text())
+        c['android_build_id']=c['firmware_build_id']='0123456789ab'
+        validate_config(c)
+        plan=neighbor_plan(c)
+        self.assertEqual(36,len(plan))
+        canonical=[(m,s) for m in METHODS for s in SCENARIOS]
+        for block in range(1,4):
+            values=[(p.mode,p.hypothesis) for p in plan if p.block==block]
+            self.assertCountEqual(canonical,values)
+            self.assertNotEqual(canonical,values)
+        self.assertEqual(180,c['observation_window_seconds'])
+        self.assertEqual((60000,150000),(neighbor_parameters(c)['status_period_ms'],neighbor_parameters(c)['freshness_ms']))
+
+    def test_adaptive_parameters_fingerprinted_and_legacy_defaults_retained(self):
+        old=config(True)
+        self.assertEqual('periodic_v1',neighbor_parameters(old)['neighbor_status_policy'])
+        self.assertEqual(12000,neighbor_parameters(old)['status_period_ms'])
+        new={**old,'neighbor_status_policy':'adaptive_v2','neighbor_parameters':{}}
+        self.assertNotEqual(research_fingerprint(old),research_fingerprint(new))
+        changed={**new,'neighbor_parameters':{'data_grace_ms':11000}}
+        self.assertNotEqual(research_fingerprint(new),research_fingerprint(changed))
+        for overrides in ({'freshness_ms':120000},{'empty_retry_max_ms':2000},{'discovery_jitter_ms':True},{'unknown':1}):
+            with self.subTest(overrides=overrides),self.assertRaises(ConfigError):
+                validate_config({**new,'neighbor_parameters':overrides})
+        with self.assertRaises(ConfigError):
+            validate_config({**new,'neighbor_status_policy':'unknown'})
+
+    def test_adaptive_config_readiness_and_manifest_match_all_nodes(self):
+        c={**config(True),'neighbor_status_policy':'adaptive_v2','neighbor_parameters':{}}
+        with tempfile.TemporaryDirectory() as d:
+            nodes=[NeighborFake(n,c,None) for n in c['nodes']]
+            controller=NeighborExperimentController(c,nodes,Path(d))
+            spec=TrialSpec(METHODS[-1],'S0_MAIN',1)
+            controller.configure(spec)
+            self.assertEqual(neighbor_parameters(c),controller.manifest['neighbor_parameters'])
+            self.assertEqual('adaptive_v2',controller.manifest['neighbor_status_policy'])
+            for node in nodes:
+                args=next(a for name,a in node.commands if name=='configure_session')
+                self.assertEqual(10000,args['data_grace_ms'])
+                response=node.command('readiness',{})
+                self.assertNotIn('neighbor_parameters mismatch',controller._readiness_errors(node,response,spec,False,False))
+                response['neighbor_parameters'].pop('neighbor_status_policy')
+                self.assertIn('neighbor_parameters mismatch',controller._readiness_errors(node,response,spec,False,False))
+
+    def test_old_readiness_without_policy_still_matches_periodic(self):
+        c=config()
+        with tempfile.TemporaryDirectory() as d:
+            node=NeighborFake(c['nodes'][0],c,None)
+            controller=NeighborExperimentController(c,[node],Path(d))
+            spec=TrialSpec(METHODS[-1],'S0_MAIN',1)
+            controller.configure(spec)
+            response=node.command('readiness',{})
+            response['neighbor_parameters'].pop('neighbor_status_policy')
+            self.assertNotIn('neighbor_parameters mismatch',controller._readiness_errors(node,response,spec,False,False))
+
+    def clock_controller(self, directory):
+        c=config()
+        node=NeighborFake(c['nodes'][0],c,None)
+        controller=NeighborExperimentController(c,[node],Path(directory),sleep=lambda _:None)
+        spec=TrialSpec(METHODS[0],'S0_MAIN',1)
+        controller.manifest['trials'][spec.trial_id]={}
+        return controller,node,spec
+
+    def test_clock_retries_slow_adb_sample_without_raising_tolerance(self):
+        with tempfile.TemporaryDirectory() as d:
+            controller,node,spec=self.clock_controller(d)
+            with patch.object(node,'host_clock_offset_ms',side_effect=[900,940]), \
+                 patch('resqmesh_controller.neighbor_experiment.time.time_ns',side_effect=[0,198400000,200000000,240000000,241000000]):
+                controller.synchronize_clocks(spec)
+            sample=controller.manifest['trials'][spec.trial_id]['clock_samples'][SOURCE]
+            self.assertEqual(21,sample['uncertainty_ms'])
+            self.assertEqual(940,sample['offset_ms'])
+            attempts=controller.manifest['trials'][spec.trial_id]['clock_sync_attempts'][SOURCE]
+            self.assertEqual([False,True],[a['accepted'] for a in attempts])
+            self.assertAlmostEqual(100.2,attempts[0]['uncertainty_ms'])
+            self.assertEqual(100,controller.config['clock_tolerance_ms'])
+
+    def test_clock_all_slow_samples_still_fail_with_attempt_evidence(self):
+        with tempfile.TemporaryDirectory() as d:
+            controller,node,spec=self.clock_controller(d)
+            with patch.object(node,'host_clock_offset_ms',return_value=900) as probe, \
+                 patch('resqmesh_controller.neighbor_experiment.time.time_ns',side_effect=[0,220000000,221000000,441000000,442000000,662000000]):
+                with self.assertRaisesRegex(DeviceError,'clock uncertainty exceeds tolerance'):
+                    controller.synchronize_clocks(spec)
+            self.assertEqual(3,probe.call_count)
+            self.assertNotIn(SOURCE,controller.clock_offsets)
+            attempts=controller.manifest['trials'][spec.trial_id]['clock_sync_attempts'][SOURCE]
+            self.assertEqual(3,len(attempts))
+            self.assertTrue(all(not a['accepted'] for a in attempts))
+
+    def test_serial_clock_retry_uses_unique_command_and_latest_accepted_offset(self):
+        with tempfile.TemporaryDirectory() as d:
+            c=config()
+            node=SerialNode(TARGETS[0],'RELAY','COM_TEST')
+            controller=NeighborExperimentController(c,[node],Path(d))
+            spec=TrialSpec(METHODS[0],'S0_MAIN',1)
+            controller.manifest['trials'][spec.trial_id]={}
+            with patch.object(node,'command',return_value={'ok':True}) as command, \
+                 patch('resqmesh_controller.neighbor_experiment.time.time_ns',side_effect=[1000000000,1198400000,1200000000,1220000000,1221000000]):
+                controller.synchronize_clocks(spec)
+            calls=[call.args[1] for call in command.call_args_list]
+            self.assertEqual(2,len({a['command_id'] for a in calls}))
+            self.assertEqual([1000,1200],[a['wall_time_ms'] for a in calls])
+            self.assertEqual(10,controller.clock_offsets[node.node_id])
+            self.assertEqual(11,controller.manifest['trials'][spec.trial_id]['clock_samples'][node.node_id]['uncertainty_ms'])
+
+    def test_serial_clock_rejection_is_not_retried_or_hidden(self):
+        with tempfile.TemporaryDirectory() as d:
+            c=config()
+            node=SerialNode(TARGETS[0],'RELAY','COM_TEST')
+            controller=NeighborExperimentController(c,[node],Path(d))
+            spec=TrialSpec(METHODS[0],'S0_MAIN',1)
+            controller.manifest['trials'][spec.trial_id]={}
+            with patch.object(node,'command',return_value={'ok':False}) as command:
+                with self.assertRaisesRegex(DeviceError,'clock sync failed'):
+                    controller.synchronize_clocks(spec)
+            self.assertEqual(1,command.call_count)
+            self.assertNotIn(node.node_id,controller.clock_offsets)
+
     def test_main60_full180_balanced_reproducible_blocks(self):
         for full,length,per_block in [(False,60,4),(True,180,12)]:
             c=config(full);validate_config(c);plan=build_plan(c)

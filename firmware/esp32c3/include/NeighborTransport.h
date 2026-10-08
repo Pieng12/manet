@@ -32,16 +32,21 @@ struct NeighborParameters {
   uint32_t statusPeriod = 12000, statusBurst = 500, freshness = 45000;
   uint32_t jitter = 1500, resetCooldown = 8000;
   size_t capacity = 16;
+  std::string policy = "periodic_v1";
+  uint32_t statusMinPeriod = 15000, emptyRetryMin = 4000, emptyRetryMax = 32000, dataGrace = 10000;
+  bool adaptive() const { return policy == "adaptive_v2"; }
   bool valid() const;
 };
 class NeighborController {
  public:
   NeighborParameters parameters;
+  bool peerChanged = false;
   void reset(uint32_t scope);
   bool observe(const NeighborFrame& frame, uint32_t receivedAt, uint32_t now);
   Knowledge knowledge(uint32_t transmitter, const Packet& local, uint32_t now) const;
   const char* decision(const Packet& local, uint32_t now, bool firstPending) const;
   bool repairAllowed(const Packet& local, uint32_t now, uint32_t interval, uint32_t imin);
+  void requestMissingPeer(uint32_t transmitter, const Packet& local, uint32_t now);
   bool known(uint32_t transmitter) const;
   std::vector<NeighborFrame> newlyExpired(uint32_t now);
   KnowledgeCounts counts(const Packet& local,uint32_t now) const;

@@ -423,6 +423,7 @@ class BleRelayService {
         runtime.controller!.observe(frame, observed, now);
     await runtime.emitChanges(now);
     if (changed && runtime.statusEnabled) {
+      if (runtime.controller!.peerChanged) runtime.peerChanged(now);
       await runtime.log(
         'NEIGHBOR_STATUS_UPDATED',
         frame: frame,
@@ -435,6 +436,13 @@ class BleRelayService {
       for (final item in items.where((i) => i.isSos)) {
         final message = await _dbHelper.getMessageById(item.messageId);
         final state = await _relayQueue.trickleStateFor(item.messageId);
+        if (message != null && frame.type == NeighborFrameType.status) {
+          runtime.controller!.requestMissingPeer(
+            frame.transmitter,
+            message.stateIdentity,
+            now,
+          );
+        }
         if (message != null &&
             state != null &&
             runtime.controller!.repairAllowed(

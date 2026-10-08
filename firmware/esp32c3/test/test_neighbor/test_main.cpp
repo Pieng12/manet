@@ -1,5 +1,6 @@
 #include <unity.h>
 #include "NeighborTransport.h"
+#include "NeighborStatusSchedule.h"
 #include <cstring>
 using namespace resqmesh;
 void setUp() {}
@@ -82,4 +83,58 @@ void cooldown_diagnostics_preserve_pending() {
   TEST_ASSERT_FALSE(c.repairAllowed(packet(),8101,16000,8000));
   TEST_ASSERT_EQUAL_STRING("FRESH_MISSING",c.decision(packet(),8101,false));
 }
-int main(int,char**) { UNITY_BEGIN();RUN_TEST(golden);RUN_TEST(decisions);RUN_TEST(freshness);RUN_TEST(identity);RUN_TEST(timestamps);RUN_TEST(tombstones);RUN_TEST(cooldown_diagnostics_preserve_pending);return UNITY_END(); }
+NeighborStatusSchedule adaptive() {
+  NeighborStatusSchedule s;s.parameters.policy="adaptive_v2";s.parameters.statusPeriod=60000;s.parameters.freshness=150000;s.start(0,0);return s;
+}
+void adaptive_empty_retry() {
+  auto s=adaptive();TEST_ASSERT_TRUE(s.parameters.valid());s.start(100,1500);TEST_ASSERT_EQUAL_UINT32(2600,s.nextAt);
+  for(const auto interval:{4000,8000,16000,32000,32000,32000}) {
+    auto now=s.nextAt;s.statusSucceeded({},now,false,1500);TEST_ASSERT_EQUAL_UINT32(interval+1500,s.nextAt-now);
+  }
+  s=adaptive();s.failed(1000,1500);TEST_ASSERT_EQUAL_UINT32(3500,s.nextAt);
+  s.statusSucceeded({},3500,false,0);TEST_ASSERT_EQUAL_UINT32(7500,s.nextAt);
+}
+void adaptive_grace_inventory_failure() {
+  auto s=adaptive();s.statusSucceeded({},1000,false,0);s.syncInventory({"b","a"},2000,0);
+  TEST_ASSERT_EQUAL_UINT32(12000,s.nextAt);
+  TEST_ASSERT_FALSE(s.dataSucceeded("a",4000,false,0));TEST_ASSERT_EQUAL_UINT32(12000,s.nextAt);
+  s.syncInventory({"a","b"},5000,0);TEST_ASSERT_EQUAL_UINT32(12000,s.nextAt);
+  TEST_ASSERT_TRUE(s.dataSucceeded("b",6000,false,1500));TEST_ASSERT_EQUAL_UINT32(22500,s.nextAt);
+  s.syncInventory({"c"},7000,0);TEST_ASSERT_EQUAL_UINT32(17000,s.nextAt);
+  s.statusSucceeded({"a","b"},8000,true,0);TEST_ASSERT_EQUAL_UINT32(17000,s.nextAt);
+  s.failed(17000,0);s.statusSucceeded({"c"},18000,false,0);TEST_ASSERT_EQUAL_UINT32(33000,s.nextAt);
+}
+void adaptive_maintenance_restart_wrap() {
+  auto s=adaptive();s.statusSucceeded({},1000,false,0);s.syncInventory({"a"},2000,0);
+  for(const auto interval:{15000,30000,60000,60000}) {
+    auto now=s.nextAt;s.statusSucceeded({"a"},now,false,0);TEST_ASSERT_EQUAL_UINT32(interval,s.nextAt-now);
+  }
+  s=adaptive();s.syncInventory({"a"},0,0);s.dataSucceeded("a",5000,true,0);TEST_ASSERT_EQUAL_UINT32(65000,s.nextAt);
+  s.stable(6000,true,0);TEST_ASSERT_EQUAL_UINT32(65000,s.nextAt);
+  s.peerChanged(6000,0);TEST_ASSERT_EQUAL_UINT32(21000,s.nextAt);
+  s.start(UINT32_MAX-500,1500);s.syncInventory({"a"},UINT32_MAX-500,0);
+  TEST_ASSERT_EQUAL_UINT32(1999,s.nextAt);
+  TEST_ASSERT_EQUAL_STRING("DISCOVERY",s.reason);
+}
+void adaptive_repeated_missing_and_freshness() {
+  NeighborController c;c.parameters=adaptive().parameters;c.reset(4);
+  auto f=status(4);TEST_ASSERT_TRUE(c.observe(f,100,100));TEST_ASSERT_TRUE(c.repairAllowed(packet(),100,16000,8000));
+  f.sequence=2;TEST_ASSERT_TRUE(c.observe(f,1000,1000));c.requestMissingPeer(4,packet(),1000);
+  TEST_ASSERT_FALSE(c.repairAllowed(packet(),1000,16000,8000));TEST_ASSERT_TRUE(c.repairAllowed(packet(),8100,16000,8000));
+  f=status(4,true);f.sequence=3;TEST_ASSERT_TRUE(c.observe(f,10000,10000));
+  TEST_ASSERT_EQUAL(int(Knowledge::Have),int(c.knowledge(4,packet(),160000)));
+  TEST_ASSERT_EQUAL(int(Knowledge::Unknown),int(c.knowledge(4,packet(),160001)));
+  f.sequence=4;TEST_ASSERT_TRUE(c.observe(f,160001,160001));TEST_ASSERT_TRUE(c.peerChanged);
+  f.status=false;f.count=0;f.sequence=5;f.packet=packet();TEST_ASSERT_TRUE(c.observe(f,160002,160002));TEST_ASSERT_FALSE(c.peerChanged);
+  f=status(4);f.boot=3;TEST_ASSERT_TRUE(c.observe(f,160003,160003));TEST_ASSERT_TRUE(c.peerChanged);
+}
+void adaptive_coalesced_triggers_and_lost_evidence() {
+  auto s=adaptive();s.statusSucceeded({},1000,false,0);s.syncInventory({"a"},2000,0);
+  s.syncInventory({"a","b"},3000,0);TEST_ASSERT_EQUAL_UINT32(12000,s.nextAt);
+  s.syncInventory({"a","b","c"},4000,0);TEST_ASSERT_EQUAL_UINT32(12000,s.nextAt);
+  s=adaptive();s.syncInventory({"a"},0,0);s.dataSucceeded("a",5000,true,0);
+  s.stable(6000,false,1500);TEST_ASSERT_EQUAL_UINT32(22500,s.nextAt);
+  s.stable(7000,false,0);TEST_ASSERT_EQUAL_UINT32(22500,s.nextAt);
+  TEST_ASSERT_EQUAL_UINT32(1,s.inventory.size());
+}
+int main(int,char**) { UNITY_BEGIN();RUN_TEST(golden);RUN_TEST(decisions);RUN_TEST(freshness);RUN_TEST(identity);RUN_TEST(timestamps);RUN_TEST(tombstones);RUN_TEST(cooldown_diagnostics_preserve_pending);RUN_TEST(adaptive_empty_retry);RUN_TEST(adaptive_grace_inventory_failure);RUN_TEST(adaptive_maintenance_restart_wrap);RUN_TEST(adaptive_repeated_missing_and_freshness);RUN_TEST(adaptive_coalesced_triggers_and_lost_evidence);return UNITY_END(); }

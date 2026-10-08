@@ -7,14 +7,21 @@ import android.os.Build
 import android.util.Log
 import org.json.JSONObject
 
+internal fun researchCommandPayload(command: String, extras: Map<String, Any?>): JSONObject {
+    val json = JSONObject()
+    extras.forEach { (key, value) ->
+        // ADB --esa supplies Java arrays; Android JSONObject.put does not wrap them.
+        if (key != "command" && value != null) json.put(key, JSONObject.wrap(value))
+    }
+    return json.put("command", command)
+}
+
 class ResearchCommandReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         val command = intent.getStringExtra("command")?.trim().orEmpty()
-        val json = JSONObject()
-        intent.extras?.keySet()?.forEach { key ->
-            if (key != "command") json.put(key, intent.extras?.get(key))
-        }
-        json.put("command", command)
+        val extras = intent.extras
+        val json = researchCommandPayload(command,
+            extras?.keySet()?.associateWith { extras.get(it) } ?: emptyMap())
         val serviceIntent = Intent(context, MeshBackgroundService::class.java).apply {
             action = MeshBackgroundService.RESEARCH_COMMAND_ACTION
             putExtra("research_command_json", json.toString())

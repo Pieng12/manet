@@ -6,6 +6,7 @@ import 'package:pkmproject/config/mesh_config.dart';
 import 'package:pkmproject/models/ack_apply_result.dart';
 import 'package:pkmproject/models/relay_queue_item.dart';
 import 'package:pkmproject/models/sos_message.dart';
+import 'package:pkmproject/models/message_identity.dart';
 import 'package:pkmproject/models/trickle_state.dart';
 import 'package:pkmproject/services/android_permission_service.dart';
 import 'package:pkmproject/services/background_service_manager.dart';
@@ -28,6 +29,7 @@ class BleAdvertiserService {
     : _relayQueue = RelayQueueService(),
       _experimentLogger = ExperimentLogger(),
       _clock = ExperimentClock.instance,
+      _readNeighborInventory = NeighborRuntime.instance.inventoryStates,
       _readMessage = DatabaseHelper().getMessageById;
 
   BleAdvertiserService.forTesting({
@@ -35,9 +37,12 @@ class BleAdvertiserService {
     required ExperimentLogger experimentLogger,
     required ClockSource clock,
     required Future<SOSMessage?> Function(String) readMessage,
+    Future<List<StateIdentity>> Function()? readNeighborInventory,
   }) : _relayQueue = relayQueue,
        _experimentLogger = experimentLogger,
        _clock = clock,
+       _readNeighborInventory =
+           readNeighborInventory ?? NeighborRuntime.instance.inventoryStates,
        _readMessage = readMessage;
 
   static const String kResqMeshServiceUuidString =
@@ -56,6 +61,7 @@ class BleAdvertiserService {
   final ExperimentLogger _experimentLogger;
   final ClockSource _clock;
   final Future<SOSMessage?> Function(String) _readMessage;
+  final Future<List<StateIdentity>> Function() _readNeighborInventory;
   final _isAdvertisingController = StreamController<bool>.broadcast();
 
   Stream<bool> get onAdvertisingChanged => _isAdvertisingController.stream;
@@ -573,6 +579,10 @@ class BleAdvertiserService {
 
       final runtime = NeighborRuntime.instance;
       await runtime.load();
+      await runtime.synchronizeStatus(
+        _clock.monotonicTimeMs(),
+        readInventory: _readNeighborInventory,
+      );
       await runtime.emitChanges(_clock.monotonicTimeMs());
       final queued = await _nextQueuedAdvertisement();
       final nextData = await _relayQueue.earliestNextEligibleAt();
@@ -961,6 +971,10 @@ class BleAdvertiserService {
         _isAdvertising = true;
         if (frame != null) {
           runtime.controller!.started(message.stateIdentity);
+          await runtime.dataStarted(
+            message.stateIdentity,
+            succeededAtMonotonic,
+          );
           await runtime.log(
             'DATA_BURST_STARTED',
             frame: frame,
@@ -1151,8 +1165,14 @@ class BleAdvertiserService {
     final runtime = NeighborRuntime.instance;
     final frame = await runtime.statusFrame();
     final now = _clock.monotonicTimeMs();
+    final inventory = runtime.statusSchedule?.inventory ?? <String>[];
+    final statusReason = runtime.statusSchedule?.reason ?? 'PERIODIC';
     runtime.statusAttempted(now);
-    await runtime.log('STATUS_BURST_REQUESTED', frame: frame);
+    await runtime.log(
+      'STATUS_BURST_REQUESTED',
+      frame: frame,
+      reason: statusReason,
+    );
     try {
       if (await _startNativePayload(frame.encode())) {
         final startedWall = _clock.wallTimeMs();
@@ -1176,7 +1196,9 @@ class BleAdvertiserService {
           frame: frame,
           receivedAt: startedWall,
           monotonic: startedMonotonic,
+          reason: statusReason,
         );
+        runtime.statusStarted(inventory, startedMonotonic);
         _isAdvertisingController.add(true);
         _slotTimer = Timer(duration, () async {
           await stopAdvertising();
@@ -1187,7 +1209,12 @@ class BleAdvertiserService {
     } catch (_) {
       // Failure must retain the DATA queue and recover via the same owner.
     }
-    await runtime.log('STATUS_BURST_FAILED', frame: frame);
+    runtime.statusFailed(_clock.monotonicTimeMs());
+    await runtime.log(
+      'STATUS_BURST_FAILED',
+      frame: frame,
+      reason: statusReason,
+    );
     await _logScannerRecovery(frame, 'FAILED');
     await _scheduleNextQueueWake();
   }

@@ -6,13 +6,57 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from openpyxl import load_workbook
-from resqmesh_controller.neighbor_experiment import METHODS, SOURCE, TARGETS, merge_neighbor, stable_id, summarize_network
+from resqmesh_controller.neighbor_experiment import METHODS, SOURCE, TARGETS, merge_neighbor, stable_id, summarize_network, neighbor_parameters
 from resqmesh_controller.neighbor_reporting import aggregate, descriptive, mechanism_counts, phy_evidence
 from resqmesh_controller.neighbor_validation import validate_logs
 from test_neighbor_experiment import ev, record, received, source_events
 
 
 class NeighborReportingTests(unittest.TestCase):
+    def test_adaptive_export_policy_numeric_parameters_raw_and_setup_unchanged(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);raw=root/'raw';raw.mkdir()
+            setup={**ev('STATUS_BURST_STARTED',TARGETS[0],950),'reason':'DISCOVERY'}
+            status={**ev('STATUS_BURST_STARTED',TARGETS[0],1200,2),'reason':'HEARTBEAT'}
+            coalesced={**ev('STATUS_COALESCED_WITH_DATA',SOURCE,1000),'reason':'DATA_STARTED'}
+            events=source_events()+[received(TARGETS[0]),setup,status,coalesced,status.copy()]
+            (raw/'events.jsonl').write_text('\n'.join(json.dumps(e) for e in events),encoding='utf-8')
+            parameters=neighbor_parameters({'neighbor_status_policy':'adaptive_v2'})
+            manifest={'synthetic_data':True,'session_id':'fixture','trials':{'t1':record()},
+                      'neighbor_status_policy':'adaptive_v2','neighbor_parameters':parameters,
+                      'method_parameters':{'trickle_neighbor_status':{'scheduler':'trickle'}},'neighbor_scenarios':['S0_MAIN']}
+            manifest['pilot_baseline']={'session_id':'old-fixture','trials_per_scenario':1,
+                                       'network_overhead_by_scenario':{'S0_MAIN':93},'s0_reduction_target_percent':50}
+            original=copy.deepcopy(manifest)
+            output=merge_neighbor(raw,root/'merged',manifest)
+            self.assertEqual(original,manifest)
+            self.assertEqual(events,json.loads((root/'merged/all_events.json').read_text()))
+            metrics=json.loads((root/'merged/network_metrics.json').read_text())[0]
+            self.assertEqual((1,1,2,1,3),tuple(metrics[k] for k in ('data_tx','control_tx','network_overhead','setup_control_tx','setup_plus_window_tx')))
+            self.assertEqual('adaptive_v2',metrics['neighbor_status_policy'])
+            diagnostics=json.loads((root/'merged/status_diagnostics.json').read_text())
+            self.assertEqual(3,len(diagnostics))
+            self.assertTrue(all(r['count']==1 for r in diagnostics))
+            review=json.loads((root/'merged/adaptive_pilot_review.json').read_text())[0]
+            self.assertEqual(93,review['baseline_overhead'])
+            self.assertEqual(1,review['baseline_trials'])
+            self.assertEqual(2,review['neighbor_overhead_mean'])
+            self.assertEqual('FAILED_DELIVERY',metrics['result'])
+            self.assertTrue(review['exploration_target_met'])
+            wb=load_workbook(output['workbook'])
+            try:
+                rows=list(wb['Method Parameters'].values)
+                values=dict(zip(rows[0],rows[1]))
+                self.assertEqual('adaptive_v2',values['neighbor_status_policy'])
+                for key,number in parameters.items():
+                    if type(number) is int:
+                        self.assertEqual(number,values[key]);self.assertIsInstance(values[key],int)
+                self.assertIn('STATUS Diagnostics',wb.sheetnames)
+                for ws in wb:
+                    for table in ws.tables.values():
+                        self.assertEqual(len(ws[1]),len(table.tableColumns))
+            finally:wb.close()
+
     def test_cost_setup_window_dedup_failed_requested_and_scope_trial_session(self):
         r = {**record(), "trial_id": "t1"}
         events = source_events() + [ev("STATUS_BURST_STARTED", TARGETS[0], 950),

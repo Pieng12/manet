@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pkmproject/config/mesh_config.dart';
@@ -5,6 +7,7 @@ import 'package:pkmproject/database_schema.dart';
 import 'package:pkmproject/services/android_experiment_command_service.dart';
 import 'package:pkmproject/services/experiment_clock.dart';
 import 'package:pkmproject/services/experiment_logger.dart';
+import 'package:pkmproject/services/neighbor_runtime.dart';
 import 'package:pkmproject/services/relay_queue_service.dart';
 import 'package:pkmproject/services/research_session_service.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
@@ -103,6 +106,90 @@ void main() {
     'gateway_enabled': true,
     'ack_enabled': true,
   };
+
+  for (final mode in [
+    'basic_flooding',
+    'trickle_no_suppression',
+    'trickle',
+    'trickle_neighbor_status',
+  ]) {
+    test('ADB JSON array configures source adjacency for $mode', () async {
+      final args = Map<String, dynamic>.from(
+        jsonDecode(
+              jsonEncode({
+                ...configureArgs(),
+                'node_id': 'android-source',
+                'transport_profile': 'neighbor_graph_v1',
+                'topology': 'neighbor_graph_v1',
+                'mode': mode,
+                'allowed_transmitters': ['3376660029', '1347088263'],
+                'observation_window_ms': 180000,
+              }),
+            )
+            as Map,
+      );
+      final response = await commands.execute('configure_session', args);
+      expect(response['ok'], isTrue, reason: response.toString());
+      final status = await commands.execute('readiness', {});
+      expect(status['allowed_transmitters'], [3376660029, 1347088263]);
+      expect(status['transmitter_id'], 2110340604);
+      expect(status['mode'], mode);
+      expect(status['gateway_enabled'], isFalse);
+      expect(status['ack_enabled'], isFalse);
+    });
+    test(
+      'adaptive configuration/readiness only enables STATUS scheduler for $mode',
+      () async {
+        final response = await commands.execute('configure_session', {
+          ...configureArgs(),
+          'node_id': 'android-source',
+          'transport_profile': 'neighbor_graph_v1',
+          'topology': 'neighbor_graph_v1',
+          'mode': mode,
+          'allowed_transmitters': [3376660029, 1347088263],
+          'neighbor_status_policy': 'adaptive_v2',
+          'observation_window_ms': 180000,
+        });
+        expect(response['ok'], isTrue, reason: response.toString());
+        final ready = await commands.execute('readiness', {});
+        final parameters = ready['neighbor_parameters'] as Map;
+        expect(parameters['neighbor_status_policy'], 'adaptive_v2');
+        expect(parameters['status_period_ms'], 60000);
+        expect(parameters['freshness_ms'], 150000);
+        expect(parameters['data_grace_ms'], 10000);
+        expect(parameters['empty_retry_max_ms'], 32000);
+        final started = await commands.execute('start_trial', {
+          'command_id': 'adaptive-start',
+          'session_id': 'session-external',
+          'trial_id': 'adaptive-trial',
+          'trial_code': 'ADAPTIVE-S0',
+        });
+        expect(started['ok'], isTrue, reason: started.toString());
+        expect(
+          NeighborRuntime.instance.statusSchedule != null,
+          mode == 'trickle_neighbor_status',
+        );
+        expect(RelayQueueService().mode.logValue, mode);
+      },
+    );
+  }
+
+  test(
+    'malformed native array string still fails adjacency validation',
+    () async {
+      final response = await commands.execute('configure_session', {
+        ...configureArgs(),
+        'node_id': 'android-source',
+        'transport_profile': 'neighbor_graph_v1',
+        'allowed_transmitters': '[Ljava.lang.String;@1234',
+      });
+      expect(response['ok'], isFalse);
+      expect(
+        response['error'],
+        contains('Invalid stable transmitter adjacency'),
+      );
+    },
+  );
 
   test(
     'no-suppression method is persisted and reported by the scheduler owner',

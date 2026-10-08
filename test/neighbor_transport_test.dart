@@ -72,6 +72,66 @@ void main() {
   );
 
   test(
+    'adaptive repeated empty STATUS retries repair only for same fresh peer',
+    () {
+      final c = NeighborStatusController(
+        scope: 4,
+        parameters: NeighborParameters.fromMap({
+          'neighbor_status_policy': 'adaptive_v2',
+        }),
+      );
+      c.observe(status(3, inventory: [state]), 100, 100);
+      c.observe(status(4), 100, 100);
+      expect(c.repairAllowed(state, 100, 16000, 8000), isTrue);
+      c.observe(status(3, seq: 2, inventory: [state]), 200, 200);
+      c.requestMissingPeer(3, state, 200);
+      expect(c.repairAllowed(state, 9000, 16000, 8000), isFalse);
+      expect(c.observe(status(4, seq: 2), 10000, 10000), isTrue);
+      c.requestMissingPeer(4, state, 10000);
+      expect(c.repairAllowed(state, 10000, 16000, 8000), isTrue);
+      expect(c.observe(status(4, seq: 3), 11000, 11000), isTrue);
+      c.requestMissingPeer(4, state, 11000);
+      expect(c.repairAllowed(state, 11000, 16000, 8000), isFalse);
+      expect(c.repairAllowed(state, 18000, 8000, 8000), isFalse);
+      expect(c.repairAllowed(state, 18000, 16000, 8000), isTrue);
+      c.observe(status(4, seq: 4, inventory: [state]), 20000, 20000);
+      expect(c.knowledge(4, state, 170000), NeighborKnowledge.have);
+      expect(c.knowledge(4, state, 170001), NeighborKnowledge.unknown);
+      expect(
+        c.observe(status(4, seq: 5, inventory: [state]), 170001, 170001),
+        isTrue,
+      );
+      expect(c.peerChanged, isTrue);
+      expect(c.observe(status(4, seq: 1, boot: 3), 171000, 171000), isTrue);
+      expect(c.peerChanged, isTrue);
+    },
+  );
+
+  test(
+    'DATA and equivalent STATUS do not repeatedly reset adaptive maintenance',
+    () {
+      final c = NeighborStatusController(scope: 4);
+      c.observe(status(3, inventory: [state]), 100, 100);
+      expect(c.peerChanged, isTrue);
+      c.observe(
+        NeighborFrame(
+          type: NeighborFrameType.data,
+          transmitter: 3,
+          boot: 2,
+          sequence: 2,
+          scope: 4,
+          inner: inner,
+        ),
+        200,
+        200,
+      );
+      expect(c.peerChanged, isFalse);
+      c.observe(status(3, seq: 3, inventory: [state]), 300, 300);
+      expect(c.peerChanged, isFalse);
+    },
+  );
+
+  test(
     'cross-language DATA, empty STATUS and populated STATUS golden vectors',
     () {
       for (final vector in [dataGolden, emptyGolden, statusGolden]) {

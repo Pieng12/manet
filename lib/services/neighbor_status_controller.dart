@@ -12,22 +12,85 @@ class NeighborParameters {
     this.discoveryJitterMs = 1500,
     this.resetCooldownMs = 8000,
     this.capacity = 16,
+    this.policy = 'periodic_v1',
+    this.statusMinPeriodMs = 15000,
+    this.emptyRetryMinMs = 4000,
+    this.emptyRetryMaxMs = 32000,
+    this.dataGraceMs = 10000,
   });
+  final String policy;
+  bool get adaptive => policy == 'adaptive_v2';
   final int statusPeriodMs,
       statusBurstMs,
       freshnessMs,
       discoveryJitterMs,
       resetCooldownMs,
-      capacity;
+      capacity,
+      statusMinPeriodMs,
+      emptyRetryMinMs,
+      emptyRetryMaxMs,
+      dataGraceMs;
+  factory NeighborParameters.fromMap(Map<String, dynamic> values) {
+    final policy = values['neighbor_status_policy'] as String? ?? 'periodic_v1';
+    return NeighborParameters(
+      policy: policy,
+      statusPeriodMs:
+          values['status_period_ms'] as int? ??
+          (policy == 'adaptive_v2' ? 60000 : 12000),
+      freshnessMs:
+          values['freshness_ms'] as int? ??
+          (policy == 'adaptive_v2' ? 150000 : 45000),
+      statusBurstMs: values['status_burst_ms'] as int? ?? 500,
+      discoveryJitterMs: values['discovery_jitter_ms'] as int? ?? 1500,
+      resetCooldownMs: values['reset_cooldown_ms'] as int? ?? 8000,
+      capacity: values['neighbor_capacity'] as int? ?? 16,
+      statusMinPeriodMs: values['status_min_period_ms'] as int? ?? 15000,
+      emptyRetryMinMs: values['empty_retry_min_ms'] as int? ?? 4000,
+      emptyRetryMaxMs: values['empty_retry_max_ms'] as int? ?? 32000,
+      dataGraceMs: values['data_grace_ms'] as int? ?? 10000,
+    );
+  }
+  Map<String, Object> toMap() => {
+    'neighbor_status_policy': policy,
+    'status_period_ms': statusPeriodMs,
+    'freshness_ms': freshnessMs,
+    'status_burst_ms': statusBurstMs,
+    'discovery_jitter_ms': discoveryJitterMs,
+    'reset_cooldown_ms': resetCooldownMs,
+    'neighbor_capacity': capacity,
+    if (adaptive) ...{
+      'status_min_period_ms': statusMinPeriodMs,
+      'empty_retry_min_ms': emptyRetryMinMs,
+      'empty_retry_max_ms': emptyRetryMaxMs,
+      'data_grace_ms': dataGraceMs,
+    },
+  };
   void validate() {
-    if (statusPeriodMs < 1000 ||
+    if (!{'periodic_v1', 'adaptive_v2'}.contains(policy) ||
+        statusPeriodMs < 1000 ||
+        statusPeriodMs > 0x7fffffff ~/ 4 ||
+        freshnessMs > 0x7fffffff ||
+        discoveryJitterMs > 0x7fffffff ~/ 4 ||
         statusBurstMs < 250 ||
         statusBurstMs > 2000 ||
         freshnessMs < statusPeriodMs * 2 ||
         discoveryJitterMs < 0 ||
         resetCooldownMs < 1000 ||
         capacity < 5 ||
-        capacity > 64) {
+        capacity > 64 ||
+        (adaptive &&
+            (statusMinPeriodMs < 1000 ||
+                statusMinPeriodMs > statusPeriodMs ||
+                emptyRetryMinMs < 1000 ||
+                emptyRetryMaxMs < emptyRetryMinMs ||
+                emptyRetryMaxMs > 0x7fffffff ~/ 4 ||
+                dataGraceMs < 1000 ||
+                dataGraceMs > 0x7fffffff ~/ 4 ||
+                freshnessMs <
+                    2 *
+                        (statusPeriodMs +
+                            discoveryJitterMs +
+                            statusBurstMs)))) {
       throw ArgumentError('Unsafe neighbor parameters');
     }
   }
@@ -57,8 +120,10 @@ class NeighborStatusController {
   int? _lastRepair;
   final Set<int> _repairPending = {};
   int? _reportedCooldown;
+  bool peerChanged = false;
 
   bool observe(NeighborFrame frame, int receivedMonotonicMs, int nowMs) {
+    peerChanged = false;
     if (frame.scope != scope ||
         receivedMonotonicMs > nowMs ||
         nowMs - receivedMonotonicMs > parameters.freshnessMs ||
@@ -93,6 +158,20 @@ class NeighborStatusController {
         ? (frame.complete ? frame.inventory : <StateIdentity>[])
         : [packet.stateIdentity];
     final complete = frame.type == NeighborFrameType.status && frame.complete;
+    peerChanged =
+        previous == null ||
+        previous.boot != frame.boot ||
+        nowMs - previous.at > parameters.freshnessMs ||
+        previous.states
+            .map((s) => s.value)
+            .toSet()
+            .difference(states.map((s) => s.value).toSet())
+            .isNotEmpty ||
+        states
+            .map((s) => s.value)
+            .toSet()
+            .difference(previous.states.map((s) => s.value).toSet())
+            .isNotEmpty;
     if (previous == null ||
         previous.boot != frame.boot ||
         previous.complete != complete ||
@@ -201,6 +280,13 @@ class NeighborStatusController {
   }
 
   void started(StateIdentity state) => _forwarded.add(state.value);
+
+  void requestMissingPeer(int transmitter, StateIdentity state, int nowMs) {
+    if (parameters.adaptive &&
+        knowledge(transmitter, state, nowMs) == NeighborKnowledge.missing) {
+      _repairPending.add(transmitter);
+    }
+  }
 
   bool repairAllowed(
     StateIdentity state,

@@ -5,6 +5,9 @@ Tidak ada flash, trial fisik, commit/push, atau penghapusan data oleh implementa
 Pastikan semua Serial Monitor ditutup dan keenam perangkat tetap tersambung;
 laptop jangan sleep. Jangan jalankan controller dan terminal serial bersamaan.
 
+Untuk langkah khusus **smoke full 12 kombinasi** dari terminal baru sampai
+membuka Excel, gunakan [panduan smoke full](neighbor_smoke_full_windows.md).
+
 ## 1. Periksa Toolchain Dan Build
 
 ```powershell

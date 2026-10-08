@@ -14,6 +14,7 @@
 #include "CodedRadio.h"
 #include "TrickleTiming.h"
 #include "NeighborTransport.h"
+#include "NeighborStatusSchedule.h"
 #include <set>
 
 #ifndef RESQMESH_FIRMWARE_BUILD_ID
@@ -90,8 +91,28 @@ bool observationWindowOpen = false;
 String serialBuffer;
 ObservationTracker observationTracker(kDefaultRxBurstGapMs);
 NeighborController neighbors;
+NeighborStatusSchedule statusSchedule;
 uint32_t incarnation = 0, transportSequence = 0, trialScope = 0, nextStatusAt = 0;
 bool rxParticipation = true, txParticipation = true;
+bool adaptiveStatus() { return config.mode==Mode::NeighborStatus && neighbors.parameters.adaptive(); }
+uint32_t statusJitter() { return random(0,neighbors.parameters.jitter+1); }
+bool allObservedHave(uint32_t now) {
+  return scheduler.hasPacket && std::string(neighbors.decision(scheduler.packet,now,false))=="ALL_OBSERVED_HAVE";
+}
+void syncStatus(uint32_t now) {
+  if(!adaptiveStatus()) return;
+  statusSchedule.syncInventory(scheduler.hasPacket ? std::vector<std::string>{stateIdentity(scheduler.packet)} : std::vector<std::string>{},now,statusJitter());
+  statusSchedule.stable(now,allObservedHave(now),statusJitter());
+  nextStatusAt=statusSchedule.nextAt;
+}
+void restartStatus() {
+  nextStatusAt=millis()+1000+statusJitter();
+  if(adaptiveStatus()) {
+    statusSchedule.parameters=neighbors.parameters;
+    statusSchedule.start(millis(),statusJitter());
+    syncStatus(millis());
+  }
+}
 std::set<std::string> frameObservations;
 NeighborFrame activeFrame;
 const NeighborFrame* eventFrame = nullptr;
@@ -173,6 +194,10 @@ void emit(const char* eventType, const Packet* packet = nullptr,
   document["trial_id"] = config.trialId;
   document["mode"] = modeName(config.mode);
   document["role"] = roleName(config.role);
+  if(config.mode==Mode::NeighborStatus) {
+    document["neighbor_status_policy"]=neighbors.parameters.policy;
+    if(adaptiveStatus()) document["status_reason"]=statusSchedule.reason;
+  }
   if (config.neighborProfile) {
     document["transport_profile"] = "neighbor_graph_v1";
     document["scope"] = trialScope;
@@ -550,6 +575,8 @@ void processFrame(const ReceivedPacket& rx) {
   const uint32_t at=rx.receivedAt;
   const bool discovered=!neighbors.known(f.transmitter);
   if (config.mode==Mode::NeighborStatus && neighbors.observe(f,at,millis())) {
+    if(adaptiveStatus() && neighbors.peerChanged) statusSchedule.peerChanged(millis(),statusJitter());
+    if(f.status && scheduler.hasPacket) neighbors.requestMissingPeer(f.transmitter,scheduler.packet,millis());
     if(discovered) emit("NEIGHBOR_DISCOVERED",f.status ? nullptr : &f.packet,nullptr,rx.rssi,observation,String(),&at);
     emit("NEIGHBOR_STATUS_UPDATED",f.status ? nullptr : &f.packet,nullptr,rx.rssi,observation,String(),&at);
     if(scheduler.hasPacket && neighbors.repairAllowed(scheduler.packet,millis(),scheduler.intervalMs,kIminMs)) {
@@ -682,6 +709,13 @@ void startBurst() {
          String(), scheduler.burstId, &succeededAt);
   }
   scheduler.firstAdvertiseStarted = true;
+  if(adaptiveStatus()) {
+    syncStatus(succeededAt);
+    if(statusSchedule.dataSucceeded(stateIdentity(scheduler.packet),succeededAt,allObservedHave(succeededAt),statusJitter())) {
+      emit("STATUS_COALESCED_WITH_DATA",&scheduler.packet,"DATA_STARTED");
+    }
+    nextStatusAt=statusSchedule.nextAt;
+  }
   emit("BLE_RELAY_STARTED", &scheduler.packet, nullptr, 0, String(),
        scheduler.burstId);
   eventFrame=nullptr;
@@ -730,17 +764,21 @@ void startStatusBurst() {
   if(scheduler.hasPacket) { activeFrame.count=1; activeFrame.inventory[0]=inventoryState(scheduler.packet); }
   std::vector<uint8_t> bytes;
   const auto& params=neighbors.parameters;
-  nextStatusAt=millis()+params.statusPeriod+random(0,params.jitter+1);
+  const auto inventory=statusSchedule.inventory;
+  const char* statusReason=adaptiveStatus() ? statusSchedule.reason : "PERIODIC";
+  if(!adaptiveStatus()) nextStatusAt=millis()+params.statusPeriod+random(0,params.jitter+1);
   if(!encodeFrame(activeFrame,bytes)) return;
   eventFrame=&activeFrame;
   scheduler.burstId=String(burstIdentity(activeFrame).c_str());
-  emit("STATUS_BURST_REQUESTED",nullptr,nullptr,0,String(),scheduler.burstId);
+  emit("STATUS_BURST_REQUESTED",nullptr,statusReason,0,String(),scheduler.burstId);
   if(!pauseScanner() || !advertising->start(bytes.data(),bytes.size())) {
+    if(adaptiveStatus()) { statusSchedule.failed(millis(),statusJitter());nextStatusAt=statusSchedule.nextAt; }
     resumeScanner(); emit("STATUS_BURST_FAILED",nullptr,"NATIVE_START_FAILED"); emit("SCANNER_RECOVERY_CHECK",nullptr,"FAILED"); eventFrame=nullptr; return;
   }
   scheduler.advertising=true; scheduler.statusAdvertising=true;
   const uint32_t now=millis(); scheduler.burstEndsAt=now+params.statusBurst;
-  emit("STATUS_BURST_STARTED",nullptr,nullptr,0,String(),scheduler.burstId,&now);
+  emit("STATUS_BURST_STARTED",nullptr,statusReason,0,String(),scheduler.burstId,&now);
+  if(adaptiveStatus()) { statusSchedule.statusSucceeded(inventory,now,allObservedHave(now),statusJitter());nextStatusAt=statusSchedule.nextAt; }
   eventFrame=nullptr;
 }
 
@@ -751,6 +789,7 @@ void tickScheduler() {
     return;
   }
   const uint32_t now = millis();
+  syncStatus(now);
   if(config.mode==Mode::NeighborStatus) for(const auto& expired:neighbors.newlyExpired(now)) {
     eventFrame=&expired;emit("NEIGHBOR_STATUS_EXPIRED",nullptr,"FRESHNESS_ELAPSED");eventFrame=nullptr;
   }
@@ -859,6 +898,13 @@ void emitReadiness(const String& commandId) {
     params["status_period_ms"]=neighbors.parameters.statusPeriod;
     params["status_burst_ms"]=neighbors.parameters.statusBurst;
     params["freshness_ms"]=neighbors.parameters.freshness;
+    params["neighbor_status_policy"]=neighbors.parameters.policy;
+    if(neighbors.parameters.adaptive()) {
+      params["status_min_period_ms"]=neighbors.parameters.statusMinPeriod;
+      params["empty_retry_min_ms"]=neighbors.parameters.emptyRetryMin;
+      params["empty_retry_max_ms"]=neighbors.parameters.emptyRetryMax;
+      params["data_grace_ms"]=neighbors.parameters.dataGrace;
+    }
     params["discovery_jitter_ms"]=neighbors.parameters.jitter;
     params["reset_cooldown_ms"]=neighbors.parameters.resetCooldown;
     params["neighbor_capacity"]=neighbors.parameters.capacity;
@@ -884,6 +930,22 @@ void emitReadiness(const String& commandId) {
   if (serialOutputMutex != nullptr) xSemaphoreGive(serialOutputMutex);
 }
 
+NeighborParameters readNeighborParameters(JsonDocument& document) {
+  NeighborParameters p;
+  p.policy=document["neighbor_status_policy"] | "periodic_v1";
+  p.statusPeriod=document["status_period_ms"] | (p.adaptive() ? 60000 : 12000);
+  p.freshness=document["freshness_ms"] | (p.adaptive() ? 150000 : 45000);
+  p.statusBurst=document["status_burst_ms"] | 500;
+  p.jitter=document["discovery_jitter_ms"] | 1500;
+  p.resetCooldown=document["reset_cooldown_ms"] | 8000;
+  p.capacity=document["neighbor_capacity"] | 16;
+  p.statusMinPeriod=document["status_min_period_ms"] | 15000;
+  p.emptyRetryMin=document["empty_retry_min_ms"] | 4000;
+  p.emptyRetryMax=document["empty_retry_max_ms"] | 32000;
+  p.dataGrace=document["data_grace_ms"] | 10000;
+  return p;
+}
+
 void handleCommand(const String& line) {
   JsonDocument document;
   if (deserializeJson(document, line)) {
@@ -903,7 +965,7 @@ void handleCommand(const String& line) {
     if(config.neighborProfile && !config.trialId.isEmpty() && preferences.getBool("nwindow",false)) {
       observationWindowOpen=true;receiveEnabled.store(rxParticipation);
       resumeScanner();
-      nextStatusAt=millis()+1000+random(0,neighbors.parameters.jitter+1);
+      restartStatus();
     }
     respond(command, commandId, true);
     return;
@@ -960,13 +1022,7 @@ void handleCommand(const String& line) {
         const uint32_t id=value.as<uint32_t>();
         if(!value.is<uint32_t>() || id==0 || id==crc32(node.c_str()) || !unique.insert(id).second) { respond(command,commandId,false,"INVALID_TRANSMITTER");return; }
       }
-      NeighborParameters candidate;
-      candidate.statusPeriod=document["status_period_ms"] | 12000;
-      candidate.statusBurst=document["status_burst_ms"] | 500;
-      candidate.freshness=document["freshness_ms"] | 45000;
-      candidate.jitter=document["discovery_jitter_ms"] | 1500;
-      candidate.resetCooldown=document["reset_cooldown_ms"] | 8000;
-      candidate.capacity=document["neighbor_capacity"] | 16;
+      const auto candidate=readNeighborParameters(document);
       if(!candidate.valid() || document["discovery_jitter_ms"].as<int64_t>()<0) { respond(command,commandId,false,"INVALID_NEIGHBOR_PARAMETERS");return; }
     }
     preferences.putBool("s8required", radioMode == "coded_s8_required");
@@ -999,18 +1055,16 @@ void handleCommand(const String& line) {
         config.allowed[config.allowedCount++]=id;
       }
       auto& p=neighbors.parameters;
-      p.statusPeriod=document["status_period_ms"] | 12000;
-      p.statusBurst=document["status_burst_ms"] | 500;
-      p.freshness=document["freshness_ms"] | 45000;
-      p.jitter=document["discovery_jitter_ms"] | 1500;
-      p.resetCooldown=document["reset_cooldown_ms"] | 8000;
-      p.capacity=document["neighbor_capacity"] | 16;
+      p=readNeighborParameters(document);
       if(!p.valid()) { respond(command,commandId,false,"INVALID_NEIGHBOR_PARAMETERS"); return; }
       std::string serialized; serializeJson(document["allowed_transmitters"],serialized);
       preferences.putString("adjacency",serialized.c_str());
       preferences.putUInt("nperiod",p.statusPeriod); preferences.putUInt("nburst",p.statusBurst);
       preferences.putUInt("nfresh",p.freshness); preferences.putUInt("njitter",p.jitter);
       preferences.putUInt("ncool",p.resetCooldown); preferences.putUInt("ncap",p.capacity);
+      preferences.putString("npolicy",p.policy.c_str());
+      preferences.putUInt("nmin",p.statusMinPeriod);preferences.putUInt("nemin",p.emptyRetryMin);
+      preferences.putUInt("nemax",p.emptyRetryMax);preferences.putUInt("ngrace",p.dataGrace);
     }
     preferences.putBool("ngraph",config.neighborProfile);
     observationTracker.configure(config.rxBurstGapMs);
@@ -1034,7 +1088,7 @@ void handleCommand(const String& line) {
     rxParticipation=txParticipation=true;
     if(config.neighborProfile) { preferences.putBool("nrx",true);preferences.putBool("ntx",true); }
     resumeScanner();
-    nextStatusAt=millis()+1000+random(0,neighbors.parameters.jitter+1);
+    restartStatus();
     observationWindowOpen = true;
     if(config.neighborProfile) preferences.putBool("nwindow",true);
     persistConfig();
@@ -1063,7 +1117,7 @@ void handleCommand(const String& line) {
     if(config.neighborProfile) preferences.putBool("nrx",enabled);
     bool confirmed=true;
     if(command=="set_node_participation") { txParticipation=enabled; if(config.neighborProfile) preferences.putBool("ntx",enabled); if(!enabled) cancelActiveBurst("PARTICIPATION_DISABLED"); }
-    if(enabled) { resumeScanner(); confirmed=scanner && scanner->isScanning(); }
+    if(enabled) { resumeScanner(); confirmed=scanner && scanner->isScanning(); if(confirmed && adaptiveStatus()) restartStatus(); }
     else confirmed=pauseScanner();
     receiveEnabled.store(enabled && observationWindowOpen);
     emit(command=="set_rx_participation" ? "RX_PARTICIPATION_CHANGED" : "NODE_PARTICIPATION_CHANGED",nullptr,confirmed ? (enabled ? "ENABLED_CONFIRMED" : "DISABLED_CONFIRMED") : "FAILED");
@@ -1139,6 +1193,9 @@ void loadPersistentState() {
     JsonDocument adjacency; deserializeJson(adjacency,preferences.getString("adjacency","[]"));
     for(JsonVariant value:adjacency.as<JsonArray>()) if(config.allowedCount<5) config.allowed[config.allowedCount++]=value.as<uint32_t>();
     auto& p=neighbors.parameters;
+    p.policy=preferences.getString("npolicy","periodic_v1").c_str();
+    p.statusMinPeriod=preferences.getUInt("nmin",15000);p.emptyRetryMin=preferences.getUInt("nemin",4000);
+    p.emptyRetryMax=preferences.getUInt("nemax",32000);p.dataGrace=preferences.getUInt("ngrace",10000);
     p.statusPeriod=preferences.getUInt("nperiod",12000); p.statusBurst=preferences.getUInt("nburst",500);
     p.freshness=preferences.getUInt("nfresh",45000); p.jitter=preferences.getUInt("njitter",1500);
     p.resetCooldown=preferences.getUInt("ncool",8000); p.capacity=preferences.getUInt("ncap",16);

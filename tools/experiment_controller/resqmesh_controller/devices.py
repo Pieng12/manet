@@ -247,6 +247,8 @@ class SerialNode(NodeTransport):
     _stop_reader: threading.Event = field(default_factory=threading.Event, init=False, repr=False)
     _reader: threading.Thread | None = field(default=None, init=False, repr=False)
     transport_error: str | None = field(default=None, init=False)
+    pending_serial_bytes: int = field(default=0, init=False)
+    malformed_line_count: int = field(default=0, init=False)
 
     def _connection(self) -> Any:
         if self.transport_error:
@@ -269,6 +271,7 @@ class SerialNode(NodeTransport):
         return self._serial
 
     def _reader_loop(self, connection: Any) -> None:
+        pending = bytearray()
         while not self._stop_reader.is_set():
             try:
                 raw = connection.readline()
@@ -280,18 +283,27 @@ class SerialNode(NodeTransport):
                 return
             if not raw:
                 continue
-            try:
-                value = json.loads(raw.decode("utf-8", errors="replace"))
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(value, dict):
-                continue
+            # readline may return a fragment on timeout, even with a healthy port.
+            pending.extend(raw)
+            lines = pending.split(b"\n")
+            pending = bytearray(lines.pop())
             with self._condition:
-                if value.get("kind") == "event" or value.get("event_type"):
-                    self._events.append(value)
-                else:
-                    self._responses.append(value)
-                self._condition.notify_all()
+                self.pending_serial_bytes = len(pending)
+            for line in lines:
+                try:
+                    value = json.loads(line.decode("utf-8", errors="replace"))
+                except json.JSONDecodeError:
+                    with self._condition:
+                        self.malformed_line_count += 1
+                    continue
+                if not isinstance(value, dict):
+                    continue
+                with self._condition:
+                    if value.get("kind") == "event" or value.get("event_type"):
+                        self._events.append(value)
+                    else:
+                        self._responses.append(value)
+                    self._condition.notify_all()
 
     def command(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         payload = {"command": name, **arguments}
@@ -310,7 +322,11 @@ class SerialNode(NodeTransport):
                         self._responses.remove(value)
                         return value
                 self._condition.wait(timeout=max(0.0, deadline - time.monotonic()))
-        raise DeviceError(f"no serial response for {name} ({command_id}) on {self.port}")
+        raise DeviceError(
+            f"no serial response for {name} ({command_id}) on {self.port} "
+            f"(pending_serial_bytes={self.pending_serial_bytes}, "
+            f"malformed_lines={self.malformed_line_count})"
+        )
 
     def collect_events(
         self,

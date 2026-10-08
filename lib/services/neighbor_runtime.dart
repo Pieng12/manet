@@ -9,6 +9,7 @@ import 'package:pkmproject/services/ble_protocol.dart';
 import 'package:pkmproject/services/experiment_clock.dart';
 import 'package:pkmproject/services/experiment_logger.dart';
 import 'package:pkmproject/services/neighbor_status_controller.dart';
+import 'package:pkmproject/services/neighbor_status_schedule.dart';
 import 'package:pkmproject/services/neighbor_transport.dart';
 import 'package:pkmproject/utils/hash_utils.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -24,7 +25,19 @@ class NeighborRuntime {
   Map<String, dynamic>? configuration;
   NeighborStatusController? controller;
   int _boot = 0, _sequence = 0;
-  int nextStatusAt = 0;
+  int _nextStatusAt = 0;
+  NeighborStatusSchedule? statusSchedule;
+  List<StateIdentity> _inventory = [];
+  int get nextStatusAt => statusSchedule?.nextAt ?? _nextStatusAt;
+  set nextStatusAt(int value) {
+    if (statusSchedule != null) {
+      statusSchedule!.nextAt = value;
+    } else {
+      _nextStatusAt = value;
+    }
+  }
+
+  int _jitter() => _rng.nextInt(controller!.parameters.discoveryJitterMs + 1);
   bool get enabled => configuration != null && configuration!['scope'] != null;
   bool get statusEnabled =>
       enabled && configuration!['mode'] == 'trickle_neighbor_status';
@@ -58,14 +71,7 @@ class NeighborRuntime {
           allowed.any((v) => v == null || v <= 0 || v > 0xffffffff)) {
         throw ArgumentError('Invalid stable transmitter adjacency');
       }
-      NeighborParameters(
-        statusPeriodMs: args['status_period_ms'] as int? ?? 12000,
-        statusBurstMs: args['status_burst_ms'] as int? ?? 500,
-        freshnessMs: args['freshness_ms'] as int? ?? 45000,
-        discoveryJitterMs: args['discovery_jitter_ms'] as int? ?? 1500,
-        resetCooldownMs: args['reset_cooldown_ms'] as int? ?? 8000,
-        capacity: args['neighbor_capacity'] as int? ?? 16,
-      ).validate();
+      final parameters = NeighborParameters.fromMap(args)..validate();
       await prefs.setString(
         _key,
         jsonEncode({
@@ -73,12 +79,7 @@ class NeighborRuntime {
           'mode': args['mode'],
           'allowed_transmitters': allowed,
           'scope': null,
-          'status_period_ms': args['status_period_ms'] ?? 12000,
-          'status_burst_ms': args['status_burst_ms'] ?? 500,
-          'freshness_ms': args['freshness_ms'] ?? 45000,
-          'discovery_jitter_ms': args['discovery_jitter_ms'] ?? 1500,
-          'reset_cooldown_ms': args['reset_cooldown_ms'] ?? 8000,
-          'neighbor_capacity': args['neighbor_capacity'] ?? 16,
+          ...parameters.toMap(),
         }),
       );
     }
@@ -117,19 +118,14 @@ class NeighborRuntime {
         ? null
         : Map<String, dynamic>.from(jsonDecode(raw) as Map);
     controller = null;
+    statusSchedule = null;
+    _inventory = [];
     if (!enabled) {
       _loaded = raw;
       return;
     }
     final cfg = configuration!;
-    final params = NeighborParameters(
-      statusPeriodMs: cfg['status_period_ms'] as int,
-      statusBurstMs: cfg['status_burst_ms'] as int,
-      freshnessMs: cfg['freshness_ms'] as int,
-      discoveryJitterMs: cfg['discovery_jitter_ms'] as int,
-      resetCooldownMs: cfg['reset_cooldown_ms'] as int,
-      capacity: cfg['neighbor_capacity'] as int,
-    );
+    final params = NeighborParameters.fromMap(cfg);
     controller = NeighborStatusController(scope: scope, parameters: params);
     _boot = ((prefs.getInt('neighbor_incarnation') ?? 0) + 1) & 0xffffffff;
     if (_boot == 0) {
@@ -144,6 +140,11 @@ class NeighborRuntime {
     }
     _loaded = raw;
     _sequence = 0;
+    if (statusEnabled && params.adaptive) {
+      statusSchedule = NeighborStatusSchedule(params)
+        ..start(ExperimentClock.instance.monotonicTimeMs(), _jitter());
+      return;
+    }
     nextStatusAt =
         ExperimentClock.instance.monotonicTimeMs() +
         1000 +
@@ -177,16 +178,75 @@ class NeighborRuntime {
     );
   }
 
-  Future<NeighborFrame> statusFrame() async {
+  Future<List<StateIdentity>> inventoryStates() async {
     final db = await DatabaseHelper().database;
     final rows = await db.query(
       'sos_messages',
       where: 'ack_received_at IS NULL AND local_state NOT IN (?, ?)',
       whereArgs: ['acked', 'synced'],
     );
-    final states = rows
-        .map((r) => SOSMessage.fromDbMap(r).stateIdentity)
-        .toList();
+    return rows.map((r) => SOSMessage.fromDbMap(r).stateIdentity).toList();
+  }
+
+  bool _allHave(int now) =>
+      _inventory.isNotEmpty &&
+      _inventory.every((state) {
+        final values = controller!.snapshot(state, now).values;
+        return values.isNotEmpty &&
+            values.every((v) => v == NeighborKnowledge.have);
+      });
+
+  Future<void> synchronizeStatus(
+    int now, {
+    Future<List<StateIdentity>> Function()? readInventory,
+  }) async {
+    if (statusSchedule == null) return;
+    _inventory = await (readInventory ?? inventoryStates)();
+    statusSchedule!.syncInventory(
+      _inventory.map((s) => s.value).toList(),
+      now,
+      _jitter(),
+    );
+    statusSchedule!.stable(now, _allHave(now), _jitter());
+  }
+
+  void peerChanged(int now) {
+    statusSchedule?.peerChanged(now, _jitter());
+  }
+
+  void restartStatus(int now) {
+    statusSchedule?.start(now, _jitter());
+  }
+
+  Future<void> dataStarted(StateIdentity state, int now) async {
+    final coalesced =
+        statusSchedule?.dataSucceeded(
+          state.value,
+          now,
+          _allHave(now),
+          _jitter(),
+        ) ??
+        false;
+    if (coalesced) {
+      await log(
+        'STATUS_COALESCED_WITH_DATA',
+        state: state,
+        monotonic: now,
+        reason: 'DATA_STARTED',
+      );
+    }
+  }
+
+  void statusStarted(List<String> inventory, int now) {
+    statusSchedule?.statusSucceeded(inventory, now, _allHave(now), _jitter());
+  }
+
+  void statusFailed(int now) => statusSchedule?.failed(now, _jitter());
+
+  Future<NeighborFrame> statusFrame() async {
+    final states = statusSchedule == null
+        ? await inventoryStates()
+        : _inventory;
     return frame(
       inventory: states.take(NeighborFrame.capacity).toList(),
       complete: states.length <= NeighborFrame.capacity,
@@ -194,6 +254,7 @@ class NeighborRuntime {
   }
 
   void statusAttempted(int now) {
+    if (statusSchedule != null) return;
     final p = controller!.parameters;
     nextStatusAt =
         now + p.statusPeriodMs + _rng.nextInt(p.discoveryJitterMs + 1);
@@ -254,6 +315,9 @@ class NeighborRuntime {
           ...detail,
           if (enabled) 'scope': scope,
           if (frame != null) ...fields(frame),
+          if (statusEnabled)
+            'neighbor_status_policy': controller!.parameters.policy,
+          if (statusSchedule != null) 'status_reason': statusSchedule!.reason,
           'reason': ?reason,
           'clock_domain': clockDomain,
         },

@@ -1,0 +1,86 @@
+﻿{
+    "transport_profile":  "neighbor_graph_v1",
+    "testbed_profile":  "android_plus_five_esp32",
+    "session_id":  "neighbor-smoke-20261008-023027-389",
+    "session_label":  "neighbor-full-smoke",
+    "android_build_id":  "0df80ba6480d",
+    "firmware_build_id":  "0df80ba6480d",
+    "protocol_version":  "resqmesh-ble17-v1",
+    "radio_mode":  "coded",
+    "modes":  [
+                  "basic_flooding",
+                  "trickle_no_suppression",
+                  "trickle",
+                  "trickle_neighbor_status"
+              ],
+    "scenarios":  [
+                      "S0_MAIN",
+                      "S1_DELAYED_RX",
+                      "S2_LATE_JOIN"
+                  ],
+    "valid_trials_per_condition":  1,
+    "max_attempts_per_condition":  1,
+    "trial_order":  "balanced_randomized",
+    "random_seed":  231402095,
+    "observation_window_seconds":  180,
+    "perturbation_delay_seconds":  30,
+    "minimum_recovery_seconds":  120,
+    "quiet_period_seconds":  5,
+    "clock_tolerance_ms":  100,
+    "rx_burst_gap_ms":  1000,
+    "latitude":  3.5952,
+    "longitude":  98.6722,
+    "gateway_enabled":  false,
+    "ack_enabled":  false,
+    "neighbor_parameters":  {
+                                "status_period_ms":  12000,
+                                "status_burst_ms":  500,
+                                "freshness_ms":  45000,
+                                "discovery_jitter_ms":  1500,
+                                "reset_cooldown_ms":  8000,
+                                "neighbor_capacity":  16
+                            },
+    "nodes":  [
+                  {
+                      "node_id":  "android-source",
+                      "transport":  "adb",
+                      "serial":  "fbde50b6",
+                      "role":  "SOURCE"
+                  },
+                  {
+                      "node_id":  "esp-r1a",
+                      "transport":  "serial",
+                      "port":  "COM8",
+                      "baudrate":  115200,
+                      "role":  "RELAY"
+                  },
+                  {
+                      "node_id":  "esp-r1b",
+                      "transport":  "serial",
+                      "port":  "COM9",
+                      "baudrate":  115200,
+                      "role":  "RELAY"
+                  },
+                  {
+                      "node_id":  "esp-r2a",
+                      "transport":  "serial",
+                      "port":  "COM10",
+                      "baudrate":  115200,
+                      "role":  "RELAY"
+                  },
+                  {
+                      "node_id":  "esp-r2b",
+                      "transport":  "serial",
+                      "port":  "COM11",
+                      "baudrate":  115200,
+                      "role":  "RELAY"
+                  },
+                  {
+                      "node_id":  "esp-destination",
+                      "transport":  "serial",
+                      "port":  "COM12",
+                      "baudrate":  115200,
+                      "role":  "RELAY"
+                  }
+              ]
+}
