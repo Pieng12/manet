@@ -31,6 +31,11 @@ object NativeBleManager {
         return active && currentScanAll == requestedScanAll
     }
 
+    internal fun scanManufacturerPrefixes(): List<ByteArray> = listOf(
+        byteArrayOf(0x52, 0x4D),
+        byteArrayOf(0x52, 0x4E)
+    )
+
     internal fun scanFailureTelemetry(errorCode: Int): ScanStopTelemetry {
         return ScanStopTelemetry(success = false, active = false, errorCode = "SCAN_STATUS_$errorCode")
     }
@@ -139,15 +144,15 @@ object NativeBleManager {
             Log.w(TAG, "Debug scan-all mode is active. Experiment filters are disabled.")
             emptyList()
         } else {
-            listOf(
+            scanManufacturerPrefixes().map { prefix ->
                 ScanFilter.Builder()
                     .setManufacturerData(
                         NativeBleConfig.MANUFACTURER_ID,
-                        byteArrayOf(0x52, 0x4D),
+                        prefix,
                         byteArrayOf(0xFF.toByte(), 0xFF.toByte())
                     )
                     .build()
-            )
+            }
         }
 
         val scanSettings = ScanSettings.Builder()

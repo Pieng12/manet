@@ -1,0 +1,48 @@
+{
+  "transport_profile": "neighbor_graph_v1",
+  "testbed_profile": "esp_only_five_v1",
+  "session_id": "mpl-esp-only-smoke-REPLACE_TIMESTAMP",
+  "session_label": "ESP-only smoke; bukan dataset utama Android",
+  "firmware_build_id": "<FIRMWARE_BUILD_HEX_12>",
+  "protocol_version": "resqmesh-ble17-v1",
+  "radio_mode": "coded",
+  "modes": ["basic_flooding", "trickle", "trickle_mpl"],
+  "scenarios": ["S0_STABLE", "S1_BRANCH_DELAYED", "S2_POST_DATA_STOP"],
+  "scenario_parameters": {
+    "S0_STABLE": {"observation_window_seconds": 180, "activate_at_seconds": null, "inactive_node_ids": []},
+    "S1_BRANCH_DELAYED": {"observation_window_seconds": 180, "activate_at_seconds": 60, "inactive_node_ids": ["esp-r2b", "esp-destination"]},
+    "S2_POST_DATA_STOP": {"observation_window_seconds": 420, "activate_at_seconds": 300, "inactive_node_ids": ["esp-destination"]}
+  },
+  "activation_tolerance_ms": 10000,
+  "valid_trials_per_condition": 1,
+  "max_attempts_per_condition": 1,
+  "trial_order": "balanced_randomized",
+  "random_seed": 231402098,
+  "observation_window_seconds": 180,
+  "perturbation_delay_seconds": 60,
+  "minimum_recovery_seconds": 120,
+  "quiet_period_seconds": 5,
+  "clock_tolerance_ms": 100,
+  "rx_burst_gap_ms": 1000,
+  "latitude": 3.5952,
+  "longitude": 98.6722,
+  "gateway_enabled": false,
+  "ack_enabled": false,
+  "nodes": [
+    {"node_id": "esp-r1b", "transport": "serial", "port": "COM_SOURCE", "baudrate": 115200, "role": "SOURCE"},
+    {"node_id": "esp-r1a", "transport": "serial", "port": "COM_A", "baudrate": 115200, "role": "RELAY"},
+    {"node_id": "esp-r2a", "transport": "serial", "port": "COM_C", "baudrate": 115200, "role": "RELAY"},
+    {"node_id": "esp-r2b", "transport": "serial", "port": "COM_D", "baudrate": 115200, "role": "RELAY"},
+    {"node_id": "esp-destination", "transport": "serial", "port": "COM_E", "baudrate": 115200, "role": "RELAY"}
+  ],
+  "scheduler_semantics": "resqmesh-trickle-mpl-v1",
+  "mpl_parameters": {
+    "mpl_data_imin_ms": 8000, "mpl_data_imax_ms": 256000, "mpl_data_k": 1, "mpl_data_expirations": 5,
+    "mpl_control_imin_ms": 4000, "mpl_control_imax_ms": 32000, "mpl_control_k": 1, "mpl_control_expirations": 4,
+    "mpl_repair_cooldown_ms": 8000, "mpl_repair_budget": 2, "mpl_repair_expiry_ms": 60000,
+    "mpl_bootstrap_opportunities": 2, "mpl_retry_ms": 1000, "mpl_retry_limit": 3,
+    "mpl_probe_interval_ms": 60000, "mpl_probe_limit": 0,
+    "mpl_freshness_ms": 150000, "mpl_discovery_jitter_ms": 1500
+  },
+  "buffer_retention": "persistent_until_supersession_ack_admin"
+}

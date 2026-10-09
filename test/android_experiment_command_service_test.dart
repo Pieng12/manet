@@ -367,6 +367,56 @@ void main() {
     );
   });
 
+  test(
+    'merged recovery summary uses existing storage and retains null delays',
+    () async {
+      await commands.execute('configure_session', {
+        ...configureArgs(),
+        'node_id': 'android-source',
+        'transport_profile': 'neighbor_graph_v1',
+        'topology': 'neighbor_graph_v1',
+        'mode': 'basic_flooding',
+        'allowed_transmitters': [123],
+      });
+      await commands.execute('start_trial', {
+        'command_id': 'recovery-start',
+        'session_id': 'session-external',
+        'trial_id': 'recovery-trial',
+        'trial_code': 'S2_POST_DATA_STOP',
+      });
+      for (final extended in [false, true]) {
+        final summary = <String, dynamic>{
+          'session_id': 'session-external',
+          'trial_id': 'recovery-trial',
+          'measurement_version': 'all-node-burst-v1',
+          'N': 5,
+          'dsr_percent': 80,
+          if (extended) ...{
+            'recovery_measurement_version': 'same-node-recovery-v1',
+            'recovery_mean_ms': null,
+            'recovery_eligible_targets': 1,
+            'recovery_receivers': [
+              {
+                'receiver': 'esp-destination',
+                'recovery_delay_ms': null,
+                'recovery_status': 'NOT_RECOVERED_WITHIN_WINDOW',
+              },
+            ],
+          },
+        };
+        final result = await commands.execute('store_neighbor_metrics', {
+          'command_id': 'summary-$extended',
+          'summary_base64': base64Encode(utf8.encode(jsonEncode(summary))),
+        });
+        expect(result['ok'], true);
+        final status = await commands.execute('get_neighbor_status', {
+          'command_id': 'summary-status-$extended',
+        });
+        expect(status['network_summary'], summary);
+      }
+    },
+  );
+
   test('readiness reports the configured 24-bit protocol epoch', () async {
     final result = await commands.execute('readiness', const {});
     final epoch = result['protocol_epoch'] as Map<String, dynamic>;

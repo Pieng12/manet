@@ -645,7 +645,7 @@ class ExperimentController:
             "destination_node_ids": sorted(destination_ids),
             "expected_hop_in": 0 if self.config.get("transport_profile") == "neighbor_graph_v1" else int(spec.hypothesis[1:]),
             "observation_window_ms": int(
-                float(self.config["observation_window_seconds"]) * 1000
+                self.observation_window_seconds(spec) * 1000
             ),
             "clock_tolerance_ms": int(self.config["clock_tolerance_ms"]),
             "rx_burst_gap_ms": int(self.config["rx_burst_gap_ms"]),
@@ -660,6 +660,7 @@ class ExperimentController:
             ),
             "started_at_ms": time.time_ns() // 1_000_000,
             "config_fingerprint": self.config_fingerprint,
+            **self.trial_metadata(spec),
         }
         self.manifest["trials"][spec.trial_id] = record
         self._save_manifest()
@@ -684,7 +685,7 @@ class ExperimentController:
             self.before_trigger(spec)
             sources = [node for node in self.nodes if node.node_id == source_ids[0]]
             observation_window_ms = int(
-                float(self.config["observation_window_seconds"]) * 1000
+                self.observation_window_seconds(spec) * 1000
             )
             record["trigger_requested_at_ms"] = time.time_ns() // 1_000_000
             self._save_manifest()
@@ -700,7 +701,7 @@ class ExperimentController:
             )
             if trigger.get("ok") is not True:
                 raise DeviceError(f"trigger failed: {trigger}")
-            record["message_key"] = canonical_message_key(trigger.get("message_key"))
+            record["message_key"] = self.source_message_key(sources[0], spec, trigger)
             self._save_manifest()
             observation_started_at_ms = self._wait_for_source_start(
                 sources[0], spec, record["message_key"]
@@ -772,6 +773,13 @@ class ExperimentController:
                         "trial_id": device_trial_id,
                     },
                 )
+        except KeyboardInterrupt:
+            from .neighbor_testbed import evidence_profile
+            if evidence_profile(self.config):
+                record.update(terminal=True, result="INVALID", invalid_reasons=["USER_INTERRUPTED"],
+                              ended_at_ms=time.time_ns() // 1_000_000)
+                self.archive_failed_trial(spec, record)
+            raise
         except Exception as error:
             record.update(
                 terminal=True,
@@ -825,6 +833,15 @@ class ExperimentController:
 
     def before_trigger(self, spec: TrialSpec) -> None:
         pass
+
+    def observation_window_seconds(self, spec: TrialSpec) -> float:
+        return float(self.config["observation_window_seconds"])
+
+    def trial_metadata(self, spec: TrialSpec) -> dict[str, Any]:
+        return {}
+
+    def source_message_key(self, source, spec, response):
+        return canonical_message_key(response.get("message_key"))
 
     def archive_failed_trial(self, spec: TrialSpec, record: dict[str, Any]) -> None:
         pass

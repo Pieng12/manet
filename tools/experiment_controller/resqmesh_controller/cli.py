@@ -17,6 +17,7 @@ from .devices import (
     discover_serial,
 )
 from .log_merge import merge_directory
+from .neighbor_testbed import evidence_profile
 
 
 def load_config(path: Path) -> dict[str, Any]:
@@ -44,7 +45,8 @@ def build_nodes(config: dict[str, Any]) -> list[NodeTransport]:
 
 
 def validate_discovered_nodes(config: dict[str, Any]) -> None:
-    adb_records = {item["serial"]: item for item in discover_adb()}
+    adb_records = ({item["serial"]: item for item in discover_adb()}
+                   if any(n["transport"] == "adb" for n in config["nodes"]) else {})
     serial_records = {str(item["port"]).upper(): item for item in discover_serial()}
     errors: list[str] = []
     for item in config["nodes"]:
@@ -67,7 +69,8 @@ def validate_discovered_nodes(config: dict[str, Any]) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description="ResQMesh physical experiment controller")
     subparsers = parser.add_subparsers(dest="command", required=True)
-    subparsers.add_parser("discover")
+    discovery = subparsers.add_parser("discover")
+    discovery.add_argument("--serial-only", action="store_true", help="Do not invoke ADB")
     for name in ("plan", "readiness", "smoke", "run"):
         command = subparsers.add_parser(name)
         command.add_argument("--config", type=Path, required=True)
@@ -75,6 +78,7 @@ def main() -> int:
         if name == "run":
             command.add_argument("--limit", type=int)
             command.add_argument("--force-without-smoke", action="store_true")
+            command.add_argument("--smoke-report", type=Path, help="Validated smoke report from a separate output folder")
     merge = subparsers.add_parser("merge")
     merge.add_argument("--input", type=Path, required=True)
     merge.add_argument("--output", type=Path, required=True)
@@ -86,7 +90,7 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.command == "discover":
-        print(json.dumps({"adb": discover_adb(), "serial": discover_serial()}, indent=2))
+        print(json.dumps({"adb": [] if args.serial_only else discover_adb(), "serial": discover_serial()}, indent=2))
         return 0
     if args.command == "merge":
         print(json.dumps(merge_directory(args.input, args.output, args.manifest), indent=2))
@@ -97,7 +101,13 @@ def main() -> int:
         print(json.dumps(result, indent=2))
         return 2 if result["counts"]["FAIL"] else 3 if result["counts"]["INCONCLUSIVE"] or not result["checks"] else 0
 
-    config = load_config(args.config)
+    try:
+        config = load_config(args.config)
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        print(json.dumps({"ok": False, "config": str(args.config.resolve()),
+                          "error": f"Konfigurasi tidak dapat dibaca: {error}",
+                          "instruction": "Buat konfigurasi lokal dari contoh yang sesuai, lalu isi COM dan build ID sebelum plan/readiness."}))
+        return 2
     controller_type = ExperimentController
     if config.get("transport_profile") == "neighbor_graph_v1":
         from .neighbor_experiment import NeighborExperimentController
@@ -125,11 +135,15 @@ def main() -> int:
     else:
         run_output = args.output
     if args.command == "run" and not args.force_without_smoke:
-        smoke_path = args.output / "smoke_report.json"
+        smoke_path = args.smoke_report or args.output / "smoke_report.json"
         if not smoke_path.exists():
             print(json.dumps({"ok": False, "error": "smoke_report.json is required before batch"}, indent=2))
             return 3
-        smoke = json.loads(smoke_path.read_text(encoding="utf-8"))
+        try:
+            smoke = load_config(smoke_path)
+        except (OSError, UnicodeError, json.JSONDecodeError) as error:
+            print(json.dumps({"ok": False, "error": f"Smoke report tidak dapat dibaca: {error}"}))
+            return 3
         if not smoke_matches_config(smoke, config):
             print(json.dumps({"ok": False, "error": "smoke report failed or does not match build/config/topology"}, indent=2))
             return 3
@@ -170,6 +184,22 @@ def main() -> int:
                 run_output / "manifest.json",
             )
             print(json.dumps({"results": results, "summary": controller.batch_summary()}, indent=2))
+    except (KeyboardInterrupt, DeviceError, OSError) as error:
+        if not evidence_profile(config):
+            raise
+        controller._save_manifest()
+        controller._write_attempt_summary()
+        partial_export_error = None
+        if (run_output / "raw").exists():
+            try:
+                merge_directory(run_output / "raw", run_output / "partial_merged", run_output / "manifest.json")
+            except Exception as export_error:
+                partial_export_error = str(export_error)
+        print(json.dumps({"ok": False, "error": "USER_INTERRUPTED" if isinstance(error, KeyboardInterrupt) else str(error),
+                          "manifest": str(controller.manifest_path),
+                          "partial_export_error": partial_export_error,
+                          "instruction": "Pastikan advertising ESP berhenti; jika cleanup belum terkonfirmasi, matikan ESP sebelum mengulang."}))
+        return 130 if isinstance(error, KeyboardInterrupt) else 2
     finally:
         for node in nodes:
             node.close()

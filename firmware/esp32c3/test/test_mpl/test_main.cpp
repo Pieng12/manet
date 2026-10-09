@@ -62,6 +62,19 @@ void multi_peer_state_bounds() {
   TEST_ASSERT_TRUE(m.repairProtected(stateIdentity(p()),300));TEST_ASSERT_TRUE(m.repairProtected(stateIdentity(p(456)),300));
   m.receive(summary(4),301,301);TEST_ASSERT_EQUAL_UINT32(4,m.repairs.size());
 }
+void recovery_180_expiration_three() {
+  MplScheduler m;m.parameters.values["mpl_data_expirations"]=3;init(m);m.sync({p()},0);
+  m.tick(55999);TEST_ASSERT_TRUE(m.data.at(stateIdentity(p())).active);
+  m.tick(56000);TEST_ASSERT_FALSE(m.data.at(stateIdentity(p())).active);
+  TEST_ASSERT_EQUAL_UINT32(3,m.data.at(stateIdentity(p())).e);TEST_ASSERT_EQUAL_UINT32(1,m.buffer.size());
+  TEST_ASSERT_EQUAL_UINT32(8000,m.parameters.get("data_imin_ms"));
+  TEST_ASSERT_EQUAL_UINT32(256000,m.parameters.get("data_imax_ms"));
+  TEST_ASSERT_EQUAL_UINT32(4,m.parameters.get("control_expirations"));
+  MplParameters defaults;TEST_ASSERT_EQUAL_UINT32(5,defaults.get("data_expirations"));
+  TEST_ASSERT_TRUE(m.receive(summary(30),90000,90000));
+  auto& t=m.data.at(stateIdentity(p()));TEST_ASSERT_TRUE(t.active);TEST_ASSERT_TRUE(m.repairProtected(t.key,90000));
+  TEST_ASSERT_TRUE(m.dataDue(t.key,t.transmit));
+}
 void native_failure_generation() {
   MplScheduler m;init(m);m.sync({p()},0);m.receive(summary(),100,100);
   auto& t=m.data.at(stateIdentity(p()));TEST_ASSERT_TRUE(m.dataDue(t.key,4000));
@@ -139,6 +152,6 @@ void activation_renews_exhausted_repair() {
   uint32_t boot=UINT32_MAX,seq=10;TEST_ASSERT_FALSE(advanceActivationIdentity(boot,seq));
   TEST_ASSERT_EQUAL_UINT32(UINT32_MAX,boot);TEST_ASSERT_EQUAL_UINT32(10,seq);
 }
-int main(int,char**) {UNITY_BEGIN();RUN_TEST(activation_renews_exhausted_repair);RUN_TEST(inventory_change_renews_repair);RUN_TEST(expired_deficit_new_incarnation);RUN_TEST(upper_rng_and_late_callback);RUN_TEST(first_data_and_ambiguous_inventory);RUN_TEST(settled_late_join_branch);RUN_TEST(timer_rules);RUN_TEST(duplicate_freshness);RUN_TEST(inventory_classification);
+int main(int,char**) {UNITY_BEGIN();RUN_TEST(recovery_180_expiration_three);RUN_TEST(activation_renews_exhausted_repair);RUN_TEST(inventory_change_renews_repair);RUN_TEST(expired_deficit_new_incarnation);RUN_TEST(upper_rng_and_late_callback);RUN_TEST(first_data_and_ambiguous_inventory);RUN_TEST(settled_late_join_branch);RUN_TEST(timer_rules);RUN_TEST(duplicate_freshness);RUN_TEST(inventory_classification);
  RUN_TEST(bounded_branch_repair);RUN_TEST(bootstrap_restart);RUN_TEST(retained_buffer);RUN_TEST(multi_peer_state_bounds);
  RUN_TEST(native_failure_generation);RUN_TEST(control_slot_and_wrap);RUN_TEST(replay_boot_partial_and_supersession);return UNITY_END();}

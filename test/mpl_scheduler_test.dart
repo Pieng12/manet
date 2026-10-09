@@ -52,6 +52,25 @@ MplScheduler scheduler([
   diagnostic: events?.add,
 )..discover(0);
 void main() {
+  test('expiration 3 stops DATA after 56 seconds and retains repair state', () {
+    final m = scheduler(null, {'mpl_data_expirations': 3});
+    m.sync([state], 0);
+    m.tick(55999);
+    expect(m.data[state.value]!.active, true);
+    m.tick(56000);
+    expect(m.data[state.value]!.active, false);
+    expect(m.data[state.value]!.e, 3);
+    expect(m.buffer.containsKey(state.value), true);
+    expect(m.parameters['data_imin_ms'], 8000);
+    expect(m.parameters['data_imax_ms'], 256000);
+    expect(m.parameters['control_expirations'], 4);
+    expect(MplParameters()['data_expirations'], 5);
+    m.receive(status(peer: 30), 90000, 90000);
+    expect(m.data[state.value]!.active, true);
+    expect(m.repairProtected(state.value, 90000), true);
+    final timer = m.data[state.value]!;
+    expect(m.dataDue(state.value, timer.transmit), true);
+  });
   test('inventory change renews exhausted repair, sequence alone does not', () {
     final m = scheduler();
     m.sync([state], 0);

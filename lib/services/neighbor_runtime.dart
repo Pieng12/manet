@@ -415,7 +415,7 @@ class NeighborRuntime {
         detail: {
           ...detail,
           if (mplEnabled) 'scheduler_semantics': MplScheduler.semantics,
-          if (mplEnabled) 'local_boot_id': _boot,
+          if (enabled) 'local_boot_id': _boot,
           if (enabled) 'scope': scope,
           if (frame != null) ...fields(frame),
           if (statusEnabled)

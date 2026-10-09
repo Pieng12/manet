@@ -16,6 +16,7 @@ import 'package:pkmproject/services/research_session_service.dart';
 import 'package:pkmproject/sync_service.dart';
 import 'package:pkmproject/widgets/resq_ui.dart';
 import 'package:pkmproject/widgets/range_test_tab.dart';
+import 'package:pkmproject/widgets/research_recovery_rows.dart';
 import 'package:pkmproject/services/database_helper.dart';
 import 'package:uuid/uuid.dart';
 
@@ -374,6 +375,10 @@ class _ResearchMonitorScreenState extends State<ResearchMonitorScreen>
                     : 'Tidak diterima dalam window',
               ),
           ]),
+          if (summary?['recovery_measurement_version'] != null)
+            _section('Pemulihan Setelah ON', [
+              ResearchRecoveryRows(summary: summary!),
+            ]),
           _section('Statistik Lokal HP', [
             _kv(
               'SOS accepted',

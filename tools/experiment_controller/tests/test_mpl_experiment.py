@@ -175,15 +175,85 @@ class MplExperimentTest(unittest.TestCase):
             report=ctrl.smoke_report()
             self.assertTrue(report['passed']);self.assertEqual(9,len(report['conditions']))
 
-    def test_recovery_uses_confirmed_on_native_time_with_clock_correction(self):
+    def test_recovery_uses_on_event_and_rx_on_the_same_local_clock(self):
         r=record();r['participation']=[{'node':TARGETS[0],'enabled':True,
-            'response':{'confirmed_enabled':True,'timestamp_ms':1070}}]
+            'response':{'confirmed_enabled':True,'timestamp_ms':1097,'native_monotonic_ms':1044107,'local_boot_id':12}}]
         r['clock_samples']={TARGETS[0]:{'offset_ms':10}}
-        metric=summarize_network(source_events()+[received(TARGETS[0])],r)
-        self.assertEqual(20,metric['per_receiver'][0]['recovery_delay_ms'])
+        on={**ev('RX_PARTICIPATION_CHANGED',TARGETS[0],1092),
+            'confirmed_enabled':True,'rx_enabled':True,'monotonic_ms':1044102,
+            'clock_domain':'esp_boot_millis','local_boot_id':12}
+        rx={**received(TARGETS[0]),'monotonic_ms':1044110,
+            'clock_domain':'esp_boot_millis','local_boot_id':12,'boot_id':99}
+        metric=summarize_network(source_events()+[on,rx],r)
+        pair=metric['per_receiver'][0]
+        self.assertEqual(8,pair['recovery_delay_ms'])
+        self.assertEqual(1092,pair['recovery_on_confirmed_at_ms'])
+        self.assertEqual('same_node_monotonic_event',pair['recovery_time_basis'])
+        self.assertIsNone(pair['recovery_unavailable_reason'])
+        self.assertEqual(100,metric['e2e_mean_ms'])
         self.assertEqual(4,metric['failed_pairs'])
+        rx['clock_offset_ms']=250
+        self.assertEqual(8,summarize_network(source_events()+[on,rx],r)['per_receiver'][0]['recovery_delay_ms'])
         r['participation'][0]['response']['confirmed_enabled']=False
-        self.assertIsNone(summarize_network(source_events()+[received(TARGETS[0])],r)['per_receiver'][0]['recovery_delay_ms'])
+        self.assertIsNone(summarize_network(source_events()+[on,rx],r)['per_receiver'][0]['recovery_delay_ms'])
+
+    def recovery_fixture(self):
+        r=record();r['participation']=[{'node':TARGETS[0],'enabled':True,
+            'response':{'confirmed_enabled':True,'timestamp_ms':1099,'local_boot_id':12}}]
+        on={**ev('NODE_PARTICIPATION_CHANGED',TARGETS[0],1090),
+            'confirmed_enabled':True,'rx_enabled':True,'monotonic_ms':10,
+            'clock_domain':'esp_boot_millis','local_boot_id':12}
+        rx={**received(TARGETS[0]),'monotonic_ms':18,
+            'clock_domain':'esp_boot_millis','local_boot_id':12}
+        return r,on,rx
+
+    def test_recovery_missing_on_event_does_not_use_command_time(self):
+        r,on,rx=self.recovery_fixture()
+        pair=summarize_network(source_events()+[rx],r)['per_receiver'][0]
+        self.assertIsNone(pair['recovery_delay_ms'])
+        self.assertEqual('ON_EVENT_MISSING',pair['recovery_unavailable_reason'])
+        for changes in ({'confirmed_enabled':False},{'rx_enabled':False},{'node_id':TARGETS[1]},
+                        {'scope':0},{'local_boot_id':11}):
+            with self.subTest(changes=changes):
+                pair=summarize_network(source_events()+[{**on,**changes},rx],r)['per_receiver'][0]
+                self.assertIsNone(pair['recovery_delay_ms'])
+
+    def test_recovery_requires_finite_monotonic_samples(self):
+        r,on,rx=self.recovery_fixture()
+        for value in (None,True,-1,'18',float('nan'),float('inf')):
+            for target in ('on','rx'):
+                with self.subTest(value=value,target=target):
+                    events=[{**on,'monotonic_ms':value} if target=='on' else on,
+                            {**rx,'monotonic_ms':value} if target=='rx' else rx]
+                    pair=summarize_network(source_events()+events,r)['per_receiver'][0]
+                    self.assertIsNone(pair['recovery_delay_ms'])
+                    self.assertEqual('MONOTONIC_MISSING',pair['recovery_unavailable_reason'])
+
+    def test_recovery_rejects_clock_domain_and_local_epoch_mismatch(self):
+        r,on,rx=self.recovery_fixture()
+        for changes,reason in (({'clock_domain':None},'CLOCK_DOMAIN_UNVERIFIED'),
+                               ({'clock_domain':'android_elapsed_realtime'},'CLOCK_DOMAIN_UNVERIFIED'),
+                               ({'local_boot_id':13},'CLOCK_EPOCH_UNVERIFIED'),
+                               ({'local_boot_id':None},'CLOCK_EPOCH_UNVERIFIED'),
+                               ({'monotonic_ms':9},'RX_BEFORE_ON')):
+            with self.subTest(changes=changes):
+                pair=summarize_network(source_events()+[on,{**rx,**changes}],r)['per_receiver'][0]
+                self.assertIsNone(pair['recovery_delay_ms'])
+                self.assertEqual(reason,pair['recovery_unavailable_reason'])
+
+    def test_recovery_zero_time_and_duplicate_rx_keep_first_physical_sample(self):
+        r,on,rx=self.recovery_fixture();on['monotonic_ms']=0;rx['monotonic_ms']=8
+        duplicate={**rx,'timestamp_ms':1150,'monotonic_ms':58}
+        metric=summarize_network(source_events()+[on,rx,duplicate],r)
+        self.assertEqual(8,metric['per_receiver'][0]['recovery_delay_ms'])
+        self.assertEqual((1,1,0,100),(metric['R'],metric['U'],metric['ldr_percent'],metric['e2e_mean_ms']))
+
+    def test_recovery_uses_current_activation_epoch(self):
+        r,on,rx=self.recovery_fixture()
+        previous={**on,'local_boot_id':11,'monotonic_ms':1,'timestamp_ms':1001}
+        pair=summarize_network(source_events()+[previous,on,rx],r)['per_receiver'][0]
+        self.assertEqual(8,pair['recovery_delay_ms'])
+        self.assertEqual(12,pair['recovery_local_boot_id'])
 
     def test_export_raw_control_setup_numeric_tables_three_methods(self):
         events=source_events()+[received(n) for n in TARGETS]+[
@@ -195,9 +265,12 @@ class MplExperimentTest(unittest.TestCase):
                        'frame_type':'status','peer_id':3,'peer_boot':2,
                        'physical_received_monotonic_ms':900,'monotonic_ms':1000,
                        'transmission_sequence':1,'scheduler_semantics':SEMANTICS})
+        r,on,rx=self.recovery_fixture()
+        events[3]=rx
+        events.append(on)
         manifest={'session_id':'fixture','scheduler_semantics':SEMANTICS,'mpl_parameters':DEFAULTS,
                   'experiment_methods':list(METHODS),'neighbor_scenarios':['S0_MAIN'],
-                  'synthetic_data':True,'trials':{'t1':{**record(),'mode':'trickle_mpl'}}}
+                  'synthetic_data':True,'trials':{'t1':{**r,'mode':'trickle_mpl'}}}
         with tempfile.TemporaryDirectory() as d:
             root=Path(d);raw=root/'raw';raw.mkdir()
             (raw/'events.jsonl').write_text('\n'.join(json.dumps(e) for e in events))
@@ -214,6 +287,10 @@ class MplExperimentTest(unittest.TestCase):
             self.assertEqual(4,wb['Method Scenario Summary'].max_row)
             headers=[c.value for c in wb['Trial Metrics'][1]]
             self.assertIsInstance(wb['Trial Metrics'].cell(2,headers.index('dsr_percent')+1).value,(int,float))
+            receivers=list(wb['Receivers'].values)
+            self.assertEqual(8,receivers[1][receivers[0].index('recovery_delay_ms')])
+            self.assertIsInstance(receivers[1][receivers[0].index('recovery_on_monotonic_ms')],int)
+            self.assertEqual('same_node_monotonic_event',receivers[1][receivers[0].index('recovery_time_basis')])
             for ws in wb:
                 for table in ws.tables.values():self.assertEqual(len(ws[1]),len(table.tableColumns))
 

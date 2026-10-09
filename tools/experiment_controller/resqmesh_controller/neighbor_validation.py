@@ -43,6 +43,9 @@ def _expiry_evidence(samples, at):
 
 def validate_logs(events, manifest):
     from .neighbor_experiment import SOURCE, TARGETS, flatten, stable_id, summarize_network
+    from .neighbor_testbed import testbed, evidence_profile, recovery_profile
+    design = testbed(manifest)
+    SOURCE, TARGETS = design.source, design.targets
     results = []
     synthetic = manifest.get("synthetic_data") is True
     for trial_id, record in manifest.get("trials", {}).items():
@@ -50,6 +53,9 @@ def validate_logs(events, manifest):
         samples = [flatten(e) for e in events]
         samples = [e for e in samples if e.get("session_id") == manifest.get("session_id")
                    and e.get("trial_id") == trial_id and e.get("scope") in (None, scope)]
+        if evidence_profile(manifest):
+            from .esp_only_validation import scenario_checks
+            results.extend(scenario_checks(samples, {**record, "trial_id": trial_id}, manifest))
         def at(e):
             return e.get("monotonic_ms", e.get("elapsed_realtime_ms", e.get("timestamp_ms", 0))) or 0
         def later(e, kind):
@@ -64,6 +70,14 @@ def validate_logs(events, manifest):
             from .mpl_validation import checks
             for name, good, bad, evidence in checks(samples,manifest.get('mpl_parameters',{})):
                 put(name,good,bad,evidence)
+            if recovery_profile(manifest) and not design.esp_only:
+                control = [e for e in samples if e.get("node_id") == SOURCE
+                           and e.get("event_type") == "MPL_RX_CLASSIFIED" and e.get("frame_type") == "status"
+                           and e.get("scope") == scope and e.get("peer_id") in design.adjacency(SOURCE)
+                           and e.get("snapshot_complete") is True
+                           and all(e.get(k) is not None for k in ("peer_boot", "transmission_sequence"))]
+                put("ANDROID_CONTROL_RX", bool(control), False,
+                    "Perlu klasifikasi CONTROL valid dari tetangga allowlist pada Android; konfigurasi bukan bukti RX.")
         if record["mode"] == "trickle_neighbor_status":
             decisions = [e for e in samples if e.get("event_type") in {"NEIGHBOR_TX_ALLOWED", "NEIGHBOR_TX_SUPPRESSED"}
                          and all(isinstance(e.get(k), int) for k in ("have_count", "missing_count", "unknown_count"))]
@@ -131,7 +145,7 @@ def validate_logs(events, manifest):
             if not node_events:
                 missing.append(node)
             # Only ESP serial logs promise contiguous event_sequence; Android DB IDs do not.
-            if node not in TARGETS:
+            if node not in TARGETS and not design.esp_only:
                 continue
             valid = bool(node_events) and all(_positive_counter(e.get("event_sequence")) for e in node_events)
             if not valid:
@@ -153,17 +167,27 @@ def validate_logs(events, manifest):
                    for marker in ("TRIAL_WINDOW_STARTED", "TRIAL_WINDOW_ENDED")) for n in (SOURCE, *TARGETS))
         put("LOG_COMPLETENESS", complete, bool(gaps or conflicts),
             f"Node tanpa log: {missing}; counter ESP hilang/tidak valid: {missing_sequences}; "
-            f"gap event_sequence: {gaps}; counter berkonflik: {conflicts}; perlu marker awal/akhir keenam node; "
-            "Android tidak memiliki kontrak event_sequence kontigu")
+            f"gap event_sequence: {gaps}; counter berkonflik: {conflicts}; "
+            f"perlu marker awal/akhir {len(design.node_ids)} node; "
+            + ("seluruh ESP, termasuk SOURCE, wajib memiliki event_sequence kontigu"
+               if design.esp_only else "Android tidak memiliki kontrak event_sequence kontigu"))
         expected = record.get("evidence", {})
         actual = None
         if all(record.get(k) is not None for k in ("observation_started_at_ms", "observation_ended_at_ms")):
-            actual = summarize_network(samples, {**record, "trial_id": trial_id, "session_id": manifest.get("session_id"), "scope": scope})
+            actual = summarize_network(samples, {**record, "testbed_profile": manifest.get("testbed_profile"), "trial_id": trial_id, "session_id": manifest.get("session_id"), "scope": scope})
         keys = ("M", "N", "U", "R", "data_tx", "control_tx", "network_overhead", "dsr_percent", "ldr_percent", "e2e_mean_ms")
         comparable = actual is not None and all(k in expected for k in keys)
         equal = comparable and all(expected[k] == actual[k] or (isinstance(expected[k], (int, float)) and isinstance(actual[k], (int, float)) and abs(expected[k]-actual[k]) < 1e-6) for k in keys)
         put("METRICS_RECOMPUTE_MATCH", equal and complete, comparable and not equal,
             "Rumus dihitung ulang dari burst/RX unik; PASS membutuhkan arsip lengkap dan nilai evidence manifest")
+        if recovery_profile(manifest):
+            fields = ("recovery_receivers", "recovery_mean_ms", "recovery_eligible_targets",
+                      "recovery_received_targets", "recovery_defined_targets")
+            compared = actual is not None and all(k in expected for k in fields)
+            same = compared and all(expected[k] == actual[k] for k in fields)
+            verified = actual is not None and actual["recovery_unverified_targets"] == 0
+            put("RECOVERY_METRICS_RECOMPUTE_MATCH", same and complete and verified, compared and not same,
+                "Pemulihan dihitung ulang dari ON/RX lokal; RX hilang tetap sah, bukti waktu kurang INCONCLUSIVE.")
     return results
 
 

@@ -26,21 +26,23 @@ def descriptive(values):
             "min": min(values) if values else None, "max": max(values) if values else None}
 
 
-def aggregate(rows, receivers, scenarios, methods):
+def aggregate(rows, receivers, scenarios, methods, target_count=5):
     summaries, stats = [], []
     for scenario in scenarios:
         for method in methods:
             group = [r for r in rows if r["scenario"] == scenario and r["method"] == method]
             valid = [r for r in group if r["valid"]]
+            if any(t.get("N", target_count) != target_count for t in group):
+                raise ValueError("Mixed target counts cannot be aggregated as one testbed")
             m, u, r = (sum(t.get(k, 0) or 0 for t in valid) for k in ("M", "U", "R"))
             delays = [p["e2e_latency_ms"] for p in receivers if p["scenario"] == scenario
                       and p["method"] == method and p["valid"] and p.get("e2e_latency_ms") is not None]
             summary = {"method": method, "scenario": scenario,
-                       "analysis_group": "utama" if scenario == "S0_MAIN" else "pendukung",
+                       "analysis_group": "utama" if scenario in {"S0_MAIN", "S0_STABLE"} else "pendukung",
                        "valid_trials": len(valid), "invalid_trials": sum(t["result"] == "INVALID" for t in group),
                        "failed_delivery_trials": sum(t["result"] == "FAILED_DELIVERY" for t in valid),
-                       "M": m, "N": 5, "U": u, "R": r,
-                       "dsr_percent": 100*u/(m*5) if m else None,
+                       "M": m, "N": target_count, "U": u, "R": r,
+                       "dsr_percent": 100*u/(m*target_count) if m else None,
                        "ldr_percent": 100*(r-u)/r if r else None,
                        "successful_pairs": sum(t.get("successful_pairs", 0) or 0 for t in valid),
                        "defined_delay_pairs": len(delays),
@@ -48,8 +50,17 @@ def aggregate(rows, receivers, scenarios, methods):
                        "aggregate_basis": "DSR/LDR: rasio jumlah; E2E: pasangan sukses, bukan rata-rata trial"}
             recovery = [p['recovery_delay_ms'] for p in receivers if p['scenario']==scenario
                         and p['method']==method and p['valid'] and p.get('recovery_delay_ms') is not None]
-            summary.update(failed_pairs=m*5-u, recovery_pairs=len(recovery),
+            summary.update(failed_pairs=m*target_count-u, recovery_pairs=len(recovery),
                            recovery_mean_ms=statistics.mean(recovery) if recovery else None)
+            if any(t.get("recovery_measurement_version") for t in group):
+                for field in ("recovery_eligible_targets", "recovery_received_targets", "recovery_defined_targets",
+                              "recovery_unreceived_targets", "recovery_unverified_targets"):
+                    summary[field] = sum(t.get(field, 0) for t in valid)
+                trial_recovery = descriptive([t.get("recovery_mean_ms") for t in valid])
+                summary["recovery_mean_ms_trial_mean"] = trial_recovery["mean"]
+                stats.append({"method": method, "scenario": scenario, "metric": "recovery_mean_ms_trial_mean",
+                              "label": "Pemulihan rata-rata per trial dengan waktu terdefinisi", "unit": "ms",
+                              "valid_trials": len(valid), "invalid_trials": summary["invalid_trials"], **trial_recovery})
             stats.append({'method':method,'scenario':scenario,'metric':'recovery_delay_ms',
                           'label':'Delay pemulihan setelah ON terkonfirmasi','unit':'ms',
                           'valid_trials':len(valid),'invalid_trials':summary['invalid_trials'],

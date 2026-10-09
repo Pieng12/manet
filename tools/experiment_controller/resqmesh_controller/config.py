@@ -249,6 +249,16 @@ def research_fingerprint(config: dict[str, Any]) -> str:
 
 
 def smoke_matches_config(smoke_report: dict[str, Any], config: dict[str, Any]) -> bool:
+    from .neighbor_testbed import recovery_profile
+    if recovery_profile(config) and (
+        smoke_report.get("testbed_profile") != config["testbed_profile"]
+        or smoke_report.get("firmware_build_id") != config["firmware_build_id"]
+        or smoke_report.get("android_build_id") != config.get("android_build_id")
+        or smoke_report.get("core_checks_passed") is not True
+        or smoke_report.get("mechanism_result") != "PASS"
+        or smoke_report.get("batch_complete") is not True
+    ):
+        return False
     return (
         smoke_report.get("passed") is True
         and smoke_report.get("config_fingerprint") == research_fingerprint(config)

@@ -204,7 +204,8 @@ void emit(const char* eventType, const Packet* packet = nullptr,
   document["trial_id"] = config.trialId;
   document["mode"] = modeName(config.mode);
   document["role"] = roleName(config.role);
-  if(config.mode==Mode::Mpl) {document["scheduler_semantics"]=kMplSemantics;document["local_boot_id"]=incarnation;}
+  if(config.mode==Mode::Mpl) document["scheduler_semantics"]=kMplSemantics;
+  if(config.neighborProfile) document["local_boot_id"]=incarnation;
   if(mplEvent) {
     const auto& v=*mplEvent;
     document["timer_kind"]=v.kind;document["timer_key"]=v.key;
@@ -327,7 +328,7 @@ void respond(const String& command, const String& commandId, bool ok,
     else document["confirmed_enabled"] = nullptr;
     document["rx_enabled"] = rxParticipation;
     document["tx_enabled"] = txParticipation;
-    if(config.mode==Mode::Mpl) document["local_boot_id"]=incarnation;
+    if(config.neighborProfile) document["local_boot_id"]=incarnation;
     document["native_monotonic_ms"] = millis();
     if(wallClockValid) document["timestamp_ms"] = wallTimeMs();
   }
@@ -1005,7 +1006,7 @@ void emitReadiness(const String& commandId) {
   document["measurement_timing_version"] = 2;
   document["method_design_version"] = 3;
   document["suppression_enabled"] = suppressionEnabled(config.mode);
-  document["supported_modes"] = "basic_flooding,trickle_no_suppression,trickle,trickle_neighbor_status";
+  document["supported_modes"] = "basic_flooding,trickle_no_suppression,trickle,trickle_neighbor_status,trickle_mpl";
   document["trickle_imin_ms"] = kIminMs;
   document["trickle_imax_ms"] = kImaxMs;
   document["trickle_k"] = 1;

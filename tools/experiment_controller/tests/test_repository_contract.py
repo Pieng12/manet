@@ -1,4 +1,5 @@
 import json
+import re
 import unittest
 from pathlib import Path
 
@@ -9,6 +10,36 @@ ROOT = Path(__file__).resolve().parents[3]
 
 
 class RepositoryContractTest(unittest.TestCase):
+    def test_neighbor_clock_identity_and_android_scan_cover_all_profile_modes(self) -> None:
+        firmware = (ROOT / "firmware/esp32c3/src/main.cpp").read_text(encoding="utf-8")
+        self.assertEqual(2, firmware.count('if(config.neighborProfile) document["local_boot_id"]=incarnation;'))
+        runtime = (ROOT / "lib/services/neighbor_runtime.dart").read_text(encoding="utf-8")
+        self.assertIn("if (enabled) 'local_boot_id': _boot", runtime)
+        manager = (ROOT / "android/app/src/main/kotlin/com/example/pkmproject/NativeBleManager.kt").read_text(encoding="utf-8")
+        self.assertIn("scanManufacturerPrefixes().map { prefix ->", manager)
+        self.assertIn("byteArrayOf(0x52, 0x4D)", manager)
+        self.assertIn("byteArrayOf(0x52, 0x4E)", manager)
+
+    def test_firmware_readiness_lists_all_supported_modes(self) -> None:
+        firmware = (ROOT / "firmware" / "esp32c3" / "src" / "main.cpp").read_text(
+            encoding="utf-8"
+        )
+        assignment = re.search(
+            r'document\["supported_modes"\]\s*=\s*("[^"\n]*")\s*;', firmware
+        )
+        self.assertIsNotNone(assignment)
+        modes = json.loads(assignment.group(1)).split(",")
+        self.assertCountEqual(
+            [
+                "basic_flooding",
+                "trickle_no_suppression",
+                "trickle",
+                "trickle_neighbor_status",
+                "trickle_mpl",
+            ],
+            modes,
+        )
+
     def test_native_usb_cdc_flags_are_guarded(self) -> None:
         platformio = (ROOT / "firmware" / "esp32c3" / "platformio.ini").read_text(
             encoding="utf-8"

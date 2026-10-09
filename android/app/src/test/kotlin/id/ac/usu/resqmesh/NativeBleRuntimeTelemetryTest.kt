@@ -7,6 +7,36 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class NativeBleRuntimeTelemetryTest {
+    private fun matchesManufacturerPrefix(payload: ByteArray): Boolean =
+        NativeBleManager.scanManufacturerPrefixes().any { prefix ->
+            payload.size >= prefix.size && prefix.indices.all { payload[it] == prefix[it] }
+        }
+
+    @Test
+    fun scanPrefixesAcceptInnerProtocolAndNeighborDataAndControl() {
+        fun hex(value: String) = value.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+        val inner = hex("524d1234567800002a0000000000000101")
+        val data = hex("524e0100000000010000000200000003000000040001524d1234567800002a0000000000000101")
+        val control = hex("524e0101000000010000000200000003000000040001")
+        assertTrue(NeighborTransport.validPayload(inner))
+        assertTrue(NeighborTransport.validPayload(data))
+        assertTrue(NeighborTransport.validPayload(control))
+        for (payload in listOf(inner, data, control)) assertTrue(matchesManufacturerPrefix(payload))
+        assertEquals(2, NativeBleManager.scanManufacturerPrefixes().size)
+        assertEquals(0xFFFF, NativeBleConfig.MANUFACTURER_ID)
+    }
+
+    @Test
+    fun scanPrefixesRejectUnrelatedAndTruncatedManufacturerData() {
+        for (payload in listOf(byteArrayOf(), byteArrayOf(0x52), byteArrayOf(0x52, 0x4F), byteArrayOf(0x53, 0x4E))) {
+            assertFalse(matchesManufacturerPrefix(payload))
+        }
+        // Matching a prefix never substitutes for full durable payload validation.
+        val truncated = byteArrayOf(0x52, 0x4E)
+        assertTrue(matchesManufacturerPrefix(truncated))
+        assertFalse(NeighborTransport.validPayload(truncated))
+    }
+
     @Test
     fun repeatedScanStartsReuseOnlyTheSameActiveConfiguration() {
         assertTrue(NativeBleManager.canReuseScan(true, false, false))
