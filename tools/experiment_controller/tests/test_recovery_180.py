@@ -1,4 +1,5 @@
 import copy
+import base64
 import json
 import tempfile
 import unittest
@@ -89,6 +90,149 @@ class RecoveryFake(EspFake):
 
 
 class Recovery180Test(unittest.TestCase):
+    def test_android_summary_matches_final_result_after_scenario_and_cleanup(self):
+        class LateActivation(RecoveryFake):
+            def command(self, name, args):
+                if name == "set_node_participation" and args["enabled"]:
+                    self.clock.sleep(20)
+                return super().command(name, args)
+
+        for method in METHODS:
+            for case in ("normal", "late_activation", "cleanup_failure", "quiet_failure", "failed_delivery"):
+                with self.subTest(method=method, case=case), tempfile.TemporaryDirectory() as d:
+                    cfg, clock = config(True), Clock()
+                    nodes = [RecoveryFake(n, cfg, clock) for n in cfg["nodes"]]
+                    scenario = "S1_BRANCH_DELAYED" if case == "late_activation" else "S0_STABLE"
+                    if case == "late_activation":
+                        nodes[-1] = LateActivation(cfg["nodes"][-1], cfg, clock)
+                    elif case == "cleanup_failure":
+                        nodes[-1].failures["reset_trial"] = DeviceError("stop unconfirmed")
+                    elif case == "failed_delivery":
+                        nodes[-1].missing_delivery = True
+                    ctrl = NeighborExperimentController(cfg, nodes, Path(d), sleep=clock.sleep)
+                    original_readiness = ctrl.readiness
+
+                    def readiness(*args, **kwargs):
+                        if case == "quiet_failure" and kwargs.get("after_reset"):
+                            raise DeviceError("radio not quiet")
+                        return original_readiness(*args, **kwargs)
+
+                    spec = TrialSpec(method, scenario, 1)
+                    with patch.object(ctrl, "readiness", side_effect=readiness), patch.multiple(
+                        "resqmesh_controller.controller.time", monotonic=clock.monotonic, time_ns=clock.time_ns
+                    ):
+                        if case in {"cleanup_failure", "quiet_failure"}:
+                            with self.assertRaisesRegex(DeviceError, "CLEANUP_UNCONFIRMED"):
+                                ctrl.run_trial(spec)
+                        else:
+                            ctrl.run_trial(spec)
+                    record = ctrl.manifest["trials"][spec.trial_id]
+                    expected = "SUCCESS" if case == "normal" else "FAILED_DELIVERY" if case == "failed_delivery" else "INVALID"
+                    self.assertEqual(expected, record["result"])
+                    stored = [json.loads(base64.b64decode(args["summary_base64"]))
+                              for name, args in nodes[0].commands if name == "store_neighbor_metrics"]
+                    self.assertEqual(1, len(stored))
+                    self.assertEqual(expected, stored[0]["result"])
+                    self.assertEqual(record["invalid_reasons"], stored[0]["invalid_reasons"])
+                    self.assertEqual(record["reset_verified"], stored[0]["reset_verified"])
+                    for field, value in record["evidence"].items():
+                        self.assertEqual(value, stored[0][field])
+                    commands = nodes[0].commands
+                    names = [name for name, _ in commands]
+                    self.assertGreater(names.index("store_neighbor_metrics"), names.index("reset_trial"))
+                    finalizations = [args for name, args in commands if name == "finalize_trial"]
+                    self.assertEqual(expected, finalizations[-1]["result"])
+                    self.assertTrue(record["ui_summary_confirmed"])
+                    self.assertTrue(record["ui_trial_result_confirmed"])
+                    if case in {"cleanup_failure", "quiet_failure"}:
+                        self.assertEqual(2, len(finalizations))
+                        self.assertIn("RESET_OR_QUIET_PERIOD_FAILED", finalizations[-1]["reason"])
+                        self.assertEqual("export_trial", commands[-2][0])
+                    else:
+                        self.assertEqual(1, len(finalizations))
+                    archived = json.loads(ctrl.manifest_path.read_text())["trials"][spec.trial_id]
+                    self.assertEqual(record, archived)
+
+    def test_android_summary_failure_does_not_change_measurement_or_cleanup(self):
+        with tempfile.TemporaryDirectory() as d:
+            cfg, clock = config(True), Clock()
+            nodes = [RecoveryFake(n, cfg, clock) for n in cfg["nodes"]]
+            nodes[0].failures["store_neighbor_metrics"] = DeviceError("ADB disconnected")
+            ctrl = NeighborExperimentController(cfg, nodes, Path(d), sleep=clock.sleep)
+            with patch.multiple("resqmesh_controller.controller.time", monotonic=clock.monotonic, time_ns=clock.time_ns):
+                record = ctrl.run_trial(TrialSpec("basic_flooding", "S0_STABLE", 1))
+            self.assertEqual("SUCCESS", record["result"])
+            self.assertTrue(record["reset_verified"])
+            self.assertFalse(record["ui_summary_confirmed"])
+            self.assertEqual("ADB disconnected", record["ui_summary_error"])
+            self.assertEqual(100, record["evidence"]["dsr_percent"])
+
+    def test_final_reporting_failures_are_recorded_without_overriding_result(self):
+        class ReportingFailure(RecoveryFake):
+            def command(self, name, args):
+                response = super().command(name, args)
+                if args.get("command_id", "").startswith(self.fail_prefix):
+                    return {"ok": False, "error": "report rejected"}
+                return response
+
+        for prefix, flag, error in (("finalize-final-", "ui_trial_result_confirmed", "ui_trial_result_error"),
+                                    ("export-final-", "ui_trial_result_confirmed", "ui_trial_export_error"),
+                                    ("network-summary-final-", "ui_summary_confirmed", "ui_summary_error")):
+            with self.subTest(prefix=prefix), tempfile.TemporaryDirectory() as d:
+                cfg, clock = config(True), Clock()
+                nodes = [RecoveryFake(n, cfg, clock) for n in cfg["nodes"]]
+                nodes[0] = ReportingFailure(cfg["nodes"][0], cfg, clock)
+                nodes[0].fail_prefix = prefix
+                nodes[-1].failures["reset_trial"] = DeviceError("stop unconfirmed")
+                ctrl = NeighborExperimentController(cfg, nodes, Path(d), sleep=clock.sleep)
+                spec = TrialSpec("basic_flooding", "S0_STABLE", 1)
+                with patch.multiple("resqmesh_controller.controller.time", monotonic=clock.monotonic, time_ns=clock.time_ns):
+                    with self.assertRaisesRegex(DeviceError, "CLEANUP_UNCONFIRMED"):
+                        ctrl.run_trial(spec)
+                record = ctrl.manifest["trials"][spec.trial_id]
+                self.assertEqual("INVALID", record["result"])
+                self.assertEqual(["RESET_OR_QUIET_PERIOD_FAILED"], record["invalid_reasons"])
+                self.assertEqual(prefix == "export-final-", record[flag])
+                self.assertIn("report rejected", record[error])
+                self.assertEqual(100, record["evidence"]["dsr_percent"])
+                if prefix != "network-summary-final-":
+                    self.assertTrue(record["ui_summary_confirmed"])
+
+    def test_nonterminal_legacy_record_does_not_publish_a_summary(self):
+        with tempfile.TemporaryDirectory() as d:
+            cfg, clock = config(True), Clock()
+            nodes = [RecoveryFake(n, cfg, clock) for n in cfg["nodes"]]
+            ctrl = NeighborExperimentController(cfg, nodes, Path(d), sleep=clock.sleep)
+            record = {"terminal": False}
+            ctrl.after_trial_cleanup(TrialSpec("basic_flooding", "S0_STABLE", 1), record)
+            self.assertEqual({"terminal": False}, record)
+            self.assertFalse(any(n.commands for n in nodes))
+
+    def test_android_failed_or_interrupted_trial_does_not_publish_stale_success(self):
+        for failure in (DeviceError("trigger failed"), KeyboardInterrupt()):
+            with self.subTest(failure=type(failure).__name__), tempfile.TemporaryDirectory() as d:
+                cfg, clock = config(True), Clock()
+                nodes = [RecoveryFake(n, cfg, clock) for n in cfg["nodes"]]
+                nodes[0].failures["trigger_sos"] = failure
+                ctrl = NeighborExperimentController(cfg, nodes, Path(d), sleep=clock.sleep)
+                spec = TrialSpec("basic_flooding", "S0_STABLE", 1)
+                with patch.multiple("resqmesh_controller.controller.time", monotonic=clock.monotonic, time_ns=clock.time_ns):
+                    if isinstance(failure, KeyboardInterrupt):
+                        with self.assertRaises(KeyboardInterrupt):
+                            ctrl.run_trial(spec)
+                    else:
+                        ctrl.run_trial(spec)
+                record = ctrl.manifest["trials"][spec.trial_id]
+                stored = [json.loads(base64.b64decode(args["summary_base64"]))
+                          for name, args in nodes[0].commands if name == "store_neighbor_metrics"]
+                self.assertEqual(1, len(stored))
+                self.assertEqual("INVALID", stored[0]["result"])
+                self.assertEqual(record["invalid_reasons"], stored[0]["invalid_reasons"])
+                self.assertEqual("all-node-burst-v1", stored[0]["measurement_version"])
+                self.assertEqual(5, stored[0]["N"])
+                self.assertNotIn("dsr_percent", stored[0])
+                self.assertTrue(record["reset_verified"])
+
     def test_examples_plan_blocks_and_old_defaults_unchanged(self):
         for android, stage, count in ((False, "smoke", 9), (True, "smoke", 9), (True, "pilot", 27), (True, "main", 135)):
             cfg = config(android, stage)

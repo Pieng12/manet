@@ -368,6 +368,75 @@ void main() {
   });
 
   test(
+    'final result correction after reset preserves archived events',
+    () async {
+      await commands.execute('configure_session', {
+        ...configureArgs(),
+        'node_id': 'android-source',
+        'transport_profile': 'neighbor_graph_v1',
+        'topology': 'neighbor_graph_v1',
+        'mode': 'basic_flooding',
+        'allowed_transmitters': [123],
+      });
+      await commands.execute('start_trial', {
+        'command_id': 'cleanup-start',
+        'session_id': 'session-external',
+        'trial_id': 'cleanup-trial',
+        'trial_code': 'S0_STABLE',
+      });
+      final initial = <String, dynamic>{
+        'command_id': 'finalize-initial',
+        'trial_id': 'cleanup-trial',
+        'result': 'SUCCESS',
+        'reason': '',
+      };
+      expect((await commands.execute('finalize_trial', initial))['ok'], true);
+      final reset = await commands.execute('reset_trial', {
+        'command_id': 'cleanup-reset',
+        'trial_id': 'cleanup-trial',
+      });
+      expect(reset['archived_events_preserved'], true);
+      final events = await db.query('experiment_events', orderBy: 'id');
+      expect(events, isNotEmpty);
+      final correction = await commands.execute('finalize_trial', {
+        ...initial,
+        'command_id': 'finalize-final-INVALID',
+        'result': 'INVALID',
+        'reason': 'RESET_OR_QUIET_PERIOD_FAILED',
+      });
+      expect(correction['ok'], true);
+      expect(correction['result'], 'INVALID');
+      final replay = await commands.execute('finalize_trial', initial);
+      expect(replay['idempotent_replay'], true);
+      expect((await db.query('experiment_trials')).single['result'], 'INVALID');
+      expect(
+        (await db.query('experiment_trials')).single['failure_reason'],
+        'RESET_OR_QUIET_PERIOD_FAILED',
+      );
+      final summary = <String, dynamic>{
+        'session_id': 'session-external',
+        'trial_id': 'cleanup-trial',
+        'measurement_version': 'all-node-burst-v1',
+        'N': 5,
+        'result': 'INVALID',
+        'invalid_reasons': ['RESET_OR_QUIET_PERIOD_FAILED'],
+        'reset_verified': false,
+        'dsr_percent': 100,
+      };
+      final stored = await commands.execute('store_neighbor_metrics', {
+        'command_id': 'network-summary-final-INVALID',
+        'summary_base64': base64Encode(utf8.encode(jsonEncode(summary))),
+      });
+      expect(stored['ok'], true);
+      final status = await commands.execute('get_neighbor_status', {
+        'command_id': 'cleanup-summary-status',
+      });
+      expect(status['network_summary'], summary);
+      expect(await db.query('experiment_events', orderBy: 'id'), events);
+    },
+  );
+
+  test(
     'merged recovery summary uses existing storage and retains null delays',
     () async {
       await commands.execute('configure_session', {

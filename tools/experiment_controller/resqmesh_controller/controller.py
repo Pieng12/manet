@@ -756,7 +756,7 @@ class ExperimentController:
             for node in self.nodes:
                 if node.transport != "adb":
                     continue
-                node.command(
+                finalized = node.command(
                     "finalize_trial",
                     {
                         "command_id": self._command_id("finalize", spec.trial_id, node.node_id),
@@ -765,6 +765,8 @@ class ExperimentController:
                         "reason": ",".join(invalid_reasons),
                     },
                 )
+                if finalized.get("ok") is True:
+                    record.setdefault("android_finalized_results", {})[node.node_id] = result_name
                 record.setdefault("exports", {})[node.node_id] = node.command(
                     "export_trial",
                     {
@@ -818,6 +820,7 @@ class ExperimentController:
                     set(record.get("invalid_reasons", [])) | {"RESET_OR_QUIET_PERIOD_FAILED"}
                 )
             self._save_manifest()
+            self.after_trial_cleanup(spec, record)
         return record
 
     def _condition_counts(self) -> dict[tuple[str, str], Counter[str]]:
@@ -832,6 +835,9 @@ class ExperimentController:
         return counts
 
     def before_trigger(self, spec: TrialSpec) -> None:
+        pass
+
+    def after_trial_cleanup(self, spec: TrialSpec, record: dict[str, Any]) -> None:
         pass
 
     def observation_window_seconds(self, spec: TrialSpec) -> float:

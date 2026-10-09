@@ -657,25 +657,61 @@ class NeighborExperimentController(ExperimentController):
             invalid.append("SUCCESSFUL_SOURCE_DATA_START_MISSING")
         if not any(e.get("event_type")=="DATA_BURST_STARTED" and e.get("node_id")==SOURCE and e.get("message_key")==message_key for e in events):
             invalid.append("SOURCE_DATA_START_MISSING")
-        source = next(n for n in self.nodes if n.node_id == SOURCE)
-        summary = {"session_id": record["session_id"], "trial_id": record["device_trial_id"],
-                   "method": spec.mode, "scenario": spec.hypothesis, **metrics,
-                   "result": "INVALID" if invalid else "SUCCESS" if metrics["U"] == len(TARGETS) else "FAILED_DELIVERY"}
-        if source.transport == "adb":
-            try:
-                response = source.command("store_neighbor_metrics", {
-                    "command_id": self._command_id("network-summary", spec.trial_id),
-                    "summary_base64": base64.b64encode(json.dumps(summary, separators=(",", ":")).encode()).decode()})
-                record["ui_summary_confirmed"] = response.get("ok") is True
-            except DeviceError as error:
-                record["ui_summary_confirmed"] = False
-                record["ui_summary_error"] = str(error)
         if evidence_profile(self.config):
             from .esp_only_validation import scenario_checks
             record["scenario_checks"] = scenario_checks(events, record, self.manifest)
             if any(c["check"] in {"ESP_SCENARIO_PARTICIPATION", "RECOVERY_SCENARIO_PARTICIPATION"} and c["result"] != "PASS" for c in record["scenario_checks"]):
                 invalid.append("ESP_SCENARIO_PARTICIPATION_UNVERIFIED")
         return ("INVALID" if invalid else "SUCCESS" if metrics["U"] == len(TARGETS) else "FAILED_DELIVERY"), invalid, metrics
+
+    def after_trial_cleanup(self, spec, record):
+        if not record.get("terminal") or record.get("result") not in {"SUCCESS", "FAILED_DELIVERY", "INVALID"}:
+            return
+        source = next(n for n in self.nodes if n.node_id == self.testbed.source)
+        if source.transport != "adb":
+            return
+        final_result = record["result"]
+        finalized = record.setdefault("android_finalized_results", {})
+        record["ui_trial_result_confirmed"] = finalized.get(source.node_id) == final_result
+        # Cleanup can invalidate a result already finalized/exported on the phone.
+        if not record["ui_trial_result_confirmed"]:
+            try:
+                response = source.command("finalize_trial", {
+                    "command_id": self._command_id("finalize-final", spec.trial_id, final_result),
+                    "trial_id": record["device_trial_id"], "result": final_result,
+                    "reason": ",".join(record.get("invalid_reasons", []))})
+                if response.get("ok") is not True:
+                    raise DeviceError(f"finalize final result failed: {response}")
+                finalized[source.node_id] = final_result
+                record["ui_trial_result_confirmed"] = True
+            except DeviceError as error:
+                record["ui_trial_result_error"] = str(error)
+            if record["ui_trial_result_confirmed"]:
+                try:
+                    response = source.command("export_trial", {
+                        "command_id": self._command_id("export-final", spec.trial_id, final_result),
+                        "session_id": record["session_id"], "trial_id": record["device_trial_id"]})
+                    if response.get("ok") is not True:
+                        raise DeviceError(f"export final result failed: {response}")
+                    record.setdefault("exports", {})[source.node_id] = response
+                except DeviceError as error:
+                    record["ui_trial_export_error"] = str(error)
+        summary = {"measurement_version": "all-node-burst-v1", "N": len(self.testbed.targets),
+                   **record.get("evidence", {}), "session_id": record["session_id"],
+                   "trial_id": record["device_trial_id"], "method": spec.mode, "scenario": spec.hypothesis,
+                   "result": final_result, "invalid_reasons": record.get("invalid_reasons", []),
+                   "reset_verified": record.get("reset_verified") is True}
+        try:
+            response = source.command("store_neighbor_metrics", {
+                "command_id": self._command_id("network-summary-final", spec.trial_id, final_result),
+                "summary_base64": base64.b64encode(json.dumps(summary, separators=(",", ":")).encode()).decode()})
+            record["ui_summary_confirmed"] = response.get("ok") is True
+            if not record["ui_summary_confirmed"]:
+                record["ui_summary_error"] = str(response)
+        except DeviceError as error:
+            record["ui_summary_confirmed"] = False
+            record["ui_summary_error"] = str(error)
+        self._save_manifest()
 
     def run_trial(self, spec):
         result = super().run_trial(spec)
